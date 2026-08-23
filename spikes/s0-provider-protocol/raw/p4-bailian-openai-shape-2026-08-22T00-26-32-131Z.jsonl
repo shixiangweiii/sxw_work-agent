@@ -1,0 +1,3 @@
+{"seq":0,"kind":"meta","at":"2026-08-22T00:26:32.133Z","payload":{"probe":"p4","provider":"bailian-openai-shape","model":"qwen3.7-plus","params":{},"dryRun":false,"recordedAt":"2026-08-22T00:26:32.132Z","node":"v22.22.3","sdkVersions":{"@anthropic-ai/sdk":"0.65.0","openai":"6.49.0"}}}
+{"seq":1,"kind":"step","at":"2026-08-22T00:26:32.133Z","payload":{"label":"是否存在预估端点"}}
+{"seq":2,"kind":"request","at":"2026-08-22T00:26:32.136Z","payload":{"label":"尝试 /tokenize 类端点","body":{"note":"探测该实现是否提供 token 预估"}}}

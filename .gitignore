@@ -3,3 +3,8 @@
 out
 target
 bin
+
+# 凭证。根 .env 存着 deepseek / dashscope 两家的 API Key。
+.env
+.env.*
+!.env.example

@@ -1,0 +1,35 @@
+{
+  "name": "s0-provider-protocol",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Spike 0: Provider 协议现实核对。一次性、可丢弃、不进主干依赖。",
+  "scripts": {
+    "p0": "tsx src/probes/p0-discovery.ts",
+    "p1": "tsx src/probes/p1-parallel-toolcalls.ts",
+    "p2": "tsx src/probes/p2-verbatim-blocks.ts",
+    "p3": "tsx src/probes/p3-stream-abort.ts",
+    "p4": "tsx src/probes/p4-token-accounting.ts",
+    "p5": "tsx src/probes/p5-cache-breakpoints.ts",
+    "p6": "tsx src/probes/p6-error-taxonomy.ts",
+    "p7": "tsx src/probes/p7-context-overflow.ts",
+    "p8": "tsx src/probes/p8-oversized-toolresult.ts",
+    "summary": "tsx src/summarize.ts",
+    "must": "npm run p1 && npm run p2 && npm run p3",
+    "should": "npm run p4 && npm run p6 && npm run p7",
+    "defer": "npm run p5 && npm run p8",
+    "typecheck": "tsc --noEmit",
+    "p9": "tsx src/probes/p9-thinking-required.ts",
+    "p10": "tsx src/probes/p10-parallel-switch.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.65.0",
+    "dotenv": "^17.2.0",
+    "openai": "^6.9.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  }
+}
