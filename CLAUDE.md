@@ -20,8 +20,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - 53 个 TS 文件 / ~7600 行，`tsc --noEmit` 干净
 - 14 个 Port 定义，实现 10 个（D-14）
-- 三条验收脚本可跑；真实百炼 Anthropic 端点跑通多轮多工具任务
-- **已知缺口 30 项 ＋ 3 处文档口径待订正**，记录在 [阶段1存量问题清单](sxw_aicoding/存量BUG/阶段1存量问题清单_V20260824.md)——动阶段 2 之前必读，尤其是「阶段 2 开工前」那三条前置（D-2 序列统一、R-6 Compact 落地、R-4 Port 异常收敛）
+- 三条验收脚本 13 条判定全绿；真实百炼 Anthropic 端点跑通多轮多工具任务（2026-08-24 复核）
+- **已知缺口 32 项**（3 处文档口径已于 2026-08-24 订正），记录在 [阶段1存量问题清单](sxw_aicoding/存量BUG/阶段1存量问题清单_V20260824.md)——动阶段 2 之前必读，尤其是「阶段 2 开工前」那**四条前置**：D-2 序列统一、R-6 Compact 落地、R-4 Port 异常收敛、D-3 推理块 count_tokens 探针
 - 进程退出即失忆（transcript 只在内存）；GUI 在阶段 4，阶段 1–3 全部 headless
 
 ## 常用命令
