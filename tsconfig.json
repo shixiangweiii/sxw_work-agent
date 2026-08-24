@@ -1,0 +1,21 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@workagent/harness-runtime": ["packages/harness-runtime/src/index.ts"],
+      "@workagent/harness-runtime/*": ["packages/harness-runtime/src/*"],
+      "@workagent/testkit": ["packages/testkit/src/index.ts"],
+      "@workagent/testkit/*": ["packages/testkit/src/*"],
+      "@workagent/shape-anthropic-messages": ["adapters/shape-anthropic-messages/src/index.ts"],
+      "@workagent/micro-cases": ["cases/micro-cases/src/index.ts"]
+    }
+  },
+  "include": [
+    "packages/*/src/**/*.ts",
+    "adapters/*/src/**/*.ts",
+    "cases/*/src/**/*.ts",
+    "apps/*/src/**/*.ts"
+  ],
+  "exclude": ["node_modules", "spikes"]
+}

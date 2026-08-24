@@ -1,0 +1,60 @@
+{
+  "id": "epcp_bailian_anthropic_qwen37plus",
+  "endpointId": "ep_bailian_anthropic",
+  "shape": "ANTHROPIC_MESSAGES",
+  "modelId": "qwen3.7-plus",
+
+  "_comment_protocol": "全部 false。缺 3 个 tool_result → 200；篡改 tool_call_id → 200；非法 tool schema → 200；disable_parallel_tool_use 静默接受但 4/4/4 完全无效。这不降低不变量的重要性，反而提高了：没有任何外部兜底会替你发现违反。",
+  "protocol": {
+    "validatesToolResultPairing": false,
+    "validatesToolCallId": false,
+    "validatesToolResultOrder": false,
+    "validatesToolDefinitionSchema": false,
+    "validatesToolInputSchema": false,
+    "honorsDisableParallelToolCalls": false
+  },
+
+  "_comment_context": "推理块可删、可改、可去签名、跨轮次可删；服务端无状态（与 DeepSeek 相反）；有 content_block_stop；缓存严格前缀，改第一处即全丢。",
+  "context": {
+    "reasoningBlockRule": "DROPPABLE",
+    "reasoningIsServerSideStateful": false,
+    "hasExplicitBlockCloseEvent": true,
+    "cacheMatching": "STRICT_PREFIX",
+    "supportsExplicitCacheBreakpoints": true
+  },
+
+  "_comment_tokens": "count_tokens 5/5 项 0.00% 误差；每请求固定底数 5（DeepSeek 是 84，差 17 倍）；计费输入含缓存两项，只读 input_tokens 在命中时低估达 85%。",
+  "tokens": {
+    "hasCountTokensEndpoint": true,
+    "countTokensAccuracy": "EXACT",
+    "perRequestBaseTokens": 5,
+    "billedInputFormula": "INPUT_PLUS_CACHE",
+    "usageFieldMap": {
+      "inputTokens": "input_tokens",
+      "outputTokens": "output_tokens",
+      "cacheCreationInputTokens": "cache_creation_input_tokens",
+      "cacheReadInputTokens": "cache_read_input_tokens"
+    }
+  },
+
+  "_comment_errors": "阶段 2 实现（D-17）。连 type/code 字段都没有，message 也最简短（Model not exist.），判别式只能是 HTTP_STATUS + MESSAGE_MATCH。",
+  "errors": {
+    "discriminators": ["HTTP_STATUS", "MESSAGE_MATCH"]
+  },
+
+  "_comment_limits": "阶段 2 实现（D-17）。同平台 OpenAI 形状对 60 万 token 返回 429 insufficient_quota，本形状接受同一 payload。",
+  "limits": {
+    "quotaBeforeContextLimit": false
+  },
+
+  "observedAt": 1755907200000,
+  "probeSuiteVersion": "s0-r3",
+  "sourceEvidenceRefs": [
+    "spikes/s0-provider-protocol/raw/p1-*.jsonl",
+    "spikes/s0-provider-protocol/raw/p2-*.jsonl",
+    "spikes/s0-provider-protocol/raw/p4-*.jsonl",
+    "spikes/s0-provider-protocol/raw/p5-*.jsonl",
+    "spikes/s0-provider-protocol/raw/p10-*.jsonl"
+  ],
+  "confidence": "PROBED"
+}

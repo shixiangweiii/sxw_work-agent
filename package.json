@@ -1,0 +1,30 @@
+{
+  "name": "workagent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "WorkAgent —— 自建生产级 Agent Harness。阶段 1：Headless Walking Skeleton。",
+  "workspaces": [
+    "packages/*",
+    "adapters/*",
+    "cases/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "dev": "tsx apps/cli/src/main.ts",
+    "verify:endpoint-profile": "tsx apps/cli/src/verify/endpoint-profile.ts",
+    "verify:pairing": "tsx apps/cli/src/verify/pairing.ts",
+    "verify:resume": "tsx apps/cli/src/verify/resume.ts",
+    "verify:all": "npm run verify:endpoint-profile && npm run verify:pairing && npm run verify:resume"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.65.0",
+    "dotenv": "^17.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  }
+}

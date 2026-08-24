@@ -8,3 +8,7 @@ bin
 .env
 .env.*
 !.env.example
+
+# 阶段 1 的默认 workspace，跑 CLI 时自动生成
+node_modules
+.workagent-workspace
