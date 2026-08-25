@@ -23,10 +23,11 @@
     "supportsExplicitCacheBreakpoints": true
   },
 
-  "_comment_tokens": "count_tokens 5/5 项 0.00% 误差；每请求固定底数 5（DeepSeek 是 84，差 17 倍）；计费输入含缓存两项，只读 input_tokens 在命中时低估达 85%。",
+  "_comment_tokens": "count_tokens 在**无推理块**的帧上 5/5 项 0.00% 误差（p4）；含推理块时完全不算它（D-3 探针 2026-08-25：同 body 加不加 thinking，765/765 差 0，而真实 usage 是 888）。每请求固定底数 5 那个数出自 OpenAI 形状的探针、且是给本地估算用的，叠在已经精确的 count_tokens 上是错配（D-1，影响 5 token 可忽略，但数据来源纪律要记着）。计费输入含缓存两项，只读 input_tokens 在命中时低估达 85%。",
   "tokens": {
     "hasCountTokensEndpoint": true,
     "countTokensAccuracy": "EXACT",
+    "countTokensExcludesReasoning": true,
     "perRequestBaseTokens": 5,
     "billedInputFormula": "INPUT_PLUS_CACHE",
     "usageFieldMap": {
@@ -49,12 +50,14 @@
 
   "observedAt": 1755907200000,
   "probeSuiteVersion": "s0-r3",
+  "_comment_evidence": "D-1 要的「字段级 evidenceRef」还没做，这里仍是整份声明一个数组。tokens.countTokensExcludesReasoning 这一条的出处是最后一项（npm run probe:reasoning-tokens，2026-08-25），不是 p4。",
   "sourceEvidenceRefs": [
     "spikes/s0-provider-protocol/raw/p1-*.jsonl",
     "spikes/s0-provider-protocol/raw/p2-*.jsonl",
     "spikes/s0-provider-protocol/raw/p4-*.jsonl",
     "spikes/s0-provider-protocol/raw/p5-*.jsonl",
-    "spikes/s0-provider-protocol/raw/p10-*.jsonl"
+    "spikes/s0-provider-protocol/raw/p10-*.jsonl",
+    "apps/cli/src/verify/reasoning-tokens.ts@2026-08-25"
   ],
   "confidence": "PROBED"
 }

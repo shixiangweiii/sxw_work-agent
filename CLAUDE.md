@@ -16,13 +16,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 当前状态
 
-**阶段 1（Headless Walking Skeleton）主体实现完成，下一步是阶段 2（持久化与 Resume）。**
+**阶段 1（Headless Walking Skeleton）主体实现完成，阶段 2 的四条前置已清完，可以开工阶段 2（持久化与 Resume）。**
 
-- 53 个 TS 文件 / ~7600 行，`tsc --noEmit` 干净
+- 57 个 TS 文件 / ~9300 行，`tsc --noEmit` 干净
 - 14 个 Port 定义，实现 10 个（D-14）
-- 三条验收脚本 13 条判定全绿；真实百炼 Anthropic 端点跑通多轮多工具任务（2026-08-24 复核）
-- **已知缺口 32 项**（3 处文档口径已于 2026-08-24 订正），记录在 [阶段1存量问题清单](sxw_aicoding/存量BUG/阶段1存量问题清单_V20260824.md)——动阶段 2 之前必读，尤其是「阶段 2 开工前」那**四条前置**：D-2 序列统一、R-6 Compact 落地、R-4 Port 异常收敛、D-3 推理块 count_tokens 探针
-- 进程退出即失忆（transcript 只在内存）；GUI 在阶段 4，阶段 1–3 全部 headless
+- 四条验收脚本 **25 条判定全绿**；真实百炼 Anthropic 端点复跑归档盘点任务 4 轮完成（2026-08-25）
+- **阶段 2 的四条前置已于 2026-08-25 全部完成**：D-2 序列统一、R-6 Compact 落地、R-4 Port 异常收敛、D-3 推理块探针（推断证实：`count_tokens` 对 thinking 块**一个 token 都不算**）
+- **剩余缺口 29 项**，记录在 [阶段1存量问题清单](sxw_aicoding/存量BUG/阶段1存量问题清单_V20260824.md)——动阶段 2 之前必读第 0.2 / 0.2 追补 / 0.3 节（修了什么、新发现了什么、评审后补了什么）与第 7 节（处置顺序）
+- 进程退出即失忆（transcript 只在内存）；但**事件流会落 JSONL**（`.workagent-runs/`，`--no-trace` 关）
+- GUI 在阶段 4，阶段 1–3 全部 headless
 
 ## 常用命令
 
@@ -32,13 +34,21 @@ npm run typecheck                  # tsc --noEmit，必须干净（每完成一�
 npm run dev -- --task "看看根目录里有什么，然后写一份 summary.txt"
 ```
 
-`--yes` 跳过交互式审批；`--workspace <path>` 指定工作目录（默认 `.workagent-workspace`）。
+`--yes` 跳过交互式审批；`--workspace <path>` 指定工作目录（默认 `.workagent-workspace`）；
+`--trace <file>` 指定事件流落盘位置（默认 `.workagent-runs/run-<ISO>.jsonl`），`--no-trace` 关闭。
 
 ```bash
 npm run verify:endpoint-profile    # 端点差异能否被挡在主循环之外
-npm run verify:pairing             # 批内配对不变量能否守住
-npm run verify:resume              # 消息级恢复够不够用（最关键）
+npm run verify:pairing             # 批内配对不变量能否守住（含 R-4 四条 Port 异常注入）
+npm run verify:resume              # 消息级恢复够不够用（最关键）；C2 段验 D-2 序列统一
+npm run verify:compact             # Compact 是否真的落地（R-6）
 npm run verify:all
+```
+
+一次性探针，**要花钱、发真实请求，不在 `verify:all` 里**：
+
+```bash
+npm run probe:reasoning-tokens     # D-3：count_tokens 算不算推理块
 ```
 
 **不写单测、不引入测试框架**（D-25）。验收以**可运行脚本**交付，打印可读证据供人判断，而不是断言绿灯——与 Spike 0 的探针形态一致。新增验证时按这个形态写，放进 `apps/cli/src/verify/`，用 `harness.ts` 里的 `banner/section/fact/verdict` 输出。
@@ -57,7 +67,7 @@ dashscope_api_key=...
 
 `compose.ts` 用 `override: true` 加载 dotenv 是刻意的——shell 里 export 过的 `ANTHROPIC_BASE_URL` 会把第三方 Key 发往官方端点（Spike 0 期间真实踩过）。`credential-guard.ts` 在启动前断言凭证去向，不是出错后记录。
 
-> 已知缺口：三条 verify 脚本即使全程用 fake model port 也要求真实 `.env` 才能 compose（存量清单 §4.5）。
+> 已知缺口：四条 verify 脚本即使全程用 fake model port 也要求真实 `.env` 才能 compose（存量清单 §4.5）。
 
 ## 架构
 
@@ -98,7 +108,7 @@ while (true) {
 
 | 工具 | 性质 | 分支 |
 |---|---|---|
-| `list_dir` | 只读、快、幂等 | 一：真的重新执行 |
+| `list_dir` | 只读、快、幂等（返回结构化 JSON，不是给人看的定宽文本） | 一：真的重新执行 |
 | `write_note` | 可控慢（`delay_ms`）、可验证、非幂等 | 二：真的调 Observation 读外部世界 |
 | `append_log` | 非幂等且 `verification.mode = "NONE"` | 三：停在 RECOVERY_REQUIRED |
 
@@ -162,7 +172,8 @@ packages/testkit/            fake-endpoint-profile、fake-clock、in-memory-tran
 adapters/shape-anthropic-messages/   唯一允许 import Provider SDK 的地方
 adapters/endpoint-profiles/  端点行为的**数据**形态，不是代码
 cases/micro-cases/           三个工具（见上表）
-apps/cli/                    Composition Root（compose.ts）＋ 入口 ＋ 三条验收脚本
+apps/cli/                    Composition Root（compose.ts）＋ 入口 ＋ 四条验收脚本 ＋ 一次性探针
+  src/trace/file-sink.ts     事件流落 JSONL（header / event / footer 三种行）
 ```
 
 单向依赖（`tsconfig.json` 的 paths 是它的编译期表达）：`apps → packages/adapters/cases`，`Runtime → Ports → Adapters`。禁止反向，禁止 Runtime → Case Package、主循环 → Provider SDK、Context 模块 → Provider SDK、形状适配器 → 端点特定常量。
@@ -176,10 +187,12 @@ apps/cli/                    Composition Root（compose.ts）＋ 入口 ＋ 三�
 | [架构设计 V05](sxw_aicoding/架构设计/WorkAgent架构设计_V20260823_05.md) | **当前实现依据**。代码注释里的 `V05 §x.y` 都指向它 |
 | [上位基线 v0.4](sxw_aicoding/方案讨论/WorkAgent目标定位与技术架构三次对焦讨论进展.md) | 项目目标与上位原则，**与架构设计冲突时以它为准** |
 | [阶段 Roadmap](sxw_aicoding/阶段roadmap/WorkAgent阶段Roadmap_V20260823.md) | 各阶段研究问题与退出门槛 |
-| [阶段 1 存量问题清单](sxw_aicoding/存量BUG/阶段1存量问题清单_V20260824.md) | 已确认存在、本轮未修的 30 项，阶段 2 设计输入 |
+| [阶段 1 存量问题清单](sxw_aicoding/存量BUG/阶段1存量问题清单_V20260824.md) | 剩余 29 项，阶段 2 设计输入。§0.2 记录 2026-08-25 修掉的 9 项，§0.2 追补是评审后补的三项，§0.3 是同批新发现 |
+| [Atlas 阶段 1 Agent 评测报告](评测/Atlas阶段1_Agent评测报告_20260824.md) | 真实端点单任务评测（84/100）。它暴露的四项已于 2026-08-25 修完 |
+| [阶段 1 Bugfix 批次评审](sxw_aicoding/代码评审/2026-08-25/阶段1Bugfix批次评审-zcode.md) | 对上述修复批次的评审。逐条复核结论见存量清单 §0.2 追补 |
 | [阶段 1 实施方案](sxw_aicoding/实施方案设计/阶段1实施方案_V20260823.md) | 分步计划与不得绕过清单 |
 | `WorkAgent调研/ProviderProtocolFacts_*.md` | Spike 0 三轮实测事实（75 份证据 / 4 个端点） |
-| `代码评审/` | 两份阶段 1 评审 |
+| `代码评审/` | 按日期分目录。`2026-08-24/` 两份阶段 1 评审；`2026-08-25/` 一份 Bugfix 批次评审 |
 | `ADR/` | 决策记录；阶段 1 的四份**待补写** |
 | `spikes/s0-provider-protocol/` | 一次性探针，已完成，不进主干依赖（`tsconfig.json` 已 exclude） |
 

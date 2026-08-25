@@ -175,6 +175,40 @@ async function main(): Promise<void> {
       : `三条分支未全部走到或行为不成立（命中：${[...branchesHit].join("、") || "无"}）`,
   );
 
+  // ═══════════════════════════════ B3. 恢复决策给 ABORT 时的收尾
+  section("B3. ABORT 决策：Run 就地收在 CANCELLED");
+  console.log(
+    "   B2 走的是 CONTINUE。ABORT 是另一条**完全不经过主循环**的终止路径 ——\n" +
+      "   facade 在 resume 里直接收尾返回。它因此需要自己发 `LoopTerminated`：\n" +
+      "   U-4 修的是 runLoop 的 finish()，管不到这里。\n",
+  );
+
+  const aborted = await simulateHardCrash("ABORT");
+  fact("Terminal", aborted.afterDecisionTerminal ?? "（未返回）");
+  fact("Outcome", aborted.afterDecisionOutcome ?? "（未结算）");
+  fact("决策后的模型调用次数", aborted.afterDecisionModelCalls);
+  fact("发出了 LoopTerminated", aborted.afterDecisionLoopTerminated);
+  fact("outcome.summary", aborted.afterDecisionSummary?.slice(0, 46) ?? "（空）");
+
+  const abortOk =
+    aborted.afterDecisionTerminal === "ABORTED_TOOLS" &&
+    aborted.afterDecisionOutcome === "CANCELLED" &&
+    // ABORT 是「不继续了」，所以决策之后一次模型都不该调。
+    aborted.afterDecisionModelCalls === 0 &&
+    aborted.afterDecisionLoopTerminated &&
+    // R-7：outcome 得能读出「为什么收在这里」，不能只有一个 CANCELLED。
+    (aborted.afterDecisionSummary?.length ?? 0) > 0;
+
+  verdict(
+    abortOk,
+    abortOk
+      ? "ABORT 决策就地收在 CANCELLED：零次模型调用、发出了具名 LoopTerminated、" +
+        "且 outcome.summary 写明了收尾原因"
+      : `ABORT 路径不成立（terminal=${aborted.afterDecisionTerminal}、` +
+        `outcome=${aborted.afterDecisionOutcome}、模型调用 ${aborted.afterDecisionModelCalls} 次、` +
+        `LoopTerminated=${aborted.afterDecisionLoopTerminated}）`,
+  );
+
   // ═══════════════════════════════════════════════════ C. 对比
   section("C. 与基线对比");
 
@@ -193,6 +227,38 @@ async function main(): Promise<void> {
     bothCompleted && noUnpaired
       ? "消息级恢复成立：丢弃内存状态后，仅凭 transcript 就能重建并继续到终态"
       : "消息级恢复未能重建出可继续的状态",
+  );
+
+  // ═══════════════════════════════════ C2. 事件与 transcript 的定序（D-2）
+  section("C2. 跨 resume 的序号是不是一条线（D-2）");
+  console.log(
+    "   修复前这里是两条独立计数器：runLoop 的 seq 从 0 起、store 的 sequence 从 1 起，\n" +
+      "   而且 **resume 之后 runLoop 的 seq 还会从 0 重新计** —— 第二段的事件 1..n\n" +
+      "   与第一段的 1..m 在 Trace 里根本没法定序。§23.2 的 Layer 2 投影游标依赖这条序列，\n" +
+      "   带着两条计数器进 SQLite 之后就没法收拾了，所以它必须早于持久化做掉。\n",
+  );
+
+  const evSeq = interrupted.eventSequences;
+  const trSeq = interrupted.entries.map((e) => e.sequence);
+  const union = [...evSeq, ...trSeq].sort((a, b) => a - b);
+  const dupes = union.filter((n, i) => i > 0 && n === union[i - 1]);
+  const evMonotonic = evSeq.every((n, i) => i === 0 || n > evSeq[i - 1]!);
+
+  fact("事件条数 / transcript 条数", `${evSeq.length} / ${trSeq.length}`);
+  fact("事件号是否严格递增（含 resume 段）", evMonotonic);
+  fact("事件号与条目号有无重号", dupes.length === 0 ? "无" : dupes.join(", "));
+  fact("并集是否连续无空洞", union.length > 0 && union[union.length - 1] === union.length);
+
+  // 【定】判据是「无重号」＋「事件号跨 resume 仍严格递增」。
+  // 并集连续只是附带的好性质，不作为硬判据 —— resume 路径上 facade 与 runLoop
+  // 交接时用 Math.max 抬过下限，理论上允许留一个空号。
+  const seqOk = dupes.length === 0 && evMonotonic;
+  verdict(
+    seqOk,
+    seqOk
+      ? `事件与 transcript 共用一条单调序列：${evSeq.length} 个事件号跨 resume 仍严格递增，` +
+        `与 ${trSeq.length} 个条目号之间零重号`
+      : `序号有问题：${dupes.length > 0 ? `重号 ${dupes.join(", ")}` : "事件号在 resume 后回退了"}`,
   );
 
   // ═══════════════════════════════════════════ D. 代价的正面陈述
@@ -215,7 +281,7 @@ async function main(): Promise<void> {
       "   比例不低       → 该把粒度往细里推 —— 但那时会有真实数据，而不是推演。\n",
   );
 
-  process.exit(bothCompleted && noUnpaired && b2Ok && budgetInherited ? 0 : 1);
+  process.exit(bothCompleted && noUnpaired && b2Ok && abortOk && seqOk && budgetInherited ? 0 : 1);
 }
 
 interface RunResult {
@@ -231,6 +297,8 @@ interface RunResult {
   resumeBranches: Array<{ toolCallId: string; toolName: string; branch: string }>;
   factsAtInterrupt?: ResumableRunFacts;
   factsAfterResume?: ResumableRunFacts;
+  /** 跨「中断 ＋ resume」两段的全部事件号，用于 D-2 的定序判据。 */
+  eventSequences: number[];
 }
 
 async function runOnce(opts: {
@@ -319,6 +387,9 @@ async function runOnce(opts: {
     }
 
     return {
+      // 同一个 trace sink 贯穿中断前后两段，所以这串号能直接回答
+      // 「resume 之后事件号有没有回退或撞号」（D-2）。
+      eventSequences: trace.events.map((e) => e.sequence),
       terminal: r.value.terminal.reason,
       outcome: r.value.outcome?.kind ?? "未结算（非终态）",
       entries,
@@ -349,7 +420,7 @@ async function runOnce(opts: {
  * 第三个是补上来的：只有前两个时，第三条分支在这套工具集下永远不可达 ——
  * 一条走不到的分支，它的正确性没有任何证据。
  */
-async function simulateHardCrash(): Promise<{
+async function simulateHardCrash(decision: "CONTINUE" | "ABORT" = "CONTINUE"): Promise<{
   injected: string[];
   branches: RunResult["resumeBranches"];
   terminal: string;
@@ -360,9 +431,14 @@ async function simulateHardCrash(): Promise<{
   modelCallsAfterResume: number;
   /** 停住之后不带决策再 resume 一次，是否被拒绝。 */
   bareResumeRejected: boolean;
-  /** 带 CONTINUE 决策 resume，是否真的继续跑起来了。 */
+  /** 带决策 resume 之后跑到了哪。 */
   afterDecisionTerminal?: string;
   afterDecisionModelCalls: number;
+  afterDecisionOutcome?: string;
+  /** 决策后的那段有没有发 `LoopTerminated`（U-4 对 facade 早退出口是否成立）。 */
+  afterDecisionLoopTerminated: boolean;
+  /** outcome.summary 有没有讲清「为什么收在这里」（R-7）。 */
+  afterDecisionSummary?: string;
 }> {
   const ws = tempWorkspace();
   const trace = new CollectingTraceSink();
@@ -474,15 +550,19 @@ async function simulateHardCrash(): Promise<{
       bareResumeRejected = true;
     }
 
-    // ── 带 CONTINUE 决策再 resume：应当销账并真的继续跑
+    // ── 带决策再 resume：CONTINUE 应当销账并真的继续跑；ABORT 应当就地收在 CANCELLED
     let afterDecisionModelCalls = 0;
+    let afterDecisionLoopTerminated = false;
     const gen3 = composed.runtime.resume(runId as RunId, {
-      recoveryDecision: "CONTINUE",
-      recoveryNote: "verify:resume 模拟人工确认",
+      recoveryDecision: decision,
+      recoveryNote: `verify:resume 模拟人工${decision === "ABORT" ? "中止" : "确认"}`,
     });
     let r3 = await gen3.next();
     while (!r3.done) {
       if (r3.value.type === "ModelInvocationCompleted") afterDecisionModelCalls += 1;
+      // U-4 的判据：ABORT 是在 facade 里就地收尾的，绕过整个主循环 ——
+      // 它必须自己发这条事件，否则 Trace 上读不出「恢复被中止」这条路径。
+      if (r3.value.type === "LoopTerminated") afterDecisionLoopTerminated = true;
       r3 = await gen3.next();
     }
 
@@ -495,6 +575,9 @@ async function simulateHardCrash(): Promise<{
       bareResumeRejected,
       afterDecisionTerminal: r3.value.terminal.reason,
       afterDecisionModelCalls,
+      afterDecisionOutcome: r3.value.outcome?.kind,
+      afterDecisionLoopTerminated,
+      afterDecisionSummary: r3.value.outcome?.summary,
       // 分支二的行为证据：两个 write_note 必须得到**不同**的观察结论。
       observedStatus: resultStatusOf(after, "tc_crash_write"),
       observedAppliedStatus: resultStatusOf(after, "tc_crash_write_done"),

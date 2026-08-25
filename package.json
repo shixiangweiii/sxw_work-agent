@@ -16,7 +16,9 @@
     "verify:endpoint-profile": "tsx apps/cli/src/verify/endpoint-profile.ts",
     "verify:pairing": "tsx apps/cli/src/verify/pairing.ts",
     "verify:resume": "tsx apps/cli/src/verify/resume.ts",
-    "verify:all": "npm run verify:endpoint-profile && npm run verify:pairing && npm run verify:resume"
+    "verify:compact": "tsx apps/cli/src/verify/compact.ts",
+    "verify:all": "npm run verify:endpoint-profile && npm run verify:pairing && npm run verify:resume && npm run verify:compact",
+    "probe:reasoning-tokens": "tsx apps/cli/src/verify/reasoning-tokens.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.65.0",

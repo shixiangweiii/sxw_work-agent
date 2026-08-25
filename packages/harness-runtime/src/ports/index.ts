@@ -108,7 +108,28 @@ export interface TranscriptStorePort {
   /** 从最后一个 COMPACT_BOUNDARY 之后重建。 */
   rebuildMessages(runId: RunId): Promise<ContextMessage[]>;
   readAll(runId: RunId): Promise<TranscriptEntry[]>;
+  /**
+   * 最后一条**已落盘 transcript 条目**的序号。
+   *
+   * 注意它不是计数器的高水位 —— 事件也从同一条序列取号但不落 transcript，
+   * 所以计数器通常已经跑在这个值前面。要续号请用 nextSequence()。
+   */
   lastSequence(runId: RunId): Promise<number>;
+  /**
+   * 【定】D-2：事件与 transcript 条目共用一条单调序列，这里是**唯一取号点**。
+   *
+   * 在此之前 `types/event.ts` 的注释白纸黑字写着「与 transcript 同一条序列」，
+   * 而 runLoop 的 seq 与 store 的 sequence 是两条各自递增的计数器，resume 后
+   * 新 runLoop 的 seq 还从 0 重计。§23.2 的 Layer 2 投影游标依赖这条序列 ——
+   * 带着两条计数器进 SQLite 之后没法收拾，所以这条必须早于持久化做掉。
+   *
+   * 后果是 transcript.sequence 会出现空洞（被事件占掉的号）。**这是正确的**：
+   * 空洞恰好表达「这两条消息之间发生过 N 个事件」，两条轨道因此可以全序比较。
+   *
+   * atLeast：把计数器下限抬到这个值再分配。resume 时用它把计数器推回上次的
+   * 高水位 —— 事件不落 transcript，单靠 transcript 恢复计数器会重发已经用掉的号。
+   */
+  nextSequence(runId: RunId, atLeast?: number): Promise<number>;
 }
 
 /**

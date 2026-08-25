@@ -91,7 +91,21 @@ export interface ComposeOptions {
   profileOverride?: EndpointCapabilityProfile;
   /** 不发真实请求时用。 */
   modelPortOverride?: RuntimePorts["model"];
+  /**
+   * 替换单个 Port 实现。verify:pairing 用它注入「会抛异常的 Port」——
+   * R-4 要验的正是「Port 抛异常时不变量 8 还守不守得住」，
+   * 而阶段 1 的四个真实现都在内部吞掉了异常，不注入就测不出来。
+   */
+  portOverrides?: Partial<Pick<RuntimePorts, "effects" | "redaction" | "verification">>;
   systemPrompt?: string;
+  /** IANA 时区名。不传则取宿主时区。验收脚本可固定它，让帧内容可复现。 */
+  timezone?: string;
+  /**
+   * 覆盖上下文预算策略。verify:compact 用它把阈值调到几百 token ——
+   * 默认的 60k/100k 在脚本化模型下永远撞不到，Compact 就永远测不着
+   * （这正是 roadmap 里「Compact 写了但没被真跑过」的直接成因）。
+   */
+  contextPolicy?: typeof DEFAULT_CONTEXT_POLICY;
   tools?: typeof microCaseTools;
 }
 
@@ -114,6 +128,7 @@ export function compose(opts: ComposeOptions): Composed {
   const tools = opts.tools ?? microCaseTools;
   const registry = new ToolRegistry(tools);
   const systemPrompt = opts.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
+  const contextPolicy = opts.contextPolicy ?? DEFAULT_CONTEXT_POLICY;
 
   const transcript = new InMemoryTranscriptStore();
   const clock = new SystemClock();
@@ -134,7 +149,7 @@ export function compose(opts: ComposeOptions): Composed {
     profile,
     tools,
     systemPrompt,
-    maxOutputTokens: DEFAULT_CONTEXT_POLICY.reservedOutputTokens,
+    maxOutputTokens: contextPolicy.reservedOutputTokens,
     countTokensFn: async (body) => {
       const n = await model.countTokens({ body, modelId: profile.modelId });
       if (n === undefined) throw new Error("端点未返回 token 计数");
@@ -147,9 +162,9 @@ export function compose(opts: ComposeOptions): Composed {
     protocol,
     transcript,
     tools: new MicroCaseToolHandler(),
-    redaction: new SimpleRedaction(),
-    effects: new DeclarativeEffectResolver(),
-    verification: new MicroCaseVerifier(),
+    redaction: opts.portOverrides?.redaction ?? new SimpleRedaction(),
+    effects: opts.portOverrides?.effects ?? new DeclarativeEffectResolver(),
+    verification: opts.portOverrides?.verification ?? new MicroCaseVerifier(),
     clock,
     ids,
     trace: opts.trace,
@@ -177,8 +192,10 @@ export function compose(opts: ComposeOptions): Composed {
         endpointProfileRef: String(profile.id),
       },
       systemPrompt,
+      // 【定】随 RunSpec 冻结。Replay 要在原时区下重放，不能取重放机器的当前时区。
+      timezone: opts.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone,
       toolSnapshots: tools,
-      contextPolicy: DEFAULT_CONTEXT_POLICY,
+      contextPolicy,
       loopPolicy: {
         maxTurns: DEFAULT_BUDGETS.maxTurns,
         maxConsecutiveFailures: DEFAULT_BUDGETS.maxConsecutiveFailures,
@@ -206,6 +223,11 @@ export const DEFAULT_SYSTEM_PROMPT = [
   "- 所有路径都相对 workspace 根目录，不要使用绝对路径或 .. 逃逸；",
   "- 需要了解目录内容时使用 list_dir；需要写文件时使用 write_note；",
   "- 写操作会请求用户确认，被拒绝是正常情况，据此调整而不是反复重试；",
+  // 配套 ContextFrame 里注入的受信时间事实（见 context/compile.ts 的 renderTimeFact）。
+  // 【定】这句话不能替代那条事实 —— 光靠 prompt 约束，模型只会从「编一个日期」
+  // 换成「回避日期」，两次实跑各出现过一种。事实必须真的在上下文里。
+  "- 日期与时间一律以上下文中的「[系统事实] 当前时间」为准，没有依据时不要写具体日期；",
+  "- 统计数字必须来自工具返回值，不要凭目录名或文件名推算；",
   "- 任务完成后，直接用一段话说明你做了什么，不要再调用工具。",
 ].join("\n");
 

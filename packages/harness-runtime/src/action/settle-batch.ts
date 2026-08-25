@@ -198,11 +198,27 @@ export async function* executeBatch(
       }
 
       // ── ② Effect 解析。【定】不得绕过（V05 §28.2）。
-      const resolvedEffect = deps.effects.resolve(
-        def.effectResolution,
-        validation.normalized,
-        deps.workspaceRoot,
+      const resolveGuarded = await guard(
+        () => deps.effects.resolve(def.effectResolution, validation.normalized!, deps.workspaceRoot),
+        {
+          code: "PORT_EFFECT_RESOLVER_THREW",
+          source: "RUNTIME",
+          // 还没到执行，副作用明确没有发生。
+          sideEffectState: "NOT_STARTED",
+          what: "EffectResolverPort.resolve()",
+        },
       );
+      if (!resolveGuarded.ok) {
+        proposed.stage = "REJECTED_SCHEMA";
+        settle(call.toolCallId, renderError(resolveGuarded.error), true);
+        yield ev(deps, "ActionRejected", {
+          actionId,
+          stage: "REJECTED_SCHEMA",
+          reason: resolveGuarded.error.safeMessage,
+        });
+        continue;
+      }
+      const resolvedEffect = resolveGuarded.value;
 
       const action: PreparedAction = {
         ...proposed,
@@ -250,7 +266,24 @@ export async function* executeBatch(
           effect: `${resolvedEffect.effectType} ${resolvedEffect.scope.value}`,
           reason: verdict.reason,
         });
-        const decision = await deps.approvalDecider(action);
+        const decisionGuarded = await guard(() => deps.approvalDecider(action), {
+          code: "PORT_APPROVAL_DECIDER_THREW",
+          source: "RUNTIME",
+          // 审批环节抛异常 = 没拿到批准。没批准就没执行。
+          sideEffectState: "NOT_STARTED",
+          what: "ApprovalDecider",
+        });
+        if (!decisionGuarded.ok) {
+          action.stage = "REJECTED_APPROVAL";
+          settle(call.toolCallId, renderError(decisionGuarded.error), true);
+          yield ev(deps, "ActionRejected", {
+            actionId,
+            stage: "REJECTED_APPROVAL",
+            reason: decisionGuarded.error.safeMessage,
+          });
+          continue;
+        }
+        const decision = decisionGuarded.value;
         yield ev(deps, "ApprovalDecided", {
           actionId,
           approved: decision.approved,
@@ -338,7 +371,20 @@ export async function* executeBatch(
       }
 
       // ── ⑥ 边界脱敏。【定】不得绕过；脱敏失败 = Tool 失败，不得原样保存。
-      const red = deps.redaction.redact(outcome.output, effectiveRedaction(def));
+      // 抛异常与返回 ok:false 是同一件事的两种表达，收敛到同一条处置路径上。
+      const redGuarded = await guard(
+        () => deps.redaction.redact(outcome.output, effectiveRedaction(def)),
+        {
+          code: "PORT_REDACTION_THREW",
+          source: "TOOL_HANDLER",
+          // 工具已经跑完了，副作用状态是它给的那个 —— 不能因为脱敏挂了就改写它。
+          sideEffectState: outcome.sideEffectState,
+          what: "RedactionPort.redact()",
+        },
+      );
+      const red = redGuarded.ok
+        ? redGuarded.value
+        : { ok: false as const, text: "", report: { fieldsRedacted: [], bytesRedacted: 0 }, error: redGuarded.error };
       if (!red.ok) {
         const e =
           red.error ??
@@ -356,7 +402,27 @@ export async function* executeBatch(
       }
 
       // ── ⑦ Verification。Tool Handler 的 "success" 不能替代它。
-      const vr = await deps.verification.verify(action, outcome, ctx);
+      const vrGuarded = await guard(() => deps.verification.verify(action, outcome, ctx), {
+        code: "PORT_VERIFICATION_THREW",
+        source: "VERIFICATION",
+        // 同 ⑥：工具已经跑过，副作用状态不因验证挂掉而改变。
+        sideEffectState: outcome.sideEffectState,
+        what: "VerificationPort.verify()",
+      });
+      if (!vrGuarded.ok) {
+        /**
+         * 【定】这里**不** verifiedCallIds.add()。
+         *
+         * 于是 finally 里的 recordUnmetRequired() 会为声明了 requiredForSuccess
+         * 的工具自动补一条 FAILED —— 「验证抛了异常」和「验证没得出通过结论」
+         * 在结算层是同一件事，不该有第二套判据。这条链已经自洽，不用额外处理。
+         */
+        action.stage = "SETTLED";
+        settle(call.toolCallId, renderError(vrGuarded.error), true);
+        if (settlement.onActionFailure === "SKIP_REMAINING") skipRemaining = true;
+        continue;
+      }
+      const vr = vrGuarded.value;
       verifiedCallIds.add(call.toolCallId);
       verifications.push(vr);
       yield ev(deps, "VerificationCompleted", {
@@ -485,6 +551,65 @@ function recordUnmetRequired(
  * OpenAI 形状只能写进 content。这里约定一个结构化 payload 作为下限，
  * 形状适配器在有带外字段时额外标记（见 protocol.ts 的 toBlock）。
  */
+/**
+ * Port 调用的异常收敛（存量清单 R-4）。
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ * 在此之前只有 `tools.execute()` 有 try/catch。`effects.resolve()`、
+ * `approvalDecider()`、`redaction.redact()`、`verification.verify()`
+ * 抛出的异常会**直接穿透 generator**：
+ *
+ *   · finally 里的 finalize() 照样补齐了 ledger，但那份 ledger 随栈丢弃；
+ *   · runLoop() 拿不到 BatchOutcome，合成 result 一条都进不了 transcript；
+ *   · Facade 的 status 永久停在 RUNNING。
+ *
+ * 也就是说：不变量 8 的兜底代码跑了，兜底的结果却没人收 —— 最坏的一种形态，
+ * 因为它看起来是有保护的。
+ *
+ * 定级要说清楚：这**不是当前的活跃 bug**。阶段 1 那四个实现都在内部吞掉了异常
+ * （SimpleRedaction 与 MicroCaseVerifier 各有 try/catch，DeclarativeEffectResolver
+ * 只在非 DECLARATIVE 时抛而阶段 1 没有这类工具）。**但阶段 2 一换实现就会变成活跃 bug**，
+ * 所以必须赶在换 Port 实现之前修 —— 这也是它被列为阶段 2 前置的原因。
+ * ══════════════════════════════════════════════════════════════════════
+ */
+type Guarded<T> = { ok: true; value: T } | { ok: false; error: RuntimeErrorRecord };
+
+async function guard<T>(
+  fn: () => T | Promise<T>,
+  template: {
+    code: string;
+    source: RuntimeErrorRecord["source"];
+    /**
+     * 【定】按调用点分情况，不得一律写 UNKNOWN。
+     *
+     * UNKNOWN 的语义是「副作用发没发生我们不知道」，它会触发 RecoveryItem、
+     * 阻断自动重试、在 resume 时把 Run 停在 RECOVERY_REQUIRED。
+     * 对「工具压根还没执行」的那两个调用点（effects / approval）写 UNKNOWN，
+     * 等于凭空造出一个需要人工确认的未知状态 —— 谎报的方向恰好是最贵的那边。
+     */
+    sideEffectState: RuntimeErrorRecord["sideEffectState"];
+    what: string;
+  },
+): Promise<Guarded<T>> {
+  try {
+    return { ok: true, value: await fn() };
+  } catch (err) {
+    return {
+      ok: false,
+      error: makeError({
+        code: template.code,
+        source: template.source,
+        category: "INTERNAL",
+        // Port 实现自己抛异常属于配置或代码问题，重试同样的输入不会变好。
+        retryability: "AFTER_USER_ACTION",
+        sideEffectState: template.sideEffectState,
+        safeMessage:
+          `${template.what}抛出异常：${String((err as Error)?.message ?? err).slice(0, 160)}`,
+      }),
+    };
+  }
+}
+
 function renderError(e: RuntimeErrorRecord): string {
   return JSON.stringify({
     status: "ERROR",

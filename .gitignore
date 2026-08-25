@@ -12,3 +12,7 @@ bin
 # 阶段 1 的默认 workspace，跑 CLI 时自动生成
 node_modules
 .workagent-workspace
+
+# 每次 CLI 运行落一份 JSONL trace（--no-trace 可关）。
+# 是诊断与评测的 artifact，不是源码 —— 要留证据请显式复制到 评测/ 下。
+.workagent-runs

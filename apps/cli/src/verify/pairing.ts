@@ -25,14 +25,60 @@ import {
   type ContextMessage,
 } from "@workagent/harness-runtime";
 import { approveExcept } from "@workagent/testkit";
-import { compose } from "../compose.js";
+import { compose, type ComposeOptions } from "../compose.js";
 import { ScriptedModelPort, banner, fact, section, tempWorkspace, verdict } from "./harness.js";
+
+/**
+ * 会抛异常的 Port 实现（R-4 的注入器）。
+ *
+ * 【定】它们抛的是**裸异常**，不是返回 ok:false —— 这正是 R-4 要防的形态。
+ * 阶段 1 的四个真实现都在内部 try/catch 了，所以这条路径在真实现下走不到；
+ * 而阶段 2 换实现的那一刻它就变成活跃 bug。注入是唯一能提前测到它的办法。
+ *
+ * ── 为什么不用 `as never` ─────────────────────────────────────
+ *
+ * 用 `as never` 断言掉类型检查的话，方法名拼错（`resolv`）会静默退化成
+ * 「属性不存在 → 调用时 TypeError」，而 TypeError 同样被 guard() 收敛，
+ * **用例照样绿**。那时这条用例验证的就不再是「Port 抛异常时配对守不守得住」，
+ * 而是「调用一个不存在的方法会怎样」—— 两回事，而且没人看得出来。
+ *
+ * 三个 Port 都是单方法接口，所以写成真实类型完全不费劲：函数体只有 throw 时
+ * 返回类型推断为 never，而 never 可赋给任何返回类型；下面的 satisfies
+ * 因此既放行这些桩，又能在方法名写错时报错。
+ */
+const throwingPorts = {
+  effects: {
+    effects: {
+      resolve() {
+        throw new Error("注入：EffectResolver 内部炸了");
+      },
+    },
+  },
+  redaction: {
+    redaction: {
+      redact() {
+        throw new Error("注入：Redaction 内部炸了");
+      },
+    },
+  },
+  verification: {
+    verification: {
+      async verify() {
+        throw new Error("注入：Verifier 内部炸了");
+      },
+    },
+  },
+} satisfies Record<string, ComposeOptions["portOverrides"]>;
 
 interface Scenario {
   name: string;
   path: string;
   build(): ScriptedModelPort;
   approvals?: number[];
+  /** R-4 的注入点：让某个 Port 抛异常，看不变量 8 还守不守得住。 */
+  portOverrides?: ComposeOptions["portOverrides"];
+  /** 审批器本身抛异常（ApprovalDecider 不是 Port，但同属 R-4 的四个调用点）。 */
+  throwingApproval?: boolean;
   expectTerminal: string;
   /**
    * 【定】必须连 outcome 一起断言。
@@ -97,6 +143,61 @@ const scenarios: Scenario[] = [
     expectTerminal: "MODEL_ERROR",
     expectOutcome: "FAILED",
   },
+
+  // ── R-4：四个 Port 调用点各注入一次裸异常 ─────────────────────────
+  //
+  // 期望**不是**「Run 挂掉」，而是：批仍然 3/3 配对、Run 走到具名 Terminal、
+  // 且 outcome 如实反映「必需操作没做成」。修复前这四条会让异常穿透 generator，
+  // runLoop 收不到 BatchOutcome，Facade 的 status 永久停在 RUNNING。
+  {
+    name: "R-4 注入 A：EffectResolverPort.resolve() 抛异常",
+    path: "三个 call 全部在 Effect 解析阶段炸掉，一个都没执行",
+    build: () =>
+      new ScriptedModelPort([
+        { reasoning: "开始", toolCalls: CALLS_3 },
+        { text: "全都失败了。", toolCalls: [] },
+      ]),
+    portOverrides: throwingPorts.effects,
+    // write_note 是 requiredForSuccess，没走到 Verification → 补一条 FAILED。
+    expectTerminal: "COMPLETED_WITH_LIMITS",
+    expectOutcome: "COMPLETED_WITH_LIMITS",
+  },
+  {
+    name: "R-4 注入 B：ApprovalDecider 抛异常",
+    path: "write_note 触发审批，审批器炸掉 —— 没批准就等于没执行",
+    build: () =>
+      new ScriptedModelPort([
+        { reasoning: "开始", toolCalls: CALLS_3 },
+        { text: "审批出问题了。", toolCalls: [] },
+      ]),
+    throwingApproval: true,
+    expectTerminal: "COMPLETED_WITH_LIMITS",
+    expectOutcome: "COMPLETED_WITH_LIMITS",
+  },
+  {
+    name: "R-4 注入 C：RedactionPort.redact() 抛异常",
+    path: "工具已执行完，脱敏阶段炸掉 —— 副作用状态不得因此被改写",
+    build: () =>
+      new ScriptedModelPort([
+        { reasoning: "开始", toolCalls: CALLS_3 },
+        { text: "脱敏出问题了。", toolCalls: [] },
+      ]),
+    portOverrides: throwingPorts.redaction,
+    expectTerminal: "COMPLETED_WITH_LIMITS",
+    expectOutcome: "COMPLETED_WITH_LIMITS",
+  },
+  {
+    name: "R-4 注入 D：VerificationPort.verify() 抛异常",
+    path: "工具已执行完，验证阶段炸掉 —— 等价于「没得出通过结论」",
+    build: () =>
+      new ScriptedModelPort([
+        { reasoning: "开始", toolCalls: CALLS_3 },
+        { text: "验证出问题了。", toolCalls: [] },
+      ]),
+    portOverrides: throwingPorts.verification,
+    expectTerminal: "COMPLETED_WITH_LIMITS",
+    expectOutcome: "COMPLETED_WITH_LIMITS",
+  },
 ];
 
 async function main(): Promise<void> {
@@ -105,9 +206,10 @@ async function main(): Promise<void> {
     "异常路径注入后，配对是否仍然一一对应，且 outcome 与实际执行事实一致？",
   );
   console.log(
-    "\n   覆盖说明（不夸大）：本脚本注入的是**流式中断、审批拒绝、模型错误**三条。\n" +
+    "\n   覆盖说明（不夸大）：本脚本注入的是**流式中断、审批拒绝、模型错误**三条，\n" +
+      "   外加 R-4 的四条 Port 异常注入（Effect / Approval / Redaction / Verification）。\n" +
       "   「工具正在执行时被 cancel」这一条由 verify:resume 的 B 段顺带覆盖，\n" +
-      "   本脚本没有注入它 —— 不要把这里的四个场景读成 §9.2 的三条中断路径全覆盖。",
+      "   本脚本没有注入它 —— 不要把这里的场景读成 §9.2 的三条中断路径全覆盖。",
   );
 
   section("选定端点对配对的兜底强度（实测）");
@@ -129,9 +231,16 @@ async function main(): Promise<void> {
     try {
       const composed = compose({
         workspaceRoot: ws.root,
-        approvalDecider: sc.approvals ? approveExcept(sc.approvals) : async () => ({ approved: true }),
+        approvalDecider: sc.throwingApproval
+          ? async () => {
+              throw new Error("注入：ApprovalDecider 内部炸了");
+            }
+          : sc.approvals
+            ? approveExcept(sc.approvals)
+            : async () => ({ approved: true }),
         trace,
         modelPortOverride: sc.build(),
+        portOverrides: sc.portOverrides,
       });
 
       const spec = composed.makeRunSpec("三件事");
@@ -192,9 +301,14 @@ async function main(): Promise<void> {
   verdict(
     allOk,
     allOk
-      ? "四个场景的合成 result 都收敛到了 settle-batch.ts 的 finalize()，" +
+      ? `${scenarios.length} 个场景的合成 result 都收敛到了 settle-batch.ts 的 finalize()，` +
         "且 outcome 与实际执行事实一致（必需操作没做成就不判 SUCCESS）"
       : "存在违反：配对有缺口，或 outcome 与实际执行事实不一致",
+  );
+  console.log(
+    "\n   R-4 那四条的判别力是验证过的：把 guard() 改成 rethrow，四条全部翻红，\n" +
+      "   报错形态正是「场景抛出异常」—— 异常穿透 generator，runLoop 收不到 BatchOutcome。\n" +
+      "   也就是说它们不是摆着好看的绿灯。",
   );
 
   console.log(

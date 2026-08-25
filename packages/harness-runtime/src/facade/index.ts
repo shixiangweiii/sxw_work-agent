@@ -177,14 +177,26 @@ export class HarnessRuntime {
       const verifications: VerificationResult[] = [...(priorFacts?.verifications ?? [])];
       const recoveryItems: RecoveryItem[] = [...(priorFacts?.recoveryItems ?? [])];
 
-      // 事件序号从 transcript 末尾续起，逐条递增 —— 不再多条共用同一个号。
-      let seq = lastSeq;
-      const emit = <T extends RunEvent["type"]>(
+      /**
+       * D-2：取号走 store 的分配器，与 runLoop 同一条序列。
+       *
+       * 起点取「transcript 末尾」与「上次记下的高水位」的较大者。
+       * 只看 transcript 末尾会重发上一段事件已经用掉的号 —— 事件不落 transcript，
+       * 它在 transcript 上留不下痕迹，但在 Trace 里留得下。
+       */
+      let lastSequence = Math.max(lastSeq, priorFacts?.lastSequence ?? 0);
+      const emit = async <T extends RunEvent["type"]>(
         type: T,
         payload: Extract<RunEvent, { type: T }>["payload"],
-      ): RunEvent => {
-        seq += 1;
-        const e = { runId, sequence: seq, occurredAt: ports.clock.now(), type, payload } as RunEvent;
+      ): Promise<RunEvent> => {
+        lastSequence = await ports.transcript.nextSequence(runId, lastSequence);
+        const e = {
+          runId,
+          sequence: lastSequence,
+          occurredAt: ports.clock.now(),
+          type,
+          payload,
+        } as RunEvent;
         ports.trace.emit(e);
         return e;
       };
@@ -202,20 +214,44 @@ export class HarnessRuntime {
         messages.push(message);
       };
 
-      yield emit("ResumeStarted", {
+      yield await emit("ResumeStarted", {
         fromSequence: lastSeq,
         rebuiltMessages: messages.length,
       });
 
       // ── 处理上一次停在 RECOVERY_REQUIRED 时用户给出的决策
       if (current === "RECOVERY_REQUIRED" && opts.recoveryDecision) {
-        yield emit("RecoveryResolved", {
+        yield await emit("RecoveryResolved", {
           decision: opts.recoveryDecision,
           items: recoveryItems.length,
           note: opts.recoveryNote,
         });
 
         if (opts.recoveryDecision === "ABORT") {
+          const terminal: Terminal = { reason: "ABORTED_TOOLS" };
+          const outcome = settleWallOutcome("CANCELLED", {
+            verifications,
+            recoveryItems,
+            // R-7：outcome 必须能读出发生了什么。这条路径上「发生了什么」
+            // 不是模型说的话，而是用户的恢复决策本身 —— 如实写它。
+            summary:
+              `用户对上次崩溃时状态未知的副作用给出 ABORT 决策，Run 收在 CANCELLED。` +
+              (opts.recoveryNote ? `理由：${opts.recoveryNote}` : "未附理由。"),
+          });
+
+          /**
+           * 【定】这条也是真正的终止，必须发 `LoopTerminated`（U-4）。
+           *
+           * U-4 修的是 runLoop 的 `finish()`，但 Run 不止从那里结束 ——
+           * ABORT 决策直接在 facade 里收尾，绕过了整个主循环。漏掉这里的话，
+           * §19.2「Trace 里能直接读出走了哪条路径」对**恢复被中止**这条路径
+           * 仍然不成立，而这恰恰是最需要事后复盘的一种终止。
+           *
+           * 顺序同 run-loop：先 emit 再落事实（D-2）—— 反过来会让落盘的
+           * lastSequence 停在事件号之前，下次取号撞上已经发出去的号。
+           */
+          yield await emit("LoopTerminated", { terminal, outcome });
+
           await ports.transcript.append(
             makeRunFactsEntry(
               runId,
@@ -225,15 +261,13 @@ export class HarnessRuntime {
                 budgetUsage: priorFacts?.budgetUsage ?? emptyBudget(ports.clock.now()),
                 verifications,
                 recoveryItems,
+                lastSequence,
               },
               ports.clock.now(),
             ),
           );
           this.status.set(key, "CANCELLED");
-          return {
-            terminal: { reason: "ABORTED_TOOLS" },
-            outcome: settleWallOutcome("CANCELLED", { verifications, recoveryItems }),
-          };
+          return { terminal, outcome };
         }
 
         // CONTINUE：用户说他已经人工确认过外部状态了，这些项就此销账。
@@ -261,7 +295,7 @@ export class HarnessRuntime {
               ? "OBSERVE_FIRST"
               : "RECOVERY_REQUIRED";
 
-        yield emit("ResumeUnpairedToolUse", {
+        yield await emit("ResumeUnpairedToolUse", {
           toolCallId: u.toolCallId,
           toolName: u.toolName,
           branch,
@@ -287,8 +321,9 @@ export class HarnessRuntime {
           });
           let br = await batchGen.next();
           while (!br.done) {
-            seq += 1;
-            const withSeq = { ...br.value, sequence: seq } as RunEvent;
+            // 与 emit() 同一个分配器 —— executeBatch 带的是占位号 0（D-2）。
+            lastSequence = await ports.transcript.nextSequence(runId, lastSequence);
+            const withSeq = { ...br.value, sequence: lastSequence } as RunEvent;
             ports.trace.emit(withSeq);
             yield withSeq;
             br = await batchGen.next();
@@ -366,6 +401,9 @@ export class HarnessRuntime {
         budgetUsage: priorFacts?.budgetUsage ?? emptyBudget(ports.clock.now()),
         verifications,
         recoveryItems,
+        // 交给 runLoop 接着用的高水位。少了它，runLoop 里的 emit 会从
+        // resumeFrom.lastSequence ?? 0 起算，恢复段的事件号又回到 1（D-2）。
+        lastSequence,
       };
 
       if (blocked) {
@@ -375,10 +413,20 @@ export class HarnessRuntime {
          * 副作用状态未知时继续调模型 = 让模型在一个它以为已知、实际未知的世界里
          * 做下一步决策，而后续操作可能依赖那个未确认的外部状态。
          * 不变量 10（未知副作用不得自动重试）在消息级恢复下的落点就是这里。
+         *
+         * ── 这里**故意不发** `LoopTerminated`（U-4 的边界）─────────────
+         *
+         * `RECOVERY_REQUIRED` 是 V05 §10.4 明确的**非终态** —— Run 没有结束，
+         * 所以 `StartResult.outcome` 是 undefined，也没有 outcome 可以塞进
+         * `LoopTerminated` 的载荷。发一条「已终止」会在 Trace 上制造一个
+         * 与生命周期相反的事实：下一次带决策 resume 还会继续往下跑。
+         *
+         * 这条路径在 Trace 上由 `RecoveryRequired` 表达，它已经带了 items 数。
+         * 【定】不要因为「看起来和 ABORT 那条对称」就把这里也补上。
          */
+        yield await emit("RecoveryRequired", { items: recoveryItems.length });
         await ports.transcript.append(makeRunFactsEntry(runId, facts, ports.clock.now()));
         this.status.set(key, "RECOVERY_REQUIRED");
-        yield emit("RecoveryRequired", { items: recoveryItems.length });
         return { terminal: { reason: "RECOVERY_REQUIRED", recoveryItems } };
       }
 

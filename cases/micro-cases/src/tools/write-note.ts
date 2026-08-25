@@ -24,6 +24,7 @@ import type {
   ToolSnapshot,
 } from "@workagent/harness-runtime";
 import { asId, makeError } from "@workagent/harness-runtime";
+import { isInsideWorkspace } from "./fs-common.js";
 
 export const writeNoteDefinition: ToolDefinition = {
   id: asId("tool_write_note"),
@@ -86,7 +87,7 @@ export async function executeWriteNote(
 ): Promise<ToolExecutionOutcome> {
   const target = resolve(ctx.workspaceRoot, input.path);
 
-  if (!isInside(ctx.workspaceRoot, target)) {
+  if (!isInsideWorkspace(ctx.workspaceRoot, target)) {
     return {
       ok: false,
       output: "",
@@ -178,11 +179,6 @@ export async function verifyWriteNote(
   } catch (err) {
     return { ok: false, detail: `重新读取 ${input.path} 失败：${String((err as Error).message).slice(0, 120)}` };
   }
-}
-
-function isInside(root: string, target: string): boolean {
-  const r = resolve(root);
-  return target === r || target.startsWith(r + "/");
 }
 
 function sleep(ms: number): Promise<void> {

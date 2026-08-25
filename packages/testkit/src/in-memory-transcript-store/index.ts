@@ -19,6 +19,21 @@ import {
 
 export class InMemoryTranscriptStore implements TranscriptStorePort {
   private readonly byRun = new Map<string, TranscriptEntry[]>();
+  /**
+   * D-2：事件与 transcript 条目共用的那一条序列的计数器。
+   *
+   * 它和 byRun 里最后一条的 sequence **不是同一个数** —— 事件取了号但不落盘，
+   * 所以计数器一般跑在前面。要续号一律走 nextSequence()，
+   * 不要再用「最后一条 ＋ 1」那种推算。
+   */
+  private readonly counters = new Map<string, number>();
+
+  async nextSequence(runId: RunId, atLeast = 0): Promise<number> {
+    const key = String(runId);
+    const next = Math.max(this.counters.get(key) ?? 0, atLeast) + 1;
+    this.counters.set(key, next);
+    return next;
+  }
 
   /**
    * 【定】不变量 5：消息先落盘再进内存 messages。
@@ -30,7 +45,7 @@ export class InMemoryTranscriptStore implements TranscriptStorePort {
   async append(entry: Omit<TranscriptEntry, "sequence">): Promise<number> {
     const key = String(entry.runId);
     const list = this.byRun.get(key) ?? [];
-    const sequence = list.length === 0 ? 1 : list[list.length - 1]!.sequence + 1;
+    const sequence = await this.nextSequence(entry.runId);
     list.push({ ...entry, sequence, schemaVersion: entry.schemaVersion || TRANSCRIPT_SCHEMA_VERSION });
     this.byRun.set(key, list);
     return sequence;

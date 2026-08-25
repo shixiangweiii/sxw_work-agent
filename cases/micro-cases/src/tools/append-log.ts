@@ -33,6 +33,7 @@ import type {
   ToolSnapshot,
 } from "@workagent/harness-runtime";
 import { asId, makeError } from "@workagent/harness-runtime";
+import { isInsideWorkspace } from "./fs-common.js";
 
 export const appendLogDefinition: ToolDefinition = {
   id: asId("tool_append_log"),
@@ -89,8 +90,7 @@ export async function executeAppendLog(
 ): Promise<ToolExecutionOutcome> {
   const target = resolve(ctx.workspaceRoot, input.path);
 
-  // 【定】Adapter 执行时再验证实际目标（V05 §22.1）—— 执行边界的第二道。
-  if (!isInside(ctx.workspaceRoot, target)) {
+  if (!isInsideWorkspace(ctx.workspaceRoot, target)) {
     return {
       ok: false,
       output: "",
@@ -146,11 +146,6 @@ export async function executeAppendLog(
       }),
     };
   }
-}
-
-function isInside(root: string, target: string): boolean {
-  const r = resolve(root);
-  return target === r || target.startsWith(r + "/");
 }
 
 export const appendLogSnapshot: ToolSnapshot = {

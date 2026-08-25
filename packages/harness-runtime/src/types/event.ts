@@ -57,7 +57,17 @@ export type RunEvent =
 
 interface EvBase {
   runId: RunId;
-  /** 与 transcript 同一条序列。 */
+  /**
+   * 与 transcript 条目同一条单调序列（D-2）。取号点是
+   * `TranscriptStorePort.nextSequence()`，两条轨道共用一个分配器。
+   *
+   * 事件本身**不落 transcript**，所以 transcript.sequence 上会出现空洞 ——
+   * 那是正确的，空洞恰好表达「这两条消息之间发生过 N 个事件」，
+   * 两条轨道因此可以全序比较。§23.2 的 Layer 2 投影游标依赖这一点。
+   *
+   * 这条注释在 D-2 修复之前就已经这么写了，但当时是**假的**：
+   * runLoop 与 store 各有一个计数器，resume 后 runLoop 的还从 0 重计。
+   */
   sequence: number;
   occurredAt: Timestamp;
 }

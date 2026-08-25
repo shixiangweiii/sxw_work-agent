@@ -69,7 +69,20 @@ export class ScriptedModelPort implements ModelPort {
   private turn = 0;
   readonly requestBodies: unknown[] = [];
 
-  constructor(private readonly script: ScriptedTurn[]) {}
+  /**
+   * countTokens 默认返回写死的 100。
+   *
+   * 这个默认值本身就是存量清单 §4 第 3 条说的那个覆盖缺口：token 与预算路径
+   * 在脚本化模型下**永远是常量**，所以 usage 清零、预算轴、口径错配这类问题
+   * 能同时存在而三条脚本全绿。
+   *
+   * verify:compact 传入 `estimateFromBody` 让计数随上下文真的增长 ——
+   * 不这样，Compact 的阈值一辈子撞不到，也就永远测不着。
+   */
+  constructor(
+    private readonly script: ScriptedTurn[],
+    private readonly countTokensImpl: (body: unknown) => number = () => 100,
+  ) {}
 
   async *invoke(
     request: ModelRequest,
@@ -103,13 +116,24 @@ export class ScriptedModelPort implements ModelPort {
     };
   }
 
-  async countTokens(_r: ModelRequest): Promise<number | undefined> {
-    return 100;
+  async countTokens(r: ModelRequest): Promise<number | undefined> {
+    return this.countTokensImpl(r.body);
   }
 
   get turnsConsumed(): number {
     return this.turn;
   }
+}
+
+/**
+ * 按请求体大小估算 token 数。
+ *
+ * 【定】它模拟的是「端点的 count_tokens」，所以必须**随上下文增长而增长** ——
+ * 这正是常量 100 做不到的那件事。系数取 2.5，与形状适配器里的本地估算一致，
+ * 不追求准确，只要求单调。
+ */
+export function estimateFromBody(body: unknown): number {
+  return Math.ceil(JSON.stringify(body).length / 2.5);
 }
 
 function usage(): ModelUsage {

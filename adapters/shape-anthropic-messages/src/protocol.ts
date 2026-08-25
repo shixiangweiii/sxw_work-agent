@@ -88,9 +88,30 @@ class AnthropicMessagesProtocol implements ModelProtocolPort {
       const { stream: _s, max_tokens: _m, ...countable } = body;
       try {
         const tokens = await this.deps.countTokensFn(countable);
+
+        /**
+         * 端点声明 count_tokens 不算推理块时，本地补一个估算（D-3）。
+         *
+         * 实测（probe:reasoning-tokens，2026-08-25）：同一个 body 加不加 thinking 块，
+         * count_tokens 返回 765 / 765 —— 差 0，端点对推理块完全视而不见；
+         * 而同一 body 的真实 inference usage.input_tokens 是 888。
+         *
+         * 【定】不补的话，返回值对含推理块的帧是**下界而非实际值**，
+         * 而 Context 阈值判定拿它当实际值用 —— 实跑里 4 轮就低估了 393 token，
+         * 且随轮次放大。宁可估得糙，也不能让阈值基准系统性偏向「还够用」那一侧。
+         *
+         * 补完之后精度降级为 ESTIMATED：这一帧的数已经不是端点给的了。
+         */
+        const reasoning = this.profile.tokens.countTokensExcludesReasoning
+          ? estimateReasoningTokens(frame)
+          : 0;
+
         return {
-          tokens: tokens + this.profile.tokens.perRequestBaseTokens,
-          accuracy: this.profile.tokens.countTokensAccuracy === "EXACT" ? "EXACT" : "ESTIMATED",
+          tokens: tokens + this.profile.tokens.perRequestBaseTokens + reasoning,
+          accuracy:
+            this.profile.tokens.countTokensAccuracy === "EXACT" && reasoning === 0
+              ? "EXACT"
+              : "ESTIMATED",
         };
       } catch {
         // 端点侧失败时退回本地估算，而不是让整个帧编译失败。
@@ -382,4 +403,23 @@ function estimateTokens(frame: ContextFrame): number {
   }
   // 中英混排的粗略系数。标记为 ESTIMATED，调用方据此放宽阈值。
   return Math.ceil(chars / 2.5) + frame.fixedOverheadTokens;
+}
+
+/**
+ * 帧内推理块的 token 估算，只在端点声明 count_tokens 排除推理块时使用（D-3）。
+ *
+ * 系数 1.9 不是 2.5，是实测反推的：229 字符的中文推理文本，端点按 123 token 计费
+ * （888 − 765），229 / 123 ≈ 1.86。上面 estimateTokens() 的 2.5 是中英混排的粗系数，
+ * 推理块在实跑里几乎全是中文，用 2.5 会低估约 25% —— 而这个数是要拿去顶
+ * 阈值判定的，宁可偏保守。
+ *
+ * 【端点】这个系数对应中文为主的推理内容。换语种或换模型都可能不成立，
+ * 所以它待在形状适配器里，不进 Runtime。
+ */
+function estimateReasoningTokens(frame: ContextFrame): number {
+  let chars = 0;
+  for (const item of frame.items) {
+    if (item.content?.type === "reasoning") chars += item.content.text.length;
+  }
+  return Math.ceil(chars / 1.9);
 }

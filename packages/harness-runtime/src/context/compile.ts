@@ -34,6 +34,13 @@ export interface CompileDeps {
    */
   fixedOverheadTokens: number;
   /**
+   * IANA 时区名，来自 AgentSpec。与 `now` 一起构成注入给模型的受信时间事实。
+   *
+   * 【定】时间必须经 ClockPort（即这里的 `now`）取得，不得在本模块调 Date.now()。
+   * 验收脚本用 FakeClock，硬编码当前时间会让帧内容不可复现。
+   */
+  timezone: string;
+  /**
    * 输出预算恢复用（V05 §16.1）。
    *
    * 主循环识别出「推理吃光输出预算」后会抬高上限重试 —— 但抬高的值必须
@@ -52,6 +59,13 @@ export async function compileFrame(
 ): Promise<ContextFrameOutcome> {
   const compactionApplied: ContextFrameOutcome["compactionApplied"] = [];
   let working = messages;
+  /**
+   * R-6：压缩产物必须能被调用方取走。
+   *
+   * 修复前它们只活在这个函数的局部变量里，runLoop 拿不到，于是下一轮
+   * 又从原始 state.messages 开始 —— 压缩事件照发，历史照样越滚越长。
+   */
+  let compacted: { messages: ContextMessage[]; summary?: ContextMessage; kept: ContextMessage[] } | undefined;
 
   // ① 首次成帧
   let frame = buildFrame(working, deps);
@@ -60,13 +74,31 @@ export async function compileFrame(
 
   // ② soft limit 之下：Context Runtime 自治压缩
   if (count.tokens > deps.policy.softInputLimitTokens) {
+    /**
+     * 【定】阈值与估算必须是同一个单位。
+     *
+     * `compactTargetTokens` 是**帧级**预算，而 Compact 只看得见 messages。
+     * 直接把帧级数字交给它，等于拿一个含工具定义开销、system prompt、
+     * 时间事实的预算去卡一个不含这些东西的估算 —— 目标看起来永远已经达成，
+     * 一条消息都不会被丢。这是 R-3「固定开销重复相加」的同款单位错配，
+     * 只是方向相反：那边多减一次，这边少减一次。
+     *
+     * 所以先把 Compact 够不到的部分扣掉，剩下的才是留给 messages 的额度。
+     */
+    const nonMessageTokens =
+      deps.fixedOverheadTokens +
+      frame.items
+        .filter((i) => i.kind === "SYSTEM_INSTRUCTION" || i.kind === "SYSTEM_NOTICE")
+        .reduce((n, i) => n + i.estimatedTokens, 0);
+
     const result = compactMessages(working, {
       protocol: deps.protocol,
-      targetTokens: deps.policy.compactTargetTokens,
+      targetTokens: Math.max(0, deps.policy.compactTargetTokens - nonMessageTokens),
       now: deps.now,
     });
     if (result.freedTokens > 0) {
       working = result.messages;
+      compacted = { messages: result.messages, summary: result.summary, kept: result.kept };
       compactionApplied.push(result.record);
       frame = buildFrame(working, deps);
       count = await deps.protocol.countTokens(frame);
@@ -110,6 +142,9 @@ export async function compileFrame(
     irreducibleTokens: irreducible,
     fixedOverheadTokens: deps.fixedOverheadTokens,
     compactionApplied,
+    compactedMessages: compacted?.messages,
+    compactSummary: compacted?.summary,
+    compactKept: compacted?.kept,
   };
 }
 
@@ -126,6 +161,44 @@ function buildFrame(messages: ContextMessage[], deps: CompileDeps): ContextFrame
         trust: "SYSTEM_TRUSTED",
         protocolRole: "ORDINARY",
         content: { type: "text", text: deps.systemPrompt },
+      },
+      deps,
+    ),
+  );
+
+  /**
+   * 受信时间事实。
+   *
+   * ── 为什么必须有 ──────────────────────────────────────────────
+   *
+   * 模型对「现在是哪年」只有训练先验，没有任何事实覆写它，于是会自己编一个。
+   * 2026-08-24 的评测实跑里它在交接清单上写了「盘点时间：2025年」；
+   * 而更早一次实跑（存量清单附录）同样缺时间源，模型选择了回避
+   * （写成「盘点时间：2026Q2 归档目录完整盘点」）。
+   *
+   * 两次表现不同这件事本身就是判据：**「模型会自己糊过去」不是缓解措施**，
+   * 回避和编造都是它在没有事实时的随机选择。所以这里给的是事实，
+   * system prompt 里那句「无依据不要写日期」只是配套，不能替代它。
+   *
+   * ── 为什么是独立一条 item，而不是拼进 systemPrompt ─────────────
+   *
+   * 端点声明 cacheMatching = STRICT_PREFIX（改前缀第一处 → 命中归零）。
+   * 把每次都变的时间戳拼进 system block，等于让将来接 cache_control 时
+   * 整个前缀永远命不中。单独一条排在 system 之后，system block 保持完全稳定。
+   *
+   * ── 为什么不做成 now 工具 ─────────────────────────────────────
+   *
+   * 工具要模型记得调。它上次就没调 —— 直接编了一个。注入是零轮次、
+   * 零 token 往返、且不可能被跳过的那条路径。
+   */
+  items.push(
+    finishItem(
+      {
+        kind: "SYSTEM_NOTICE",
+        source: { kind: "SYSTEM" },
+        trust: "SYSTEM_TRUSTED",
+        protocolRole: "ORDINARY",
+        content: { type: "text", text: renderTimeFact(deps.now, deps.timezone) },
       },
       deps,
     ),
@@ -171,6 +244,31 @@ function buildFrame(messages: ContextMessage[], deps: CompileDeps): ContextFrame
   };
   frame.contentHash = hashFrame(frame);
   return frame;
+}
+
+/**
+ * 把 ClockPort 的时间戳渲染成模型能直接引用的事实。
+ *
+ * 写明星期与时区是刻意的：办公类产物里「本周」「下周一」这类相对表述很常见，
+ * 只给一个 ISO 串，模型还是得自己推算星期，那又是一次可能出错的推断。
+ *
+ * 【定】只用 deps.now，不碰 Date.now() —— FakeClock 下这一行必须可复现。
+ */
+function renderTimeFact(now: number, timezone: string): string {
+  const fmt = new Intl.DateTimeFormat("zh-CN", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    weekday: "long",
+    hour12: false,
+  });
+  return (
+    `[系统事实] 当前时间：${fmt.format(new Date(now))}（${timezone}）。\n` +
+    `这是本次运行唯一可信的时间来源。需要写日期、时间戳或做时间推算时以它为准，不要另行推测。`
+  );
 }
 
 type PartialItem = Omit<ContextItem, "id" | "contentHash" | "estimatedTokens" | "createdAt" | "redactionApplied">;
@@ -248,7 +346,9 @@ function computeIrreducible(frame: ContextFrame, deps: CompileDeps): number {
       item.protocolRole === "PROTOCOL_GROUP_MEMBER" ||
       item.protocolRole === "REQUIRED_VERBATIM" ||
       item.protocolRole === "PLACEHOLDER_REQUIRED" ||
-      item.kind === "SYSTEM_INSTRUCTION"
+      item.kind === "SYSTEM_INSTRUCTION" ||
+      // 时间事实每帧重新生成，Compact 永远够不到它 —— 算进不可压缩集才是事实。
+      item.kind === "SYSTEM_NOTICE"
     ) {
       sum += item.estimatedTokens;
     }

@@ -14,6 +14,9 @@ import type {
   RunId,
   Timestamp,
 } from "./ids.js";
+// 纯类型循环引用（transcript.ts 反过来引本文件的 ModelContent）。
+// import type 会被完全擦除，不产生运行期依赖环。
+import type { ContextMessage } from "./transcript.js";
 
 export type ContextItemKind =
   | "SYSTEM_INSTRUCTION"
@@ -147,4 +150,17 @@ export interface ContextFrameOutcome {
   fixedOverheadTokens: number;
   compactionApplied: CompactionRecord[];
   protocolError?: string;
+  /**
+   * 压缩后的 messages（R-6）。仅在真的压缩了时出现。
+   *
+   * 【定】调用方必须把它写回 `state.messages`，否则下一轮又从原始历史追加，
+   * 压缩只作用于这一帧的局部变量 —— 那正是 R-6 修复前的行为：
+   * 「压了，但下一轮又胖回去」，而 ContextCompacted 事件照常发出，
+   * 从事件流上看压缩是生效的。
+   */
+  compactedMessages?: ContextMessage[];
+  /** COMPACT_BOUNDARY 条目要带的摘要；随 compactedMessages 一起出现。 */
+  compactSummary?: ContextMessage;
+  /** boundary 之后需要重新 append 的消息（不含摘要）。 */
+  compactKept?: ContextMessage[];
 }

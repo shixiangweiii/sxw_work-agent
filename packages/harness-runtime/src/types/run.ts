@@ -34,6 +34,14 @@ export interface AgentSpecSnapshot {
   contentHash: string;
   model: ModelConfigurationSnapshot;
   systemPrompt: string;
+  /**
+   * IANA 时区名（如 "Asia/Shanghai"）。用于把 ClockPort 的时间戳渲染成
+   * 模型能读的受信时间事实（见 context/compile.ts 的 buildFrame）。
+   *
+   * 【定】它属于 AgentSpec 而不是运行期环境变量 —— 一个 Run 看到的时间口径
+   * 必须随 RunSpec 冻结，否则 Replay 会在不同时区下重放出不同的上下文。
+   */
+  timezone: string;
   toolSnapshots: ToolSnapshot[];
   contextPolicy: ContextBudgetPolicy;
   loopPolicy: LoopPolicySnapshot;
@@ -96,6 +104,17 @@ export interface ResumableRunFacts {
   budgetUsage: BudgetUsage;
   verifications: VerificationResult[];
   recoveryItems: RecoveryItem[];
+  /**
+   * 事件/transcript 共用序列的高水位（D-2）。
+   *
+   * 【定】必须落盘。事件从这条序列取号但**不落 transcript**，所以重启后
+   * 单看 transcript 的最后一条只能得到一个下界 —— 从那里续号会把上一段
+   * 已经发给 Trace 的号重发一遍，两份 trace 拼起来就对不上了。
+   *
+   * 这是「消息级恢复」这个选择的又一处代价：能从消息序列反推的都不用存，
+   * 反推不出来的必须显式存（与 budgetUsage / turnCount 同理）。
+   */
+  lastSequence: number;
 }
 
 // ───────────────────────────────────────────────────────── RunSpec
