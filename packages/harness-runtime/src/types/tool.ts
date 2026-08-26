@@ -140,7 +140,47 @@ export interface ToolDefinition {
   cancellation: CancellationDescriptor;
   progressReporting: ProgressReportingDescriptor;
   verification: VerificationDescriptor;
+  /**
+   * 崩溃后能不能观察（决 6，阶段 2 新增）。
+   *
+   * ── 它为什么不能和 `verification` 是同一个字段 ────────────────────────
+   *
+   * 阶段 1 用 `verification.mode !== "NONE"` 回答「§18.2 该走哪条分支」，
+   * 而那个字段说的是「**执行后**能不能验」。两件事真的不同：
+   *
+   *   `append_log` 执行后验不了（验证器不知道「该有几行」），
+   *   但崩溃后能不能观察，取决于**执行前有没有留下前置指纹**。
+   *
+   * 更要紧的是：阶段 2 的研究问题正是「有多少次 resume 落进第三条分支」，
+   * 而分流依据就是这个字段 —— 测量仪器和被测对象是同一个旋钮。
+   * `write_note` 的 idempotency 注释自己承认过这件事：
+   * 「覆盖写严格说是幂等的，标成非幂等是为了让分支二有工具可测」。
+   *
+   * 【定】声明它**不等于**崩溃后一定观察得了。真正的判据是 Action 级事实
+   * （transcript 里那条 `ACTION_FACT`），不是这里。这个字段只说明
+   * 「这个工具**原则上**可以这么观察」。
+   */
+  recoveryObservation?: RecoveryObservationDescriptor;
   concurrency?: ConcurrencyDescriptor;
+}
+
+/**
+ * 崩溃后观察的声明。
+ *
+ * `kind` 供 VerificationPort 的实现理解「该拍什么指纹、怎么比」——
+ * Runtime 只负责在执行前把指纹存下来、在恢复时取出来交回去，
+ * **不理解指纹的内容**（那是工具域知识，而依赖方向禁止 Runtime 认识 Case 包）。
+ */
+export interface RecoveryObservationDescriptor {
+  kind: "TARGET_EXISTS" | "TARGET_CONTENT_HASH" | "TARGET_APPEND_TAIL";
+  /**
+   * 观察是否**必须**有执行前指纹才成立。
+   *
+   * false：像 write_note 那样「目标内容 == 计划内容」就能判定，不需要前置状态；
+   * true ：像 append_log 那样的**相对**操作 —— 目标状态取决于起始状态，
+   *        没有起始状态的指纹就无从判断那一行到底追加了没有。
+   */
+  requiresPreFingerprint: boolean;
 }
 
 export interface ToolSnapshot {
@@ -276,4 +316,35 @@ export interface VerificationResult {
   status: "PASSED" | "FAILED" | "SKIPPED";
   detail: string;
   at: Timestamp;
+  /**
+   * 这条必需验证「没拿到通过」的成因（决 2，阶段 2 新增）。
+   *
+   * 【定】它只在 `required && status !== "PASSED"` 时有意义，
+   * 且**必须来自事实**（谁拒的、哪一步失败的），不得由结算逻辑推断。
+   *
+   * 为什么需要它：`outcome.kind` 里 `USER_REJECTED` 有值域、无事实来源 ——
+   * 结算时看到一条失败的必需验证，分不出「用户按了 N」和「工具挂了」。
+   * 而这两件事对用户的意义完全不同：前者是他自己的决定，
+   * 后者是需要排查的故障。
+   */
+  unmetCause?: UnmetCause;
 }
+
+/**
+ * 【定】值域只放**有明确事实来源**的成因。
+ *
+ * 特意**不**包含「模型声称做不了」—— 那需要判断模型的话语意图，
+ * 会把结算从「只查事实表」拖回「读模型说了什么」，直接违反不变量 12。
+ * 那一类继续走 SUCCESS ＋ summary，取舍写在 ADR 里（决 2）。
+ */
+export type UnmetCause =
+  /** 用户在审批环节明确拒绝。 */
+  | "USER_REJECTED"
+  /** Policy 判定越界。 */
+  | "POLICY_DENIED"
+  /** 工具执行失败或抛异常。 */
+  | "TOOL_FAILED"
+  /** 被取消（用户 cancel 或批内策略跳过）。 */
+  | "CANCELLED"
+  /** 走到了验证但没能得出结论。 */
+  | "NOT_OBSERVED";

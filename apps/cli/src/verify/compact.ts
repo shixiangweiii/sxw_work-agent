@@ -32,6 +32,7 @@ import {
   type ContextMessage,
   type TranscriptEntry,
 } from "@workagent/harness-runtime";
+import { listDirSnapshot } from "@workagent/micro-cases";
 import { compose } from "../compose.js";
 import {
   ScriptedModelPort,
@@ -49,14 +50,26 @@ const LONG_REASONING = "我需要仔细想一想这一步该怎么做，".repeat
 /** 一个可辨认的标记：它只出现在推理块里，出现在请求体里就说明没剥干净。 */
 const REASONING_MARK = "我需要仔细想一想";
 
+/**
+ * 【定】本脚本只注册它真正用到的那一个工具。
+ *
+ * 阶段 2 加 `now` 工具时这条脚本当场翻红：阈值是**帧级**的，而
+ * `fixedOverheadTokens` 是「工具数 × 180」—— 多一个工具就多 180，
+ * 留给 messages 的额度被挤掉一大块，压缩行为整个变形。
+ *
+ * 夹具不该对「case 包里现在有几个工具」敏感。它要验的是 Compact 的落地，
+ * 不是工具清单。锁成单工具之后，将来再加工具也不会误伤这条脚本。
+ */
+const FIXTURE_TOOLS = [listDirSnapshot];
+
 const POLICY = {
   ...DEFAULT_CONTEXT_POLICY,
   reservedOutputTokens: 1_024,
-  softInputLimitTokens: 900,
+  softInputLimitTokens: 600,
   hardInputLimitTokens: 20_000,
-  // 注意它是**帧级**预算：工具定义固定开销就有 540，system prompt ＋ 时间事实
+  // 注意它是**帧级**预算：1 个工具的固定开销 180，system prompt ＋ 时间事实
   // 再占一百多。compileFrame 会先扣掉这些，剩下的才是留给 messages 的额度。
-  compactTargetTokens: 800,
+  compactTargetTokens: 440,
 };
 
 async function main(): Promise<void> {
@@ -82,11 +95,13 @@ async function main(): Promise<void> {
 
     const model = new ScriptedModelPort(script, estimateFromBody);
     const composed = compose({
+      dbPath: ":memory:",
       workspaceRoot: ws.root,
       approvalDecider: async () => ({ approved: true }),
       trace,
       modelPortOverride: model,
       contextPolicy: POLICY,
+      tools: FIXTURE_TOOLS,
     });
 
     section("A. 阈值与脚本");
@@ -298,11 +313,13 @@ async function countReasoningMarksWithProfile(
     ];
     const model = new ScriptedModelPort(script, estimateFromBody);
     const composed = compose({
+      dbPath: ":memory:",
       workspaceRoot: ws.root,
       approvalDecider: async () => ({ approved: true }),
       trace: new CollectingTraceSink(),
       modelPortOverride: model,
       contextPolicy: POLICY,
+      tools: FIXTURE_TOOLS,
       profileOverride: {
         ...base,
         context: { ...base.context, reasoningBlockRule: "VERBATIM_REQUIRED" },

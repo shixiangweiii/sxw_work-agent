@@ -43,6 +43,24 @@ import {
 import { compose } from "../compose.js";
 import { ScriptedModelPort, banner, fact, section, tempWorkspace, verdict } from "./harness.js";
 
+/**
+ * 三轮脚本。第 2 轮那次「重写」不是冗余 —— 它模拟的是真 Agent 的行为。
+ *
+ * ── 为什么必须有它（阶段 2 收紧 C 段判据后暴露的）──────────────────────
+ *
+ * 中断路径上 `tc_2` 会被合成一个 SKIPPED result（cancel 的正常处置）。
+ * 配对是完好的，所以 resume 不会走三条恢复分支中的任何一条 ——
+ * 它直接进主循环问模型「接下来做什么」。**真 Agent 会看到那个 SKIPPED
+ * 然后把写补上**，而两轮脚本在这里直接说「两件事都做完了」就收工，
+ * 于是恢复路径的 note.txt 根本不存在。
+ *
+ * 阶段 1 的 C 段判据只查「都到终态 / 无未配对 / transcript 只增」，
+ * 三条全绿 —— 一个**产物完全缺失**的恢复就这样被判成了「与基线一致」。
+ * 那正是存量清单 §4 第 2 条说的「判据太松」的实际后果。
+ *
+ * 基线跑这一轮时是一次同内容覆盖写，幂等无害；恢复跑到它时才是真正的补做。
+ * 两条路径因此产出逐字相同的 note.txt，「结果一致」这句话才有了对应物。
+ */
 const SCRIPT = () =>
   new ScriptedModelPort([
     {
@@ -50,6 +68,12 @@ const SCRIPT = () =>
       toolCalls: [
         { toolCallId: "tc_1", name: "list_dir", input: { path: "." } },
         { toolCallId: "tc_2", name: "write_note", input: { path: "note.txt", content: "hello" } },
+      ],
+    },
+    {
+      text: "确认一下 note.txt 写好了没有，没有就补上。",
+      toolCalls: [
+        { toolCallId: "tc_3", name: "write_note", input: { path: "note.txt", content: "hello" } },
       ],
     },
     { text: "两件事都做完了。", toolCalls: [] },
@@ -212,22 +236,50 @@ async function main(): Promise<void> {
   // ═══════════════════════════════════════════════════ C. 对比
   section("C. 与基线对比");
 
+  /**
+   * ── 阶段 2 收紧了这一段的判据（存量清单 §4 第 2 条）──────────────────
+   *
+   * 原判据只有三条：两条路径都到终态、无未配对、transcript 只增。
+   * 它**接受**基线 COMPLETED 对恢复 COMPLETED_WITH_LIMITS，也不比较
+   * 最终 outcome、不比较 note.txt 内容、不比较最终消息序列 ——
+   * 于是脚本抬头那句「与不中断跑完的结果一致」在判据里没有对应物。
+   *
+   * 「都到了终态」和「结果一致」差得很远：一个把文件写坏了的恢复
+   * 同样能到终态。产物是外部世界的事实，它才是「一致」的真正含义。
+   */
   const bothCompleted =
     baseline.terminal === "COMPLETED" &&
     (interrupted.terminal === "COMPLETED" || interrupted.terminal === "COMPLETED_WITH_LIMITS");
   const noUnpaired = findUnpairedToolUses(interrupted.messages).length === 0;
   const transcriptGrew = interrupted.entries.length >= (interrupted.entriesAtInterrupt ?? 0);
+  // 新增三条：产物一致、outcome 一致、最终消息里的工具调用集合一致。
+  const sameArtifact = baseline.noteContent !== undefined && baseline.noteContent === interrupted.noteContent;
+  const sameOutcome = baseline.outcome === interrupted.outcome;
+  const baselineCalls = toolCallIdsOf(baseline.messages);
+  const interruptedCalls = toolCallIdsOf(interrupted.messages);
+  const sameCallSet =
+    baselineCalls.length > 0 && baselineCalls.every((id) => interruptedCalls.includes(id));
 
   fact("两条路径都到达终态", bothCompleted);
   fact("resume 后无未配对 tool_use", noUnpaired);
   fact("transcript 只增不改", transcriptGrew);
+  fact("产物 note.txt 一致", `${sameArtifact}（基线 ${JSON.stringify(baseline.noteContent)} / 恢复 ${JSON.stringify(interrupted.noteContent)}）`);
+  fact("outcome 一致", `${sameOutcome}（${baseline.outcome} vs ${interrupted.outcome}）`);
+  fact("工具调用集合覆盖基线", `${sameCallSet}（基线 ${baselineCalls.length} 个）`);
 
+  const cOk = bothCompleted && noUnpaired && transcriptGrew && sameArtifact && sameCallSet;
   verdict(
-    bothCompleted && noUnpaired && transcriptGrew,
-    bothCompleted && noUnpaired
-      ? "消息级恢复成立：丢弃内存状态后，仅凭 transcript 就能重建并继续到终态"
-      : "消息级恢复未能重建出可继续的状态",
+    cOk,
+    cOk
+      ? "消息级恢复成立：丢弃内存状态后仅凭 transcript 重建并继续到终态，**且产物与基线逐字一致、基线做过的工具调用一个不少**"
+      : "恢复到了终态，但结果与基线不一致 —— 「到终态」不等于「做对了」",
   );
+  if (!sameOutcome) {
+    console.log(
+      "\n   \x1b[33m注意\x1b[0m：outcome 与基线不同。这不一定是错的 —— 恢复路径上多出的\n" +
+        "   那次观察本身就是事实。但它必须是**被解释过**的差异，而不是被判据放过的差异。",
+    );
+  }
 
   // ═══════════════════════════════════ C2. 事件与 transcript 的定序（D-2）
   section("C2. 跨 resume 的序号是不是一条线（D-2）");
@@ -311,6 +363,7 @@ async function runOnce(opts: {
 
   try {
     const composed = compose({
+      dbPath: ":memory:",
       workspaceRoot: ws.root,
       approvalDecider: async () => ({ approved: true }),
       trace,
@@ -444,6 +497,7 @@ async function simulateHardCrash(decision: "CONTINUE" | "ABORT" = "CONTINUE"): P
   const trace = new CollectingTraceSink();
   try {
     const composed = compose({
+      dbPath: ":memory:",
       workspaceRoot: ws.root,
       approvalDecider: async () => ({ approved: true }),
       trace,
@@ -607,3 +661,14 @@ main().catch((e) => {
   console.error(e);
   process.exit(1);
 });
+
+/** 消息里出现过的所有 toolCallId（按出现顺序，去重）。 */
+function toolCallIdsOf(messages: ContextMessage[]): string[] {
+  const out: string[] = [];
+  for (const m of messages) {
+    for (const c of m.content) {
+      if (c.type === "tool_call" && !out.includes(c.toolCallId)) out.push(c.toolCallId);
+    }
+  }
+  return out;
+}

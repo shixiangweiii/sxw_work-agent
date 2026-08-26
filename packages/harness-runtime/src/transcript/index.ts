@@ -90,6 +90,54 @@ export function readRunFacts(entries: TranscriptEntry[]): ResumableRunFacts | un
   return undefined;
 }
 
+// ═══════════════════════════════════════════════ 逐 Action 事实（决 6）
+
+/** ACTION_FACT 条目里标识「这条装的是执行前指纹」的判别键。 */
+export const ACTION_PRE_FINGERPRINT_KIND = "ACTION_PRE_FINGERPRINT";
+
+export interface ActionPreFingerprint {
+  toolCallId: string;
+  toolName: string;
+  /** Verifier 定义的内容，Runtime 不解释（见 ObservationResult.fingerprint）。 */
+  fingerprint: unknown;
+  at: number;
+}
+
+export function makeActionFactEntry(
+  runId: RunId,
+  fact: ActionPreFingerprint,
+): Omit<TranscriptEntry, "sequence"> {
+  return {
+    runId,
+    schemaVersion: TRANSCRIPT_SCHEMA_VERSION,
+    kind: "ACTION_FACT",
+    meta: { metaKind: ACTION_PRE_FINGERPRINT_KIND, fact },
+    createdAt: fact.at,
+  };
+}
+
+/**
+ * 按 toolCallId 索引所有执行前指纹。
+ *
+ * 【定】这是 §18.2 分支二的**真正判据** —— 不是工具的静态声明。
+ * 同一个工具这次拍了指纹就能观察（分支二），没拍就观察不了（分支三），
+ * 而「拍不拍」由 Runtime 侧的 Verifier 决定。决 6 要的就是把这个旋钮
+ * 从被测对象身上挪到测量装置这边。
+ */
+export function readActionPreFingerprints(
+  entries: TranscriptEntry[],
+): Map<string, ActionPreFingerprint> {
+  const out = new Map<string, ActionPreFingerprint>();
+  for (const e of entries) {
+    if (e.kind !== "ACTION_FACT") continue;
+    if (e.schemaVersion > CURRENT_SUPPORTED_SCHEMA) continue;
+    if (e.meta?.["metaKind"] !== ACTION_PRE_FINGERPRINT_KIND) continue;
+    const f = e.meta["fact"] as ActionPreFingerprint;
+    out.set(f.toolCallId, f);
+  }
+  return out;
+}
+
 // ══════════════════════════════════════════════════ 未配对扫描
 
 export interface UnpairedToolUse {

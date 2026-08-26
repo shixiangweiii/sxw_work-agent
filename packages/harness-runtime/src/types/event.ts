@@ -38,7 +38,8 @@ export type RunEvent =
       { actionId: ActionId; status: string; required: boolean; detail: string }>
   | Ev<"ActionBatchSettled", { batchId: ActionBatchId; resultCount: number; callCount: number }>
   | Ev<"InterjectionAccepted", { content: string }>
-  | Ev<"BudgetSoftLimitReached", { axis: string; used: number; limit: number }>
+  // ratio 一并带上：读 trace 的人不该再去翻 RunSpec 才知道 0.8 这个阈值从哪来。
+  | Ev<"BudgetSoftLimitReached", { axis: string; used: number; limit: number; ratio: number }>
   | Ev<"BudgetHardLimitReached", { axis: string; used: number; limit: number }>
   | Ev<"RecoveryRequired", { items: number }>
   /**
@@ -53,7 +54,7 @@ export type RunEvent =
       { field: string; declared: string; observed: string; disposition: "RECORD" | "FAIL_FAST" }>
   | Ev<"ResumeStarted", { fromSequence: number; rebuiltMessages: number }>
   | Ev<"ResumeUnpairedToolUse",
-      { toolCallId: string; toolName: string; branch: string }>;
+      { toolCallId: string; toolName: string; branch: string ; hasPreFingerprint: boolean }>;
 
 interface EvBase {
   runId: RunId;

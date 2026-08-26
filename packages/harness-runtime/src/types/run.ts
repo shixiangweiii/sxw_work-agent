@@ -58,6 +58,14 @@ export interface LoopPolicySnapshot {
 export interface ApprovalPolicySnapshot {
   /** 需要审批的 effectType。TRUSTED_PERSONAL preset 下只有写与删。 */
   requiresApprovalFor: string[];
+  /**
+   * 审批等待超时（U-2）。不设＝永远等。
+   *
+   * 【定】超时的语义是**拒绝**，不是批准。没人应答不能当作默许 ——
+   * 那会让「写操作要人确认」这条闸门在无人值守时自动敞开，
+   * 而无人值守恰恰是最不该敞开的场景。
+   */
+  approvalTimeoutMs?: number;
 }
 
 // ─────────────────────────────────────────────────────────── Budget
@@ -115,6 +123,20 @@ export interface ResumableRunFacts {
    * 反推不出来的必须显式存（与 budgetUsage / turnCount 同理）。
    */
   lastSequence: number;
+  /**
+   * §18.2 三条分支各命中过多少次（阶段 2 的**测量装置**）。
+   *
+   * ── 它是阶段 2 研究问题的唯一出口 ──────────────────────────────────
+   *
+   * Roadmap §4 的研究问题是「跑够多真实任务，统计有多少次 resume() 落进
+   * 『非幂等且不可观察』那条分支」。比例低说明消息级恢复的粒度选对了。
+   *
+   * 【定】阶段 2 只建**测量装置**，不出结论（Roadmap §4 的 B 方案）。
+   * 故障注入跑出来的是**构造分布**，不是真实分布 —— 真实分布要等阶段 3
+   * 有真工具。所以这个字段可以被 Eval 导出，但导出的数字不足以支撑
+   * 「恢复粒度选对了」这句话。
+   */
+  resumeBranchCounts?: Record<string, number>;
 }
 
 // ───────────────────────────────────────────────────────── RunSpec

@@ -1,0 +1,55 @@
+{
+  "_comment_purpose": "§24.6【定】阶段 2 的对照端点。选它的理由和选百炼当主力端点的理由是同一条的反面：百炼零协议兜底（缺 tool_result、错 id 一律 200 放行），用它开发能逼出自持逻辑的全部漏洞；DeepSeek 会真的校验，所以把 Runtime 产出的请求打到它上面，是一次**免费的正确性检查**。发现系统性缺陷 = 阶段 1「批内配对不变量 100% 由 Runtime 自持」这个结论有反例。",
+  "_comment_evidence": "全部字段出自 Spike 0 第三轮实测（ProviderProtocolFacts_V20260823_R3.md），四个端点、同一个模型 ID、同一套探针。没有一条是推测的；推测的字段一律不写，让 confidence 说话。",
+
+  "id": "epcp_deepseek_anthropic_v4flash",
+  "endpointId": "ep_deepseek_anthropic",
+  "shape": "ANTHROPIC_MESSAGES",
+  "modelId": "deepseek-v4-flash",
+  "_comment_expectedBaseUrlHost": "U-6：compose 据此断言 baseUrl 与声明指向同一个端点。这条对本 profile 尤其要紧 —— 它与主力端点的三组判定几乎处处相反，错配会静默跑出一堆莫名其妙的 400。",
+  "expectedBaseUrlHost": "api.deepseek.com",
+
+  "_comment_protocol": "与百炼**处处相反**：缺 tool_result → 400，错 tool_call_id → 400，报错还指名道姓。这正是它作为对照端点的价值。disable_parallel_tool_use 同样被静默接受且完全无效（4/4/4），这一条两个平台一致。",
+  "protocol": {
+    "validatesToolResultPairing": true,
+    "validatesToolCallId": true,
+    "validatesToolResultOrder": false,
+    "validatesToolDefinitionSchema": false,
+    "validatesToolInputSchema": false,
+    "honorsDisableParallelToolCalls": false
+  },
+
+  "_comment_context": "【本轮最重要的一条】DeepSeek 的推理块是**服务端状态**，不是协议字段：签名字段装的是 UUID 句柄而非加密载荷，推理正文不回传客户端，服务端按 id 索引持有。所以「推理块可删」在百炼成立不是因为协议宽松，是因为百炼服务端无状态。凭空构造的历史会被 400 拒掉 —— 故 VERBATIM_REQUIRED。缓存是严格前缀且会**部分失效**：改前缀后回落到 tools+system 的公共前缀 384 token（该数恰好等于 P4 独立测得的固定前缀，不是噪声）。",
+  "context": {
+    "reasoningBlockRule": "VERBATIM_REQUIRED",
+    "reasoningIsServerSideStateful": true,
+    "hasExplicitBlockCloseEvent": true,
+    "cacheMatching": "STRICT_PREFIX",
+    "supportsExplicitCacheBreakpoints": true
+  },
+
+  "_comment_tokens": "每请求固定底数 84（百炼是 5，差 17 倍）—— 这个数出自本端点本形状的探针，与 D-1 记的那个错配不是一回事。含推理块时的 count_tokens 行为**未测**（D-3 的探针只在百炼上跑过），所以 countTokensAccuracy 与 countTokensExcludesReasoning 都不写：宁可留空让本地估算兜底，也不写一个没有证据的精确声明 —— U-1 的漂移规则 3 会当场把这种谎言变成 FAIL_FAST。",
+  "tokens": {
+    "hasCountTokensEndpoint": true,
+    "perRequestBaseTokens": 84,
+    "billedInputFormula": "INPUT_PLUS_CACHE",
+    "usageFieldMap": {
+      "input": "input_tokens",
+      "output": "output_tokens"
+    }
+  },
+
+  "_comment_errors": "配对错误在这里会以 source=MODEL_PROVIDER / status=400 出现，而在百炼上永远不会 —— §13.1 的映射表必须允许同一个逻辑错误在不同端点有不同 source。这也是对照测试能发现问题的机制本身。",
+  "errors": {
+    "discriminators": ["HTTP_STATUS", "MESSAGE_MATCH"]
+  },
+
+  "observedAt": 1787000000000,
+  "probeSuiteVersion": "s0-r3",
+  "sourceEvidenceRefs": [
+    "spikes/s0-provider-protocol/raw/p9-deepseek-anthropic-shape-2026-08-23T02-45-36-431Z.jsonl",
+    "sxw_aicoding/WorkAgent调研/ProviderProtocolFacts_V20260823_R3.md"
+  ],
+  "_comment_confidence": "PROBED：协议、上下文、token 三组的每个已写字段都能追溯到第三轮的一次具体探针。未测的字段没有写 —— 那是 confidence 之外的第二道纪律。",
+  "confidence": "PROBED"
+}

@@ -22,16 +22,22 @@ const MAX_ENTRIES = 200;
 
 export const listDirDefinition: ToolDefinition = {
   id: asId("tool_list_dir"),
-  version: "1.1.0",
+  version: "1.2.0",
   name: "list_dir",
   description:
     "列出某个目录下的条目。只读，不修改任何内容。path 相对于 workspace 根目录，用 \".\" 表示根目录本身。" +
-    '返回 JSON：{"path","total","returned","truncated","entries":[{"name","kind","sizeBytes"}]}。' +
-    "kind 是 \"file\" 或 \"directory\"；sizeBytes 只有文件才有，目录不返回该字段。",
+    '返回 JSON：{"path","total","cursor","returned","truncated","entries":[{"name","kind","sizeBytes"}]}，' +
+    '还有下一页时带 "nextCursor"，被取消时带 "cancelled" 与 "incompleteReason"。' +
+    "kind 是 \"file\" 或 \"directory\"；sizeBytes 只有文件才有，目录不返回该字段。" +
+    "条目按名称升序稳定排列，所以翻页不会漏项或重项。",
   inputSchema: {
     type: "object",
     properties: {
       path: { type: "string", description: '相对 workspace 根的路径，根目录用 "."' },
+      cursor: {
+        type: "number",
+        description: `从第几项开始列举（0 起）。返回里有 nextCursor 就说明还有下一页，带着它再调一次。单页上限 ${MAX_ENTRIES} 项。`,
+      },
     },
     required: ["path"],
   },
@@ -64,7 +70,7 @@ export const listDirDefinition: ToolDefinition = {
 };
 
 export async function executeListDir(
-  input: { path: string },
+  input: { path: string; cursor?: number },
   ctx: ToolExecutionContext,
 ): Promise<ToolExecutionOutcome> {
   const target = resolve(ctx.workspaceRoot, input.path);
@@ -86,11 +92,32 @@ export async function executeListDir(
   }
 
   try {
-    const names = await readdir(target);
+    /**
+     * 【定】E-4：稳定排序。
+     *
+     * 没有它，「第二页」是一个没有意义的概念 —— `readdir` 的顺序由文件系统
+     * 决定，两次调用之间可以不同，游标翻页会漏项或重项。
+     * 「逐个盘点」这类任务恰恰最依赖不漏不重。
+     */
+    const names = (await readdir(target)).sort();
+    const start = Math.max(0, Math.trunc(input.cursor ?? 0));
+    const page = names.slice(start, start + MAX_ENTRIES);
     const entries: Array<{ name: string; kind: "file" | "directory"; sizeBytes?: number }> = [];
 
-    for (const name of names.slice(0, MAX_ENTRIES)) {
-      if (ctx.signal.aborted) break;
+    /**
+     * E-4 的另一半：**取消导致的不完整**与**容量截断**必须分得开。
+     *
+     * 修复前两者都表现为 `truncated: true`，而它们对模型的含义完全相反：
+     *   容量截断 → 还有下一页，带 cursor 再来一次就行；
+     *   被取消   → 这次观察本身不完整，**不能**当成事实用。
+     * 混在一起的话，模型会拿一份被取消的半截清单去写汇总。
+     */
+    let cancelled = false;
+    for (const name of page) {
+      if (ctx.signal.aborted) {
+        cancelled = true;
+        break;
+      }
       const s = await stat(join(target, name));
       entries.push(
         s.isDirectory()
@@ -123,13 +150,23 @@ export async function executeListDir(
      * 目录超 200 项时模型会看到「共 350 项」却只拿到 200 条，且无任何提示 ——
      * 它会以为自己盘点完了。
      */
+    const nextCursor = start + entries.length;
     return {
       ok: true,
       output: JSON.stringify({
         path: input.path,
         total: names.length,
+        cursor: start,
         returned: entries.length,
-        truncated: names.length > entries.length,
+        // 还有下一页时给出 nextCursor —— 模型不必自己算偏移。
+        ...(!cancelled && nextCursor < names.length ? { nextCursor } : {}),
+        truncated: !cancelled && nextCursor < names.length,
+        ...(cancelled
+          ? {
+              cancelled: true,
+              incompleteReason: "执行期间被取消，本次列举不完整，不要据此汇总",
+            }
+          : {}),
         entries,
       }),
       sideEffectState: "NO_EFFECT",

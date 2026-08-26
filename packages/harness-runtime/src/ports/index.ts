@@ -1,8 +1,12 @@
 /**
- * Runtime Ports（V05 §8.7）。共 14 个。
+ * Runtime Ports（V05 §8.7）。共 **15** 个。
  *
  * D-14：阶段 1 实现 10 个（标 ★），4 个只留接口。
  * 四个不实现的共同点：阶段 1 没有任何用例能检验它们设计得对不对，实现了也是盲写。
+ *
+ * 阶段 2 新增第 15 个 `RunStorePort`（也标 ★）—— 跨进程 resume 的前提。
+ * 它不是「顺手多加一个」：§8.7 原本 14 个是在**单进程**假设下数出来的，
+ * 那个假设在阶段 2 被去掉了。
  *
  * §2.5 规格纪律第 4 条：每新增一个 Port，必须同时指出强制它存在的不变量。
  * 下面每个接口的注释都写了这一条。
@@ -17,7 +21,7 @@ import type { EndpointCapabilityProfile } from "../types/endpoint.js";
 import type { RuntimeErrorRecord } from "../types/error.js";
 import type { RunEvent } from "../types/event.js";
 import type { ContextMessage, TranscriptEntry } from "../types/transcript.js";
-import type { ModelUsage } from "../types/run.js";
+import type { ModelUsage, RunSpec, RunStatus } from "../types/run.js";
 import type {
   EffectResolutionDescriptor,
   ExecutionAttempt,
@@ -26,7 +30,7 @@ import type {
   ToolDefinition,
   VerificationResult,
 } from "../types/tool.js";
-import type { JsonValue, RunId } from "../types/ids.js";
+import type { JsonValue, RunId, RunSpecId, Timestamp } from "../types/ids.js";
 
 // ═══════════════════════════════════════════════ ★ 阶段 1 实现（10）
 
@@ -133,6 +137,50 @@ export interface TranscriptStorePort {
 }
 
 /**
+ * ★ RunStorePort —— Run 身份的持久化（阶段 2 新增，第 15 个）。
+ *
+ * 强制它的不变量：**§18.4【定】resume 必须使用 RunSpec 冻结的那一份，
+ * 不得使用当前配置**（连带不变量 14：端点能力声明须与冻结版一致）。
+ *
+ * 阶段 1 用内存 Map 就满足了这条 —— 进程没死，冻结的那份自然还在。
+ * 跨进程之后它不再自动成立：`resume()` 第一步要读 RunSpec，而
+ * §18.2 的三条分支判定完全依赖 `agentSpec.toolSnapshots`。若这时用
+ * 「今天 compose 出来的」工具声明，改一次 `append_log` 的 verification
+ * 就会让同一条 transcript 走进不同分支，**而盘上看不出来**。
+ *
+ * 为什么必须是 Port 而不是让 Facade 直接读库：Runtime 不得 import
+ * `node:sqlite`（阶段 2 新增的第 5 条边界 grep）。
+ *
+ * 注意它**不存序号高水位** —— `lastSequence` 的权威副本在 transcript 的
+ * `RUN_META` 里。存第二份就会有分叉的那天。
+ */
+export interface RunStorePort {
+  /** 【定】RunSpec 与初始状态必须一起落盘：有 Run 无 spec 是不可恢复的状态。 */
+  createRun(input: {
+    runId: RunId;
+    spec: RunSpec;
+    status: RunStatus;
+    now: Timestamp;
+  }): Promise<void>;
+  /** 读回**冻结的那一份**。取不到说明这个 Run 不存在，不要回退到当前配置。 */
+  getRunSpec(runId: RunId): Promise<RunSpec | undefined>;
+  getStatus(runId: RunId): Promise<RunStatus | undefined>;
+  setStatus(runId: RunId, status: RunStatus, now: Timestamp): Promise<void>;
+  /** 供 CLI 的 `--list-runs`。按 updatedAt 倒序。 */
+  list(limit?: number): Promise<RunListItem[]>;
+}
+
+export interface RunListItem {
+  runId: RunId;
+  runSpecId: RunSpecId;
+  status: RunStatus;
+  /** 任务原文的前若干字符，供终端一眼认出是哪个 Run。 */
+  task: string;
+  createdAt: Timestamp;
+  updatedAt: Timestamp;
+}
+
+/**
  * ★ ToolHandlerPort —— 工具执行。
  * 强制它的不变量：每个外部副作用关联 Action 和 Attempt（不变量 3）。
  */
@@ -147,6 +195,14 @@ export interface ToolExecutionContext {
   signal: AbortSignal;
   workspaceRoot: string;
   onProgress(note: string): void;
+  /**
+   * 随 AgentSpec 冻结的 IANA 时区名。
+   *
+   * 【定】工具不得自己读宿主时区。注入给模型的受信时间事实用的是这个时区，
+   * 工具若用另一个，模型会同时拿到两个时区不同的时间 —— 而它没有任何
+   * 办法发现这件事。Replay 也要求时区随 Run 冻结而不是随重放机器变。
+   */
+  timezone: string;
 }
 
 export interface ToolExecutionOutcome {
@@ -200,6 +256,43 @@ export interface VerificationPort {
     outcome: ToolExecutionOutcome,
     ctx: ToolExecutionContext,
   ): Promise<VerificationResult>;
+
+  /**
+   * 执行**前**拍一张外部世界的指纹（决 6）。
+   *
+   * 为什么复用这个 Port 而不新增一个：**前置观察与崩溃后观察必须是同一个
+   * 实现**，否则两次测的不是同一个量，比对没有意义。而 VerificationPort
+   * 本来就是「独立观察外部世界」的那一个。
+   *
+   * 返回 undefined = 这次观察不了。Runtime 据此把该 Action 归入
+   * 「崩溃后不可观察」，也就是 §18.2 的第三条分支 —— **这是一个 Action 级
+   * 事实，不是工具的静态属性**，故障注入可以逐次控制它。
+   */
+  observePre?(
+    action: PreparedAction,
+    ctx: ToolExecutionContext,
+  ): Promise<ObservationResult | undefined>;
+
+  /**
+   * 崩溃恢复时：拿执行前的指纹和现在的外部世界比，判断那次执行发生没发生。
+   *
+   * 这是把 §18.2 窗口 A/B 的「不可区分」变成「可区分」的唯一途径 ——
+   * 也是消息级恢复能不能用的关键：分支二占比越高，那个取舍越成立。
+   */
+  observePost?(
+    action: PreparedAction,
+    ctx: ToolExecutionContext,
+    preFingerprint: JsonValue,
+  ): Promise<{ applied: boolean; detail: string } | undefined>;
+}
+
+export interface ObservationResult {
+  /**
+   * 外部世界的指纹。**Runtime 不理解它的内容** —— 那是工具域知识，
+   * 而依赖方向禁止 Runtime 认识 Case 包。这里只负责存取。
+   */
+  fingerprint: JsonValue;
+  at: Timestamp;
 }
 
 /** ★ ClockPort —— 测试注入 FakeClock。 */
@@ -265,6 +358,8 @@ export interface RuntimePorts {
   model: ModelPort;
   protocol: ModelProtocolPort;
   transcript: TranscriptStorePort;
+  /** 阶段 2 新增。跨进程 resume 的前提，见上方接口注释。 */
+  runs: RunStorePort;
   tools: ToolHandlerPort;
   redaction: RedactionPort;
   effects: EffectResolverPort;

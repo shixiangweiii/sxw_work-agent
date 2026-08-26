@@ -16,12 +16,26 @@
  * 这两个属性不是为了凑测试硬贴的标签，是追加语义本身的性质：
  *
  *   · 非幂等：同样的输入执行两次，文件里就有两行。覆盖写没有这个问题。
- *   · 不可观察：崩溃后重新读文件，看到那一行也无法断定「是上次那次调用写的」
- *     —— 同样的内容可能来自更早的调用。REOBSERVE 在这里给不出结论，
- *     所以它诚实地声明 verification.mode = "NONE"，而不是假装能验证。
+ *   · 执行后验不了：验证器不知道「该有几行」。看到那一行也无法断定
+ *     「是上次那次调用写的」—— 同样的内容可能来自更早的调用。
+ *     所以 `verification.mode = "NONE"` 是诚实的，不是偷懒。
  *
- * 这正是「消息级恢复的代价」最锋利的那个形状：transcript 上区分不了窗口 A 与 B，
- * 而工具自己也帮不上忙。除了停下来问人，没有安全的做法。
+ * ── 阶段 2 修正了一处措辞（决 6）──────────────────────────────
+ *
+ * 原文写「不可观察」，那是**错的**，或者说是把两件事混成了一件：
+ *
+ *   · 「执行后能不能验」   —— 不能。这是追加语义决定的。
+ *   · 「崩溃后能不能观察」 —— **取决于执行前有没有拍下文件尾部的指纹**。
+ *
+ * 追加是**相对**操作：目标状态取决于起始状态。知道起始时文件尾部长什么样，
+ * 就能判断那一行到底追加了没有；不知道就判不出来。所以它声明
+ * `recoveryObservation: { requiresPreFingerprint: true }` ——
+ * **原则上可观察，但这一次观察不观察得了是 Action 级事实**，
+ * 由 Runtime 侧的 Verifier 决定，记在 transcript 的 ACTION_FACT 里。
+ *
+ * 这个区分是阶段 2 研究问题成立的前提：在此之前，「有多少次 resume 落进
+ * 第三条分支」的分流依据就是这个工具身上的一个静态字段 ——
+ * 测量仪器和被测对象是同一个旋钮。
  */
 
 import { appendFile, mkdir } from "node:fs/promises";
@@ -73,14 +87,27 @@ export const appendLogDefinition: ToolDefinition = {
   cancellation: { cooperative: true },
   progressReporting: { mode: "NONE" },
   /**
-   * 【定】声明「无法观察」，而不是声明一个给不出结论的 REOBSERVE。
-   * 重新读文件看到那一行，也不能断定它来自上次那个 toolCallId。
-   * 这个诚实的 NONE 就是 resume() 落进第三条分支的判据。
+   * 【定】执行后无法验证 —— 验证器不知道「该有几行」。
+   * 声明一个给不出结论的 REOBSERVE 比声明 NONE 更糟：它会让读代码的人
+   * 以为这一步是被验过的。
+   *
+   * 注意它**不再**是「落第三条分支」的判据（决 6）。那个判据现在是
+   * `recoveryObservation` ＋ 这次执行有没有真的拍到前置指纹。
    */
   verification: {
     mode: "NONE",
     requiredForSuccess: false,
     observationCost: "LOW",
+  },
+  /**
+   * 崩溃后**原则上**可观察，但必须有执行前的尾部指纹（决 6）。
+   *
+   * `requiresPreFingerprint: true` 是这里的关键 —— 它把 append 与
+   * write_note 区分开：后者比「内容 == 计划内容」就够了，不需要起始状态。
+   */
+  recoveryObservation: {
+    kind: "TARGET_APPEND_TAIL",
+    requiresPreFingerprint: true,
   },
 };
 

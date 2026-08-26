@@ -16,3 +16,11 @@ node_modules
 # 每次 CLI 运行落一份 JSONL trace（--no-trace 可关）。
 # 是诊断与评测的 artifact，不是源码 —— 要留证据请显式复制到 评测/ 下。
 .workagent-runs
+
+# 阶段 2：SQLite 库（transcript / run_specs / agent_spec_snapshots / runs）。
+# 它是本机的 Runtime 状态，不是源码；-wal / -shm 是 WAL 模式的伴生文件。
+.workagent-state
+
+# eval:suite 的 trial artifact（trace / manifest / report.json）。
+# 是证据不是源码 —— 要留档请显式复制到 评测/ 下。
+.workagent-eval

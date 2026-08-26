@@ -79,6 +79,14 @@ export const writeNoteDefinition: ToolDefinition = {
     observationCost: "LOW",
     timeoutMs: 5_000,
   },
+  /**
+   * 覆盖写崩溃后可观察，且**不需要**执行前指纹（决 6）：
+   * 目标内容是绝对的（== 计划内容），不像 append 那样取决于起始状态。
+   */
+  recoveryObservation: {
+    kind: "TARGET_CONTENT_HASH",
+    requiresPreFingerprint: false,
+  },
 };
 
 export async function executeWriteNote(

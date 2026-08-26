@@ -33,7 +33,7 @@
 |---|---|---|---|
 | **Spike 0** | 把 Provider 协议的推测换成实测 | 4 个端点的行为写成数据 | ✅ 已完成 |
 | **阶段 1** | 主循环跑通，端点差异挡在外面 | 终端里跑真任务，进程关了就忘 | ✅ 已交付（存量 32 项） |
-| **阶段 2** | 记得住事，崩了能继续 | 关掉再开能接上，故障可复现 | ⬜ 待开工，有 4 条前置 |
+| **阶段 2** | 记得住事，崩了能继续 | 关掉再开能接上，故障可复现 | ✅ 功能开发完成（2026-08-26） |
 | **阶段 3** | 一个真实 Case 端到端 | 网页归档，跟确定性 Baseline 比出高下 | ⬜ |
 | **阶段 4+** | 反证抽象 + 产品化 | 第二个 Case 跑通，有桌面界面 | ⬜ |
 
@@ -193,7 +193,20 @@ Effect 解析、错误副作用状态、批内配对不变量、边界脱敏、`
 
 ---
 
-## 4. 阶段 2：持久化与 Resume ⬜（下一步）
+## 4. 阶段 2：持久化与 Resume ✅（功能开发完成 2026-08-26）
+
+> **实现依据**：[阶段 2 实施方案 V20260826-03](../实施方案设计/阶段2实施方案_V20260826.md)，四批 18 步。
+> **交付状态**：七条验收脚本 **50 条判定全绿**，`eval:suite` pass^3 成立，五条边界 grep 守住。
+>
+> **范围相对本节原文有三处变更**（方案 §0 的决 1）：
+> Replay / Artifact Registry / BlobStore **移出阶段 2、推到阶段 3** ——
+> 理由与 D-14 同源：阶段 1 的工具不产出 Artifact 也不产出大结果，阶段 2 又不加业务工具，
+> 没有用例能检验它们设计得对不对，实现了就是盲写。
+> 连带架构 §28.6 里 Replay 那一行的 Contract 冻结门槛一并移到阶段 3。
+>
+> **实际建了四张表**（不是 13 张）：`transcript_entries` / `run_specs` /
+> `agent_spec_snapshots` / `runs`，外加阶段 2 中途被真崩溃逼出来的 `sequence_counters`。
+> 其余九张事实表的消费者（Layer 2 投影、Eval Inspector）都在阶段 4。
 
 ### 开工前置（四条，做完再动 SQLite）
 
@@ -226,9 +239,20 @@ transcript 落 SQLite。关掉终端明天再开，`resume` 能接上昨天那�
 
 SQLite transcript、Blob；timeout / cancel / retry / error taxonomy 全集；Capability live lease（含 PARKED）、Policy、Approval；`resume()` 与 Recorded Replay；Artifact Registry；数据保留与 GC 最小实现；故障注入 Eval 全集；端点能力回归 ＋ DeepSeek 对照测试。
 
-### 退出门槛
+### 退出门槛（2026-08-26 改写并逐条核对）
 
-三个 crash 窗口、cancel race、未配对 tool_use 的三条处置分支均有可重复验证；对照端点未发现自持逻辑的系统性缺陷。
+> 三个 crash 窗口、cancel race、未配对 tool_use 的三条处置分支，**在真进程级 kill 下**
+> 均有可重复验证；跨进程 resume 在真实端点上完成至少一个多轮任务；
+> **分支分布的测量装置可用**（不设比例阈值）；对照端点未发现自持逻辑的系统性缺陷。
+
+| 门槛 | 状态 | 证据 |
+|---|---|---|
+| 三个 crash 窗口 | ⚠️ **A、B 已验，C 明确不验** | `verify:crash` A 段。窗口 C 是「Blob 已写入但引用消息未落盘」，而 BlobStore 按决 1 推到阶段 3——造个假 Blob 测它，测的是假货 |
+| cancel race | ✅ | `verify:pairing` 新增的「工具执行中被 cancel」真注入（`delay_ms` ＋ 定时 cancel） |
+| 三条处置分支 | ✅ | `verify:crash` A 段各命中一次，B 段验判别力 |
+| 跨进程 resume | ⚠️ **脚本化已验，真实端点待跑** | `verify:persistence` 用真 SIGKILL ＋ 真 SQLite 跑通；真实端点那次需 `.env` 的模型配置先对齐（见 CLAUDE.md 的警告） |
+| 测量装置可用 | ✅ | `RUN_META.resumeBranchCounts` ＋ `eval:suite` 导出 |
+| 对照端点无系统性缺陷 | ⚠️ **装配就绪，实跑待执行** | `verify:drift` D 段验了声明加载与 U-6 断言；实跑要 `npm run verify:drift -- --live`（花钱） |
 
 ### 本阶段真正要回答的问题
 
@@ -240,7 +264,20 @@ SQLite transcript、Blob；timeout / cancel / retry / error taxonomy 全集；Ca
 
 **但那时会有真实数据支撑，而不是推演。**
 
-#### ⚠️ 开工前先定：这个统计的样本从哪来
+#### 已定：取 B 方案（2026-08-26）
+
+**阶段 2 只建测量装置，不出结论。** 三条分支的命中计数落进 transcript 的
+`RUN_META.resumeBranchCounts`，`eval:suite` 可导出；`verify:crash` 证明了三条分支
+在真 `kill -9` 下各自可达，且**同一个 `append_log` 能被送进分支二或分支三** ——
+分流由 Action 级事实决定而非工具声明（决 6）。
+
+这一条的意义比看起来大：在此之前，「有多少次 resume 落进第三条分支」的分流依据
+就是被测对象身上的一个静态字段（`verification.mode`），等于拿它去测它自己。
+
+**结论边界照旧**：故障注入跑出来的是**构造分布**，不是真实分布。
+真实分布要等阶段 3 有真工具、真任务。
+
+#### 原始讨论：这个统计的样本从哪来
 
 **阶段 2 不加工具。** 能跑的「真实任务」就是 2026-08-24 实跑 B 那种目录盘点类——三个 Micro Case 工具里只有 `append_log` 落在「非幂等且不可观察」那一格。用这个工具集去统计分支比例，样本天然偏斜。
 

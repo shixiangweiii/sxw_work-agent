@@ -163,4 +163,15 @@ export interface ContextFrameOutcome {
   compactSummary?: ContextMessage;
   /** boundary 之后需要重新 append 的消息（不含摘要）。 */
   compactKept?: ContextMessage[];
+  /**
+   * COMPACTION_INSUFFICIENT 时：连**不可压缩集**都已经超硬限（R-3）。
+   *
+   * 两种处置在 D-05 里是分开的：
+   *   false → 还有可压空间，主循环可以更激进地压一轮再试；
+   *   true  → 压到底也没用，只能 DETERMINISTIC handoff。
+   *
+   * 修复前这两种情况根本区分不出来 —— 超硬限但「还能压」的帧会被**照常发出**，
+   * 而不是回来再压一次。
+   */
+  irreducibleExceedsHardLimit?: boolean;
 }

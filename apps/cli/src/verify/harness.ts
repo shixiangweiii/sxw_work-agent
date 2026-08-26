@@ -82,7 +82,22 @@ export class ScriptedModelPort implements ModelPort {
   constructor(
     private readonly script: ScriptedTurn[],
     private readonly countTokensImpl: (body: unknown) => number = () => 100,
-  ) {}
+    /**
+     * 起始轮次。**跨进程 resume 的验收必须用它**：恢复段是一个新进程、
+     * 新的 ScriptedModelPort，从第 0 轮重放会把已经配过对的 toolCallId
+     * 再发一次，那不是「模型继续干活」，是一份失真的世界。
+     */
+    startTurn = 0,
+    /**
+     * 每轮的 usage。默认写死 input 100 / output 20 —— **那正是存量清单
+     * §4 第 3 条说的覆盖缺口**：token 与预算路径在脚本化模型下永远是常量，
+     * 所以 usage 清零、预算轴、口径错配这类问题能同时存在而脚本全绿。
+     * `verify:budget` 传真实数值让 token 轴能被撞到。
+     */
+    private readonly usageImpl: ModelUsage = defaultUsage(),
+  ) {
+    this.turn = startTurn;
+  }
 
   async *invoke(
     request: ModelRequest,
@@ -111,7 +126,7 @@ export class ScriptedModelPort implements ModelPort {
       content,
       toolCalls: t.toolCalls,
       stopReason: t.toolCalls.length > 0 ? "tool_use" : "end_turn",
-      usage: usage(),
+      usage: this.usageImpl,
       interrupted: t.interrupted ?? false,
     };
   }
@@ -136,12 +151,23 @@ export function estimateFromBody(body: unknown): number {
   return Math.ceil(JSON.stringify(body).length / 2.5);
 }
 
-function usage(): ModelUsage {
+function defaultUsage(): ModelUsage {
   return {
     inputTokens: 100,
     outputTokens: 20,
     cacheCreationInputTokens: 0,
     cacheReadInputTokens: 0,
     billedInputTokens: 100,
+  };
+}
+
+/** 供验收脚本构造非默认 usage。 */
+export function makeUsage(inputTokens: number, outputTokens: number): ModelUsage {
+  return {
+    inputTokens,
+    outputTokens,
+    cacheCreationInputTokens: 0,
+    cacheReadInputTokens: 0,
+    billedInputTokens: inputTokens,
   };
 }

@@ -53,10 +53,38 @@ class AnthropicMessagesProtocol implements ModelProtocolPort {
   buildRequest(frame: ContextFrame): ModelRequest {
     const messages = toAnthropicMessages(frame.items);
 
+    /**
+     * ── U-9：主动前缀缓存 ────────────────────────────────────────────
+     *
+     * 在此之前全仓没有一处发 `cache_control`，profile 的 `cacheMatching`
+     * 与 `supportsExplicitCacheBreakpoints` 两个字段除类型定义外零消费 ——
+     * 评测报告记录的那 15% 命中率完全来自端点的**隐式**缓存，
+     * Harness 从来没有主动做过任何事。
+     *
+     * 断点打在哪：`tools` ＋ `system` 这一段。理由是它**完全稳定** ——
+     * 实测工具定义固定开销 540 token，加 system 约 640，一个 Run 内一字不变。
+     * 会长大的是 messages，而 messages 每轮都在变，打在那里没有意义。
+     *
+     * 这也是为什么受信时间事实被刻意放成 messages[0] 而不是拼进 system
+     * （见 context/compile.ts）：拼进去的话这个断点前面的内容每轮都变，
+     * STRICT_PREFIX 下命中率直接归零。决 3 把它冻到执行段级之后，
+     * 连 messages[0] 也在段内稳定了。
+     */
+    const wantsBreakpoint = this.profile.context.supportsExplicitCacheBreakpoints === true;
+
     const body: Record<string, unknown> = {
       model: this.profile.modelId,
       max_tokens: frame.reservedOutputTokens || this.deps.maxOutputTokens,
-      system: this.deps.systemPrompt,
+      // 打了断点就得用 block 形式的 system —— 字符串形式挂不上 cache_control。
+      system: wantsBreakpoint
+        ? [
+            {
+              type: "text",
+              text: this.deps.systemPrompt,
+              cache_control: { type: "ephemeral" },
+            },
+          ]
+        : this.deps.systemPrompt,
       messages,
       stream: true,
     };

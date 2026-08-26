@@ -61,7 +61,31 @@ export function settleOutcome(input: SettleInput): RunOutcome {
     return { ...base, kind: "SUCCESS", incompleteItems: [] };
   }
 
-  return { ...base, kind: "COMPLETED_WITH_LIMITS", incompleteItems: unmet };
+  /**
+   * ── 决 2：`USER_REJECTED` 的语义边界 ─────────────────────────────────
+   *
+   * 【定】**仅当所有**未达成的必需项都是「用户拒绝」时，才判 USER_REJECTED。
+   *
+   * 为什么是「全部」而不是「存在」：批内 3 个 action、1 个被用户拒、
+   * 2 个因为工具挂了没做成 —— 判 USER_REJECTED 会把责任栽给用户，
+   * 而实际上就算他全批准，那个 Run 也做不成。混着的时候
+   * `COMPLETED_WITH_LIMITS` 才是诚实的：它不声称自己知道该怪谁。
+   *
+   * 【定】这个值域**不新增**成员。「模型声称做不了」不给独立 kind ——
+   * 那要判断模型的话语意图，会把结算从「只查事实表」拖回「读模型说了什么」，
+   * 直接违反不变量 12。它继续走 SUCCESS ＋ summary（R-7 的一半已于
+   * 2026-08-25 接上），代价写进 ADR。
+   */
+  const causes = input.verifications
+    .filter((v) => v.required && v.status !== "PASSED")
+    .map((v) => v.unmetCause);
+  const allUserRejected = causes.length > 0 && causes.every((c) => c === "USER_REJECTED");
+
+  return {
+    ...base,
+    kind: allUserRejected ? "USER_REJECTED" : "COMPLETED_WITH_LIMITS",
+    incompleteItems: unmet,
+  };
 }
 
 /**

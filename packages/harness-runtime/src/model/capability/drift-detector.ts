@@ -69,6 +69,38 @@ export class DriftDetector {
    */
   observeTokenAccuracy(predicted: number, actual: number): DriftObservation | null {
     if (this.profile.tokens.countTokensAccuracy !== "EXACT") return null;
+    /**
+     * ── D-3 之后，「EXACT」不再描述 Runtime 实际算出来的那个数 ────────────
+     *
+     * 这条是 U-1 接线**当场**暴露的矛盾，值得记清楚：
+     *
+     *   · profile 说 `countTokensAccuracy: "EXACT"` —— 那描述的是**端点的**
+     *     count_tokens 在**不含推理块**的帧上的精度（Spike p4：5/5 项 0.00%）；
+     *   · 而 D-3 证实端点对推理块**一个 token 都不算**，于是
+     *     `protocol.countTokens()` 会本地补一个估算顶上去（系数 1.9，见 D-4）。
+     *
+     * 两条都对，但合起来意味着**复合结果不是精确的**，而且**故意不精确**
+     * （宁可高估，让阈值判定偏安全那侧）。拿它去判「端点漂移了」是错的靶子 ——
+     * 偏差来自我们自己的补估，不来自端点。
+     *
+     * 所以有本地补估时只 RECORD，不 FAIL_FAST。真正的端点漂移会表现为
+     * **不含推理块**的帧上也出现偏差，那时补估为 0，这条规则照常生效。
+     */
+    if (this.profile.tokens.countTokensExcludesReasoning) {
+      if (predicted === actual) return null;
+      const dev = actual === 0 ? 1 : Math.abs(predicted - actual) / actual;
+      // 本地补估的量级由 D-4 的系数决定，20% 以内属预期。
+      if (dev <= 0.2) return null;
+      return this.record({
+        field: "tokens.countTokensAccuracy",
+        declared: "EXACT（含本地推理块补估）",
+        observed: `预估 ${predicted} vs 实际 ${actual}，偏差 ${(dev * 100).toFixed(2)}%`,
+        disposition: "RECORD",
+        note:
+          "偏差超出本地补估的预期量级。可能是 D-4 的系数在这个语种/长度上不成立，" +
+          "也可能是端点改了推理块的计费方式 —— 需要重跑 probe:reasoning-tokens 才分得清。",
+      });
+    }
     if (predicted === actual) return null;
     const deviation = actual === 0 ? 1 : Math.abs(predicted - actual) / actual;
     return this.record({

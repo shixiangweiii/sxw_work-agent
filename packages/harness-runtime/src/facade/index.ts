@@ -18,7 +18,8 @@ import type {
 } from "../types/run.js";
 import type { ActionBatchId, ActionId, ModelInvocationId, RunId } from "../types/ids.js";
 import { asId } from "../types/ids.js";
-import type { RuntimePorts, ToolExecutionContext } from "../ports/index.js";
+import type { RunListItem, RuntimePorts, ToolExecutionContext } from "../ports/index.js";
+import { freezeRunSpec } from "../model/capability/profile-loader.js";
 import type {
   ApprovalDecider,
   PreparedAction,
@@ -32,7 +33,9 @@ import { settleWallOutcome } from "../verification/settle-outcome.js";
 import { RunInterrupts } from "../loop/interrupt/index.js";
 import {
   findUnpairedToolUses,
+  makeActionFactEntry,
   makeRunFactsEntry,
+  readActionPreFingerprints,
   readRunFacts,
   type UnpairedToolUse,
 } from "../transcript/index.js";
@@ -75,10 +78,15 @@ export interface ResumeOptions {
 }
 
 export class HarnessRuntime {
-  private readonly runs = new Map<string, RunInterrupts>();
-  private readonly specs = new Map<string, RunSpec>();
-  private readonly status = new Map<string, RunStatus>();
-  /** 【定】一个 Run 同时只允许有一个循环在跑。 */
+  /**
+   * 进程内中断句柄。
+   *
+   * 【定】这两个**不能**落库，也不该落库：`AbortController` 不可跨进程，
+   * 「谁在跑」这件事的作用域天然就是进程。跨进程的并发保护由
+   * `runs.status` 与「一个 Run 一个循环」（不变量 4）共同承担。
+   */
+  private readonly interruptsByRun = new Map<string, RunInterrupts>();
+  /** 【定】一个 Run 同时只允许有一个循环在跑（本进程内）。 */
   private readonly running = new Set<string>();
 
   constructor(private readonly deps: HarnessRuntimeDeps) {}
@@ -86,15 +94,28 @@ export class HarnessRuntime {
   async *start(spec: RunSpec): AsyncGenerator<RunEvent, StartResult> {
     const runId = asId<RunId>(this.deps.ports.ids.next("run"));
     const interrupts = new RunInterrupts();
-    this.runs.set(String(runId), interrupts);
-    this.specs.set(String(runId), spec);
-    this.status.set(String(runId), "RUNNING");
+    this.interruptsByRun.set(String(runId), interrupts);
     this.running.add(String(runId));
+
+    /**
+     * 【定】M-4：进 RunSpec 的是**深冻结**的那一份。
+     *
+     * 阶段 1 只冻了 `endpointProfile`，`toolSnapshots` 与各 policy 还是活对象。
+     * 跨进程之后这条不能再含糊：盘上那份是快照，内存那份若还能改，
+     * §18.3 的「声明是否仍与冻结版一致」就变成了自己跟自己比。
+     */
+    const frozen = freezeRunSpec(spec);
+    await this.deps.ports.runs.createRun({
+      runId,
+      spec: frozen,
+      status: "RUNNING",
+      now: this.deps.ports.clock.now(),
+    });
 
     try {
       const gen = runLoop({
         runId,
-        spec,
+        spec: frozen,
         ports: this.deps.ports,
         interrupts,
         approvalDecider: this.deps.approvalDecider,
@@ -106,11 +127,15 @@ export class HarnessRuntime {
         yield r.value;
         r = await gen.next();
       }
-      this.status.set(String(runId), terminalToStatus(r.value.terminal));
+      await this.setStatus(runId, terminalToStatus(r.value.terminal));
       return r.value;
     } finally {
       this.running.delete(String(runId));
     }
+  }
+
+  private async setStatus(runId: RunId, status: RunStatus): Promise<void> {
+    await this.deps.ports.runs.setStatus(runId, status, this.deps.ports.clock.now());
   }
 
   /**
@@ -125,8 +150,25 @@ export class HarnessRuntime {
    */
   async *resume(runId: RunId, opts: ResumeOptions = {}): AsyncGenerator<RunEvent, StartResult> {
     const key = String(runId);
-    const spec = this.specs.get(key);
-    if (!spec) throw new Error(`未知 Run：${runId}。阶段 1 的 RunSpec 只在内存里。`);
+    /**
+     * 【定】读回**冻结的那一份** RunSpec，不是重新 compose 一份。
+     *
+     * 下面 §18.2 的三条分支判定完全依赖 `spec.agentSpec.toolSnapshots`：
+     * 用今天的工具声明去判一条昨天的 transcript，改一次 `append_log` 的
+     * verification 就会让同一条记录走进不同分支，**而盘上看不出来**。
+     *
+     * 取不到就抛，**不回退到当前配置** —— 「读不到就用现在的」是这条
+     * 不变量最容易被顺手写出来的破法。
+     */
+    const spec = await this.deps.ports.runs.getRunSpec(runId);
+    if (!spec) {
+      throw new Error(
+        `未知 Run：${runId}。\n` +
+          `RunSpec 读不到，无法恢复 —— 恢复必须使用启动时冻结的那一份（§18.4【定】），` +
+          `不能用当前配置顶替。\n` +
+          `用 --list-runs 看看有哪些 Run，或确认 --db 指向的是同一个库。`,
+      );
+    }
 
     /**
      * 【定】生命周期闸门。
@@ -135,7 +177,7 @@ export class HarnessRuntime {
      * 带真实写操作时就是重复副作用。CANCELLED 与 RECOVERY_REQUIRED 不在此列：
      * V05 §10 明确「没有 PAUSED，cancel() 后稍后 resume()」就是支持的路径。
      */
-    const current = this.status.get(key) ?? "CREATED";
+    const current = (await this.deps.ports.runs.getStatus(runId)) ?? "CREATED";
     if (current === "COMPLETED" || current === "FAILED") {
       throw new Error(
         `Run ${runId} 已处于终态 ${current}，拒绝 resume。` +
@@ -163,7 +205,7 @@ export class HarnessRuntime {
 
     const ports = this.deps.ports;
     const interrupts = new RunInterrupts();
-    this.runs.set(key, interrupts);
+    this.interruptsByRun.set(key, interrupts);
     this.running.add(key);
 
     try {
@@ -262,11 +304,12 @@ export class HarnessRuntime {
                 verifications,
                 recoveryItems,
                 lastSequence,
+                resumeBranchCounts: priorFacts?.resumeBranchCounts ?? {},
               },
               ports.clock.now(),
             ),
           );
-          this.status.set(key, "CANCELLED");
+          await this.setStatus(runId, "CANCELLED");
           return { terminal, outcome };
         }
 
@@ -284,21 +327,56 @@ export class HarnessRuntime {
       const hasUntrusted = messages.some((m) => m.content.some((c) => c.type === "tool_result"));
 
       let blocked = false;
+      /** 阶段 2 的测量装置：本次 resume 各分支命中次数，累加到历史值上。 */
+      const branchCounts: Record<string, number> = { ...(priorFacts?.resumeBranchCounts ?? {}) };
+
+      /**
+       * 决 6：执行前指纹的索引。分支二的**真正判据**在这里，不在工具声明里。
+       */
+      const preFingerprints = readActionPreFingerprints(entries);
 
       for (const u of unpaired) {
         const def = registry.get(u.toolName)?.definition;
+        const pre = preFingerprints.get(u.toolCallId);
+        /**
+         * ── §18.2 三条分支的判定（决 6 之后）────────────────────────────
+         *
+         * 变的是第三行。阶段 1 用 `def.verification.mode !== "NONE"`，
+         * 那问的是「**执行后**能不能验」，被拿来回答「**崩溃后**能不能观察」。
+         * 两者真的不同：`append_log` 执行后验不了（不知道该有几行），
+         * 但崩溃后能不能观察，取决于**这次执行前有没有留下指纹**。
+         *
+         * 现在的判据是 Action 级事实（`ACTION_FACT` 里有没有这条 toolCallId
+         * 的前置指纹）＋ Verifier 有没有 `observePost` 能力。于是：
+         *
+         *   · 同一个工具，拍了指纹 → 分支二；没拍 → 分支三；
+         *   · 「拍不拍」由 Runtime 侧的 Verifier 决定，故障注入可以逐次控制。
+         *
+         * 这就是决 6 要的：把分流的旋钮从被测对象身上挪到测量装置这边。
+         * 在此之前，阶段 2 的研究问题（有多少次 resume 落进第三条分支）
+         * 是拿被测对象身上的一个静态字段去测它自己。
+         */
+        const canObserve =
+          !!def?.recoveryObservation &&
+          typeof ports.verification.observePost === "function" &&
+          (!def.recoveryObservation.requiresPreFingerprint || pre !== undefined);
+
         const branch: ResumeBranch = !def
           ? "UNKNOWN_TOOL"
           : def.idempotency.isReadOnly || def.idempotency.isIdempotent
             ? "IDEMPOTENT_RETRY"
-            : def.verification.mode !== "NONE"
+            : canObserve
               ? "OBSERVE_FIRST"
               : "RECOVERY_REQUIRED";
 
+        branchCounts[branch] = (branchCounts[branch] ?? 0) + 1;
         yield await emit("ResumeUnpairedToolUse", {
           toolCallId: u.toolCallId,
           toolName: u.toolName,
           branch,
+          // 把「为什么是这条分支」一并写进 Trace：光有分支名，
+          // 事后分不清是工具本来就不可观察，还是这次没拍到指纹。
+          hasPreFingerprint: pre !== undefined,
         });
 
         // ── 分支一：幂等或只读 → 真的重新执行一遍
@@ -313,6 +391,10 @@ export class HarnessRuntime {
             verification: ports.verification,
             approvalDecider: this.deps.approvalDecider,
             approvalPolicy: spec.agentSpec.approvalPolicy,
+            timezone: spec.agentSpec.timezone,
+            recordActionFact: async (fact) => {
+              lastSequence = await ports.transcript.append(makeActionFactEntry(runId, fact));
+            },
             ids: ports.ids,
             now: () => ports.clock.now(),
             signal: interrupts.signal,
@@ -337,7 +419,7 @@ export class HarnessRuntime {
 
         // ── 分支二：有 Observation → 先观察外部世界，据结果决定
         if (branch === "OBSERVE_FIRST" && def) {
-          const observed = await this.observe(runId, def, u, interrupts.signal);
+          const observed = await this.observe(runId, def, u, interrupts.signal, spec.agentSpec.timezone, pre?.fingerprint);
           if (observed) {
             verifications.push(observed.verification);
             if (observed.verification.status === "SKIPPED") {
@@ -396,6 +478,7 @@ export class HarnessRuntime {
       }
 
       const facts: ResumableRunFacts = {
+        resumeBranchCounts: branchCounts,
         turnCount: priorFacts?.turnCount ?? turn,
         consecutiveFailures: priorFacts?.consecutiveFailures ?? 0,
         budgetUsage: priorFacts?.budgetUsage ?? emptyBudget(ports.clock.now()),
@@ -426,11 +509,11 @@ export class HarnessRuntime {
          */
         yield await emit("RecoveryRequired", { items: recoveryItems.length });
         await ports.transcript.append(makeRunFactsEntry(runId, facts, ports.clock.now()));
-        this.status.set(key, "RECOVERY_REQUIRED");
+        await this.setStatus(runId, "RECOVERY_REQUIRED");
         return { terminal: { reason: "RECOVERY_REQUIRED", recoveryItems } };
       }
 
-      this.status.set(key, "RUNNING");
+      await this.setStatus(runId, "RUNNING");
 
       const gen = runLoop({
         runId,
@@ -448,7 +531,7 @@ export class HarnessRuntime {
         yield r.value;
         r = await gen.next();
       }
-      this.status.set(key, terminalToStatus(r.value.terminal));
+      await this.setStatus(runId, terminalToStatus(r.value.terminal));
       return r.value;
     } finally {
       this.running.delete(key);
@@ -470,6 +553,9 @@ export class HarnessRuntime {
     def: ToolSnapshot["definition"],
     u: UnpairedToolUse,
     signal: AbortSignal,
+    timezone: string,
+    /** 执行前的指纹（决 6）。相对操作（如 append）没有它就判不出发生没发生。 */
+    preFingerprint?: unknown,
   ): Promise<{ verification: VerificationResult } | undefined> {
     try {
       const validation = validateAndNormalize(u.input, def.inputSchema, def.name);
@@ -502,7 +588,53 @@ export class HarnessRuntime {
         signal,
         workspaceRoot: this.deps.workspaceRoot,
         onProgress: () => {},
+        timezone,
       };
+      /**
+       * 决 6：优先走 `observePost` —— 它和执行前那次 `observePre` 是**同一个
+       * 实现**，比的是同一个量。回退到 `verify()` 只是为了兼容没有实现
+       * observePost 的 Verifier，那条路径下比的是「内容 == 计划内容」，
+       * 对 append 这类相对操作给不出结论。
+       */
+      const post = this.deps.ports.verification.observePost;
+      if (post && def.recoveryObservation) {
+        /**
+         * `preFingerprint` 可以是 undefined —— 对 `requiresPreFingerprint: false`
+         * 的工具（覆盖写）而言，「目标内容 == 计划内容」是**绝对**判据，
+         * 不需要起始状态。要不要前置指纹由 Verifier 自己判断，
+         * Runtime 只负责把有的东西递过去。
+         */
+        const r = await post.call(
+          this.deps.ports.verification,
+          action,
+          ctx,
+          preFingerprint as never,
+        );
+        if (r) {
+          return {
+            verification: {
+              id: `ver_${actionId}`,
+              actionId,
+              at: now,
+              mode: "REOBSERVE",
+              /**
+               * 【定】`required: false`。
+               *
+               * 这一条不是「这个 Action 的验证」，是「崩溃后对外部世界的一次
+               * 观察」—— 决 6 要拆开的正是这两者。标成 required 的话，
+               * 一次「观察到没发生」会作为失败的 required Verification 永久
+               * 留在事实表里，即便模型随后补做成功也翻不了案，Run 会被判成
+               * COMPLETED_WITH_LIMITS。批 1 的 verify:persistence 实测到过
+               * 这个现象（两份产物都正确落盘，outcome 却是有限完成）。
+               */
+              required: false,
+              status: r.applied ? "PASSED" : "FAILED",
+              detail: r.detail,
+            },
+          };
+        }
+      }
+
       const verification = await this.deps.ports.verification.verify(
         action,
         { ok: false, output: "", sideEffectState: "UNKNOWN" },
@@ -516,7 +648,7 @@ export class HarnessRuntime {
   }
 
   interject(runId: RunId, content: string): void {
-    this.runs
+    this.interruptsByRun
       .get(String(runId))
       ?.interjections.push(
         { content, intent: "ADD_CONTEXT", urgency: "NEXT_SAFE_POINT" },
@@ -525,31 +657,45 @@ export class HarnessRuntime {
   }
 
   cancel(runId: RunId, reason?: string): void {
-    this.runs.get(String(runId))?.cancel(reason);
+    this.interruptsByRun.get(String(runId))?.cancel(reason);
   }
 
-  inspect(runId: RunId): RunSnapshot | undefined {
-    const spec = this.specs.get(String(runId));
+  /**
+   * 只读投影（M-1）。**不是恢复来源** —— 恢复走 transcript。
+   *
+   * 阶段 1 这里返回的 turnCount / budgetUsage / messageCount 全是硬编码 0，
+   * 也就是「只读投影」返回假数据。A-7 之后 transcript 的 `RUN_META` 里
+   * 已经有真实的累计事实可读，跨进程之后它更是「看一眼这个 Run 现在
+   * 怎么样了」的唯一入口，所以这次读真的。
+   *
+   * 改成 async 是必然的：事实在库里。没有外部调用者依赖它的同步性。
+   */
+  async inspect(runId: RunId): Promise<RunSnapshot | undefined> {
+    const ports = this.deps.ports;
+    const spec = await ports.runs.getRunSpec(runId);
     if (!spec) return undefined;
+
+    const entries = await ports.transcript.readAll(runId);
+    const facts = readRunFacts(entries);
+    const messages = await ports.transcript.rebuildMessages(runId);
+
     return {
       runId,
       runSpecId: spec.id,
-      status: this.status.get(String(runId)) ?? "CREATED",
-      turnCount: 0,
-      consecutiveFailures: 0,
-      budgetUsage: {
-        turns: 0,
-        modelCalls: 0,
-        toolCalls: 0,
-        inputTokens: 0,
-        outputTokens: 0,
-        billedInputTokens: 0,
-        activeWallClockMs: 0,
-        startedAt: spec.createdAt,
-      },
-      messageCount: 0,
-      updatedAt: this.deps.ports.clock.now(),
+      status: (await ports.runs.getStatus(runId)) ?? "CREATED",
+      turnCount: facts?.turnCount ?? 0,
+      consecutiveFailures: facts?.consecutiveFailures ?? 0,
+      // 没有 RUN_META（Run 刚建、一轮都没跑完）时如实回落到空预算，
+      // 但 startedAt 用 spec 的创建时刻 —— 那个是真的。
+      budgetUsage: facts?.budgetUsage ?? emptyBudget(spec.createdAt),
+      messageCount: messages.length,
+      updatedAt: ports.clock.now(),
     };
+  }
+
+  /** 供 CLI 的 `--list-runs`。 */
+  async list(limit?: number): Promise<RunListItem[]> {
+    return this.deps.ports.runs.list(limit);
   }
 }
 

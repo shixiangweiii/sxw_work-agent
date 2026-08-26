@@ -22,6 +22,8 @@
 
 import { createHash } from "node:crypto";
 import type {
+  UnmetCause,
+  ApprovalDecision,
   ActionBatch,
   ApprovalDecider,
   BatchSettlementPolicy,
@@ -57,6 +59,16 @@ export interface BatchDeps {
   redaction: RedactionPort;
   verification: VerificationPort;
   approvalDecider: ApprovalDecider;
+  /** 随 AgentSpec 冻结的时区，透传给工具（见 ToolExecutionContext.timezone）。 */
+  timezone: string;
+  /**
+   * 落一条逐 Action 事实（决 6）。由调用方接到 transcript 上。
+   *
+   * 为什么是回调而不是直接给 TranscriptStorePort：批执行不该认识
+   * 「事实存在哪」这件事。它只负责说「这是一条事实」，落在哪由上层决定 ——
+   * facade 的恢复路径与主循环用的是同一个回调、不同的取号器。
+   */
+  recordActionFact?: (fact: { toolCallId: string; toolName: string; fingerprint: unknown; at: number }) => Promise<void>;
   approvalPolicy: ApprovalPolicySnapshot;
   ids: IdGeneratorPort;
   now: () => number;
@@ -119,6 +131,8 @@ export async function* executeBatch(
    */
   const verifiedCallIds = new Set<string>();
   const actionIdByCall = new Map<string, ActionId>();
+  /** 决 2：每个 call「为什么没完成」，在事情发生的那一刻记下。 */
+  const causeByCall = new Map<string, UnmetCause>();
 
   let aborted = false;
   let skipRemaining = false;
@@ -249,6 +263,7 @@ export async function* executeBatch(
 
       if (verdict.decision === "DENY") {
         action.stage = "REJECTED_POLICY";
+        causeByCall.set(call.toolCallId, "POLICY_DENIED");
         settle(call.toolCallId, renderError(verdict.error), true);
         yield ev(deps, "ActionRejected", {
           actionId,
@@ -266,7 +281,14 @@ export async function* executeBatch(
           effect: `${resolvedEffect.effectType} ${resolvedEffect.scope.value}`,
           reason: verdict.reason,
         });
-        const decisionGuarded = await guard(() => deps.approvalDecider(action), {
+        /**
+         * U-2：审批也要能超时。
+         *
+         * 在此之前审批是一个没有上限的 await —— R-2 的记录里这是三条叠加
+         * 效应之一：审批不超时 ＋ cancel 打不断 ＋ 批准后立刻撞墙。
+         * 前两条现在都堵上了（这里 ＋ CLI 的 rl.question 接 signal）。
+         */
+        const decisionGuarded = await guard(() => withApprovalTimeout(deps, action), {
           code: "PORT_APPROVAL_DECIDER_THREW",
           source: "RUNTIME",
           // 审批环节抛异常 = 没拿到批准。没批准就没执行。
@@ -292,6 +314,8 @@ export async function* executeBatch(
 
         if (!decision.approved) {
           action.stage = "REJECTED_APPROVAL";
+          // 决 2：用户明确按了「否」—— 这是一个有明确事实来源的成因。
+          causeByCall.set(call.toolCallId, "USER_REJECTED");
           const e = makeError({
             code: "APPROVAL_REJECTED",
             source: "USER",
@@ -308,6 +332,44 @@ export async function* executeBatch(
         }
       }
 
+      /**
+       * ── 决 6：执行**前**拍一张外部世界的指纹 ────────────────────────
+       *
+       * 只对声明了 `recoveryObservation` 的工具做。拍到了就落一条
+       * `ACTION_FACT`，恢复时据此判断「那次执行到底发生没发生」——
+       * §18.2 窗口 A/B 的「不可区分」只有靠这个才变得可区分。
+       *
+       * 【定】拍不到不是错误。拍不到就意味着这个 Action 崩溃后不可观察，
+       * 也就是第三条分支 —— 那是一个**如实记录的事实**，不是失败。
+       * 所以这里不 guard、不合成 result、不影响执行，只是没有那条 ACTION_FACT。
+       *
+       * 【定】必须在 `AttemptStarted` **之前**拍。
+       * 第一版放在它之后，于是 `verify:crash` 打出了一个自相矛盾的结果：
+       * 崩在窗口 A（AttemptStarted 处）时**永远拍不到指纹** —— 而窗口 A
+       * 恰恰是最需要它的场景（工具没跑，只有靠前置状态才判得出「没发生」）。
+       * 指纹描述的是「attempt 开始之前的世界」，位置错了语义就错了。
+       */
+      if (snapshot.definition.recoveryObservation && deps.verification.observePre) {
+        try {
+          const pre = await deps.verification.observePre(action, {
+            signal: deps.signal,
+            workspaceRoot: deps.workspaceRoot,
+            onProgress: () => {},
+            timezone: deps.timezone,
+          });
+          if (pre && deps.recordActionFact) {
+            await deps.recordActionFact({
+              toolCallId: call.toolCallId,
+              toolName: call.name,
+              fingerprint: pre.fingerprint,
+              at: pre.at,
+            });
+          }
+        } catch {
+          // 观察失败 = 没有指纹 = 第三条分支。如实体现，不抛。
+        }
+      }
+
       // ── ⑤ 执行
       const attemptId = asId<AttemptId>(deps.ids.next("att"));
       const startedAt = deps.now();
@@ -315,15 +377,54 @@ export async function* executeBatch(
       yield ev(deps, "AttemptStarted", { actionId, toolName: call.name });
 
       const progressNotes: string[] = [];
+      /**
+       * U-2：每一步都有自己的超时，但共享 Run 级取消。
+       *
+       * 在此之前 `ToolDefinition.timeoutPolicy` 有声明、无执行路径，
+       * `RunInterrupts.stepSignal()` 有实现、零调用点 —— 也就是说
+       * **一个挂住的工具会永远挂住**：Run 级 signal 只在用户 Ctrl+C 时才动，
+       * 而无人值守的场景（Eval、定时任务）根本没有那个用户。
+       *
+       * 用 `AbortSignal.any([runSignal, timeout])`：取消与超时哪个先到都算数，
+       * 且工具侧只看见一个 signal，不需要理解两者的区别。
+       */
+      const stepMs = snapshot.definition.timeoutPolicy.timeoutMs;
+      const stepSignal =
+        stepMs > 0 ? AbortSignal.any([deps.signal, AbortSignal.timeout(stepMs)]) : deps.signal;
       const ctx: ToolExecutionContext = {
-        signal: deps.signal,
+        signal: stepSignal,
         workspaceRoot: deps.workspaceRoot,
         onProgress: (n) => progressNotes.push(n),
+        timezone: deps.timezone,
       };
 
       let outcome;
       try {
         outcome = await deps.tools.execute(action, ctx);
+        /**
+         * 工具「正常返回」但 signal 已经因超时而 abort 的情况要单独认出来。
+         *
+         * 不这么做的话，一个不检查 signal 的工具会在超时之后照常返回成功，
+         * 而超时这件事在事实表上一点痕迹都没有 —— 那比不做超时更糟，
+         * 因为读代码的人会以为有这层保护。
+         */
+        if (stepSignal.aborted && !deps.signal.aborted && outcome.ok) {
+          outcome = {
+            ok: false,
+            output: outcome.output,
+            // 工具确实跑完了，副作用是发生了的 —— 如实写 APPLIED，
+            // 不要因为「超时」就改成 UNKNOWN 而凭空制造一个待确认项。
+            sideEffectState: outcome.sideEffectState,
+            error: makeError({
+              code: "TOOL_TIMEOUT",
+              source: "TOOL_HANDLER",
+              category: "TIMEOUT",
+              retryability: "SAME_INPUT_BACKOFF",
+              sideEffectState: outcome.sideEffectState,
+              safeMessage: `工具超过 ${stepMs}ms 的步骤超时（结果已产生但已超时，按失败处置）`,
+            }),
+          };
+        }
       } catch (err) {
         outcome = {
           ok: false,
@@ -341,6 +442,8 @@ export async function* executeBatch(
           }),
         };
       }
+
+      if (!outcome.ok) causeByCall.set(call.toolCallId, "TOOL_FAILED");
 
       const attempt: ExecutionAttempt = {
         id: attemptId,
@@ -448,7 +551,7 @@ export async function* executeBatch(
     // 【定】所有出口都经过这里。缺失的 result 在此补齐。
     finalize(calls, ledger, deps.signal.aborted || aborted, skipRemaining);
     // 【定】result 补齐了，事实也必须补齐 —— 两者是同一条不变量的两面。
-    recordUnmetRequired(calls, deps, ledger, verifiedCallIds, actionIdByCall, verifications);
+    recordUnmetRequired(calls, deps, ledger, verifiedCallIds, actionIdByCall, verifications, causeByCall);
     batch.status = "SETTLED";
     batch.settledAt = deps.now();
   }
@@ -523,6 +626,14 @@ function recordUnmetRequired(
   verifiedCallIds: Set<string>,
   actionIdByCall: Map<string, ActionId>,
   verifications: VerificationResult[],
+  /**
+   * 每个 call「为什么没完成」的事实记录（决 2）。
+   *
+   * 【定】它在**事情发生的那一刻**被写下，不是事后从 result 正文里猜的。
+   * 猜的话就得解析文案，而文案会变 —— 那种判据在改一句提示语的时候
+   * 会静默失效，且没有任何东西会告诉你。
+   */
+  causeByCall: Map<string, UnmetCause>,
 ): void {
   for (const c of calls) {
     if (verifiedCallIds.has(c.toolCallId)) continue;
@@ -542,6 +653,7 @@ function recordUnmetRequired(
       status: "FAILED",
       detail: `必需操作 ${c.name} 未完成，未能进入验证：${settledText}`,
       at: deps.now(),
+      ...(causeByCall.has(c.toolCallId) ? { unmetCause: causeByCall.get(c.toolCallId)! } : {}),
     });
   }
 }
@@ -636,4 +748,35 @@ function ev<T extends RunEvent["type"]>(
     type,
     payload,
   } as RunEvent;
+}
+
+/**
+ * 给审批等待加超时。超时按**拒绝**处置（见 ApprovalPolicySnapshot 的说明）。
+ *
+ * 不用 AbortSignal：`ApprovalDecider` 是一个 `(action) => Promise` 的窄接口，
+ * 给它加 signal 参数会波及所有实现（含验收脚本里的 scripted decider）。
+ * 而这里真正要的只是「等不到就当拒绝」，Promise.race 足够表达，
+ * 代价是被丢弃的那个 Promise 仍会在后台完成 —— 单进程 CLI 里无害。
+ */
+async function withApprovalTimeout(
+  deps: BatchDeps,
+  action: PreparedAction,
+): Promise<ApprovalDecision> {
+  const ms = deps.approvalPolicy.approvalTimeoutMs;
+  if (!ms || ms <= 0) return deps.approvalDecider(action);
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      deps.approvalDecider(action),
+      new Promise<ApprovalDecision>((resolve) => {
+        timer = setTimeout(
+          () => resolve({ approved: false, reason: `审批等待超过 ${ms}ms，按拒绝处置` }),
+          ms,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }

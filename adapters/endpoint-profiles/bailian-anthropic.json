@@ -3,6 +3,8 @@
   "endpointId": "ep_bailian_anthropic",
   "shape": "ANTHROPIC_MESSAGES",
   "modelId": "qwen3.7-plus",
+  "_comment_expectedBaseUrlHost": "U-6：compose 据此断言「配置的 baseUrl」与「加载的声明」指向同一个端点。换了 baseUrl 却没换声明，会在启动时被挡下而不是静默跑错。",
+  "expectedBaseUrlHost": "dashscope.aliyuncs.com",
 
   "_comment_protocol": "全部 false。缺 3 个 tool_result → 200；篡改 tool_call_id → 200；非法 tool schema → 200；disable_parallel_tool_use 静默接受但 4/4/4 完全无效。这不降低不变量的重要性，反而提高了：没有任何外部兜底会替你发现违反。",
   "protocol": {
@@ -48,6 +50,17 @@
     "quotaBeforeContextLimit": false
   },
 
+  "_comment_fieldEvidence": "D-1 ＋ D-4：字段级证据出处。sourceEvidenceRefs 是整份声明一个数组，追不到具体字段 —— 而 D-1 记的正是这种追不到导致的错配：perRequestBaseTokens 的 5 出自 **OpenAI 形状**的探针、且是给**本地估算**用的，却被填进 Anthropic 形状的声明、叠在已经精确的 count_tokens 上。有了字段级出处，这类错配在写进去的那一刻就看得见。",
+  "fieldEvidence": {
+    "protocol.validatesToolResultPairing": "p1/p3-bailian-anthropic-shape：缺 3 个 tool_result → 200 接受",
+    "protocol.honorsDisableParallelToolCalls": "p10-bailian-anthropic-shape：开关被静默接受，4/4/4 完全无效",
+    "context.reasoningBlockRule": "p2/p9-bailian-anthropic-shape：推理块可删、可改、可去签名，服务端无状态",
+    "context.cacheMatching": "p5-bailian-anthropic-shape：改前缀第一处即命中归零",
+    "tokens.countTokensAccuracy": "p4-bailian-anthropic-shape：**不含推理块**的帧上 5/5 项 0.00% 误差。范围由 countTokensExcludesReasoning 划定",
+    "tokens.countTokensExcludesReasoning": "D-3 探针 2026-08-25：同一 body 加不加 thinking，count_tokens 返回 765/765（差 0），而真实 usage 是 888",
+    "tokens.perRequestBaseTokens": "⚠️ D-1：这个 5 出自 **p4-bailian-OPENAI-shape**，是给本地估算用的常量，与本声明（Anthropic 形状 ＋ 精确 count_tokens）不同源。数值影响可忽略（5 token），保留是为了让这条错配可见而不是抹掉它",
+    "_reasoningEstimateCoefficient": "⚠️ D-4：protocol.ts 的 estimateReasoningTokens() 用 1.9 字符/token，从**一次**探针反推（229 中文字符 = 123 token）。样本量 1，且是中文特化的 —— 英文约 4 字符/token，用 1.9 会高估一倍有余。方向保守（高估→提前压缩），可接受但未验证"
+  },
   "observedAt": 1755907200000,
   "probeSuiteVersion": "s0-r3",
   "_comment_evidence": "D-1 要的「字段级 evidenceRef」还没做，这里仍是整份声明一个数组。tokens.countTokensExcludesReasoning 这一条的出处是最后一项（npm run probe:reasoning-tokens，2026-08-25），不是 p4。",

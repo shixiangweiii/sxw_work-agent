@@ -96,6 +96,19 @@ export interface EndpointCapabilityProfile {
   endpointId: EndpointId;
   shape: ApiShape;
   modelId: string;
+  /**
+   * 该声明所属端点的 baseUrl 主机名（U-6）。
+   *
+   * 【定】它是**端点身份的一部分**，所以属于数据、不属于代码 ——
+   * 与原则十四同源。compose 用它断言「配置的 baseUrl」与「加载的声明」
+   * 指向同一个端点。
+   *
+   * 为什么要有：§8.6 不变量 5 说声明的粒度是端点 × 模型。而在此之前
+   * 把 baseUrl 换成 DeepSeek 却保留百炼声明，compose **一声不吭** ——
+   * Runtime 会拿一份「不校验配对、推理块可丢」的声明去驱动一个
+   * 恰恰相反的端点。§24.6 的对照测试第一天就会踩到它。
+   */
+  expectedBaseUrlHost?: string;
 
   // 阶段 1 实现的三组（D-17）
   protocol: ProtocolEnforcement;

@@ -10,6 +10,9 @@
     "cases/*",
     "apps/*"
   ],
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "dev": "tsx apps/cli/src/main.ts",
@@ -17,7 +20,12 @@
     "verify:pairing": "tsx apps/cli/src/verify/pairing.ts",
     "verify:resume": "tsx apps/cli/src/verify/resume.ts",
     "verify:compact": "tsx apps/cli/src/verify/compact.ts",
-    "verify:all": "npm run verify:endpoint-profile && npm run verify:pairing && npm run verify:resume && npm run verify:compact",
+    "verify:persistence": "tsx apps/cli/src/verify/persistence.ts",
+    "verify:budget": "tsx apps/cli/src/verify/budget.ts",
+    "verify:crash": "tsx apps/cli/src/verify/crash.ts",
+    "verify:drift": "tsx apps/cli/src/verify/drift.ts",
+    "verify:all": "npm run verify:endpoint-profile && npm run verify:pairing && npm run verify:resume && npm run verify:compact && npm run verify:persistence && npm run verify:budget && npm run verify:crash && npm run verify:drift",
+    "eval:suite": "tsx eval/suite/index.ts",
     "probe:reasoning-tokens": "tsx apps/cli/src/verify/reasoning-tokens.ts"
   },
   "dependencies": {

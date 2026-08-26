@@ -7,6 +7,8 @@
       "@workagent/harness-runtime/*": ["packages/harness-runtime/src/*"],
       "@workagent/testkit": ["packages/testkit/src/index.ts"],
       "@workagent/testkit/*": ["packages/testkit/src/*"],
+      "@workagent/store-sqlite": ["packages/store-sqlite/src/index.ts"],
+      "@workagent/store-sqlite/*": ["packages/store-sqlite/src/*"],
       "@workagent/shape-anthropic-messages": ["adapters/shape-anthropic-messages/src/index.ts"],
       "@workagent/micro-cases": ["cases/micro-cases/src/index.ts"]
     }
@@ -15,7 +17,8 @@
     "packages/*/src/**/*.ts",
     "adapters/*/src/**/*.ts",
     "cases/*/src/**/*.ts",
-    "apps/*/src/**/*.ts"
+    "apps/*/src/**/*.ts",
+    "eval/**/*.ts"
   ],
   "exclude": ["node_modules", "spikes"]
 }

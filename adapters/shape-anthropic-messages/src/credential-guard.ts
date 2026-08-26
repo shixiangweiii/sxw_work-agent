@@ -41,6 +41,25 @@ export function assertCredentialGoesWhereIntended(c: CredentialBoundaryCheck): v
   const isOfficial = OFFICIAL_HOSTS.some((h) => host === h || host.endsWith(`.${h}`));
   const looksLikeOfficialKey = /^sk-ant-/.test(c.apiKey) || /^sk-proj-/.test(c.apiKey);
 
+  /**
+   * U-7：反方向也要挡 —— **官方 key 发往第三方代理**。
+   *
+   * 原实现只有「第三方 key → 官方 host」一个方向。两个方向的危害不对称，
+   * 但都真实：
+   *   · 第三方 key → 官方端点：请求失败，浪费一次调用，**key 泄漏给了官方**；
+   *   · 官方 key → 第三方代理：请求可能**成功**，而你的 Anthropic key
+   *     完整地交给了一个第三方 —— 这个方向更安静，也更贵。
+   *
+   * 「更安静」正是它必须被挡的理由：失败会自己叫，成功不会。
+   */
+  if (!isOfficial && looksLikeOfficialKey) {
+    throw new Error(
+      `拒绝运行：baseUrl 指向第三方端点 ${host}，但持有的是官方形态的凭证（${maskKey(c.apiKey)}）。\n` +
+        `这个方向不会报错 —— 请求可能照常成功，而你的官方 key 已经完整地交给了第三方。\n` +
+        `检查 .env 里 ${c.endpointId} 那一组的 api_key 是不是填错了。`,
+    );
+  }
+
   if (isOfficial && !looksLikeOfficialKey) {
     throw new Error(
       `拒绝运行：baseUrl 指向官方端点 ${host}，但持有的是第三方凭证。\n` +

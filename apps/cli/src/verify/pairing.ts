@@ -14,6 +14,21 @@
  * 删掉纯 Kernel 之后，这条不变量失去了在纯函数里被穷举测试的可能，
  * 退化为分散在三条中断路径上的手写纪律。本项就是那三条路径的注入测试。
  *
+ * ── 覆盖范围（阶段 2 补齐）────────────────────────────────────────────
+ *
+ * §9.2 的三条中断路径现在**各有一条真注入**：
+ *   流式中断      → ScriptedModelPort 的 interrupted 标志
+ *   工具执行中断  → `write_note` 的 delay_ms ＋ 定时 cancel（阶段 2 补）
+ *   模型错误      → ScriptedModelPort 的 throwError
+ *
+ * 阶段 1 用「第二个 Action 被审批拒绝」代偿了第二条，脚本抬头当时写明了
+ * 不覆盖。那个代偿测的是**审批闸门**，与**执行中取消**在 settle-batch 里
+ * 走的是不同出口 —— 现在两者都有独立场景，代偿场景保留为审批用例。
+ *
+ * 另加一段 orphan result 的**反向**注入：`findOrphanResults()` 在阶段 1
+ * 有实现、有调用，却没有任何用例能让它返回非空 —— 一个永远返回空数组的
+ * 检查器和没有检查器是分不出来的。
+ *
  * 挂了意味着：消息级恢复下的批内配对代价比预估更大。
  * ══════════════════════════════════════════════════════════════════════
  */
@@ -79,6 +94,17 @@ interface Scenario {
   portOverrides?: ComposeOptions["portOverrides"];
   /** 审批器本身抛异常（ApprovalDecider 不是 Port，但同属 R-4 的四个调用点）。 */
   throwingApproval?: boolean;
+  /**
+   * 真正的「工具执行到一半被 cancel」注入（存量清单 §4 第 1 条）。
+   *
+   * 阶段 1 用「第二个 Action 被审批拒绝」代偿了 §9.2 的第二条中断路径，
+   * 脚本抬头也写明了不覆盖。那个代偿测的是**审批闸门**，不是**执行中取消** ——
+   * 两者在 settle-batch 里走的是不同的出口。
+   *
+   * 数值 = 等多少毫秒后 cancel。`write_note` 的 `delay_ms` 让工具可控地慢下来，
+   * 于是取消必然落在 execute() 执行期间。
+   */
+  cancelAfterMs?: number;
   expectTerminal: string;
   /**
    * 【定】必须连 outcome 一起断言。
@@ -97,6 +123,25 @@ const CALLS_3 = [
 ];
 
 const scenarios: Scenario[] = [
+  {
+    name: "中断路径 B：工具执行中被 cancel（存量清单 §4 第 1 条）",
+    path: "第 2 个 call 是一个慢写；执行到一半 cancel() → 它与第 3 个都必须有合法 result",
+    build: () =>
+      new ScriptedModelPort([
+        {
+          text: "三件事",
+          toolCalls: [
+            CALLS_3[0]!,
+            { toolCallId: "tc_2", name: "write_note", input: { path: "a.txt", content: "A", delay_ms: 800 } },
+            CALLS_3[2]!,
+          ],
+        },
+        { text: "收尾", toolCalls: [] },
+      ]),
+    cancelAfterMs: 250,
+    expectTerminal: "ABORTED_TOOLS",
+    expectOutcome: "CANCELLED",
+  },
   {
     name: "基线：三个 call 全部正常执行",
     path: "（无中断）",
@@ -130,7 +175,20 @@ const scenarios: Scenario[] = [
     approvals: [0],
     // 配对合规、循环正常终止，但必需操作确实没做成 —— 不能判 SUCCESS。
     expectTerminal: "COMPLETED_WITH_LIMITS",
-    expectOutcome: "COMPLETED_WITH_LIMITS",
+    /**
+     * 【定】阶段 2 起这里是 `USER_REJECTED`，不再是 COMPLETED_WITH_LIMITS（决 2）。
+     *
+     * **这不是回归，是预期变更。** A-1 修复当时把「用户拒绝了必需操作」
+     * 结算成 COMPLETED_WITH_LIMITS，因为那时 `USER_REJECTED` 有值域、
+     * 无事实来源 —— 结算看到一条失败的必需验证，分不出「用户按了 N」
+     * 和「工具挂了」。阶段 2 给 VerificationResult 加了 `unmetCause`，
+     * 这个区分才第一次有事实支撑。
+     *
+     * 语义边界见 settle-outcome.ts：**仅当所有**未达成的必需项都是用户拒绝
+     * 时才判 USER_REJECTED；混着别的成因就仍是 COMPLETED_WITH_LIMITS。
+     * 本场景只有一个被拒的写操作，所以是纯粹的用户拒绝。
+     */
+    expectOutcome: "USER_REJECTED",
   },
   {
     name: "中断路径 C：模型错误",
@@ -206,10 +264,12 @@ async function main(): Promise<void> {
     "异常路径注入后，配对是否仍然一一对应，且 outcome 与实际执行事实一致？",
   );
   console.log(
-    "\n   覆盖说明（不夸大）：本脚本注入的是**流式中断、审批拒绝、模型错误**三条，\n" +
-      "   外加 R-4 的四条 Port 异常注入（Effect / Approval / Redaction / Verification）。\n" +
-      "   「工具正在执行时被 cancel」这一条由 verify:resume 的 B 段顺带覆盖，\n" +
-      "   本脚本没有注入它 —— 不要把这里的场景读成 §9.2 的三条中断路径全覆盖。",
+    "\n   覆盖说明：§9.2 的三条中断路径现在**各有一条真注入** ——\n" +
+      "   流式中断、**工具执行中被 cancel**（阶段 2 补，用 write_note 的 delay_ms）、模型错误；\n" +
+      "   外加 R-4 的四条 Port 异常注入（Effect / Approval / Redaction / Verification），\n" +
+      "   以及一条让 findOrphanResults() 返回非空的反向注入。\n" +
+      "   阶段 1 用「第二个 Action 被审批拒绝」代偿第二条，那个场景保留为审批用例 ——\n" +
+      "   它测的是审批闸门，与执行中取消在 settle-batch 里走的是不同出口。",
   );
 
   section("选定端点对配对的兜底强度（实测）");
@@ -230,6 +290,7 @@ async function main(): Promise<void> {
     const trace = new CollectingTraceSink();
     try {
       const composed = compose({
+        dbPath: ":memory:",
         workspaceRoot: ws.root,
         approvalDecider: sc.throwingApproval
           ? async () => {
@@ -247,10 +308,23 @@ async function main(): Promise<void> {
       const gen = composed.runtime.start(spec);
       let runId = "";
       let r = await gen.next();
+      /**
+       * 定时 cancel。挂在这里而不是等某个事件，是因为要保证取消落在
+       * **execute() 执行期间** —— 等事件的话最早只能等到 AttemptStarted，
+       * 而那一刻 generator 是挂起的，取消会在工具开跑前就生效，
+       * 又变成了「执行前取消」。
+       */
+      let cancelTimer: ReturnType<typeof setTimeout> | undefined;
+      if (sc.cancelAfterMs !== undefined) {
+        cancelTimer = setTimeout(() => {
+          if (runId) composed.runtime.cancel(runId as never, "注入：执行中取消");
+        }, sc.cancelAfterMs);
+      }
       while (!r.done) {
         if (!runId) runId = String(r.value.runId);
         r = await gen.next();
       }
+      if (cancelTimer) clearTimeout(cancelTimer);
 
       const messages: ContextMessage[] = await composed.ports.transcript.rebuildMessages(
         runId as never,
@@ -292,6 +366,63 @@ async function main(): Promise<void> {
     } catch (err) {
       allOk = false;
       verdict(false, `场景抛出异常：${(err as Error).message.slice(0, 160)}`);
+    } finally {
+      ws.cleanup();
+    }
+  }
+
+  // ── orphan result 的反向注入（存量清单 §4 第 4 条）
+  section("反向注入：让 findOrphanResults() 返回非空");
+  console.log(
+    "   前面所有场景都断言它 == 0。但一个**永远返回空数组**的检查器与\n" +
+      "   一个正确的检查器，在这些断言下是分不出来的 —— 判别力必须单独验。\n",
+  );
+  {
+    const ws = tempWorkspace();
+    try {
+      const composed = compose({
+        dbPath: ":memory:",
+        workspaceRoot: ws.root,
+        approvalDecider: async () => ({ approved: true }),
+        trace: new CollectingTraceSink(),
+        modelPortOverride: new ScriptedModelPort([{ text: "什么都不做", toolCalls: [] }]),
+      });
+      const gen = composed.runtime.start(composed.makeRunSpec("空跑"));
+      let runId = "";
+      let r = await gen.next();
+      while (!r.done) {
+        if (!runId) runId = String(r.value.runId);
+        r = await gen.next();
+      }
+
+      const before = findOrphanResults(await composed.ports.transcript.rebuildMessages(runId as never));
+
+      // 直接往 transcript 注入一条「有 result 无 call」的消息 —— 锚点错配的形状。
+      await composed.ports.transcript.append({
+        runId: runId as never,
+        schemaVersion: 1,
+        kind: "MESSAGE",
+        message: {
+          role: "user",
+          turn: 99,
+          content: [{ type: "tool_result", toolCallId: "tc_does_not_exist", content: "{}", isError: false }],
+        },
+        createdAt: Date.now(),
+      });
+
+      const after = findOrphanResults(await composed.ports.transcript.rebuildMessages(runId as never));
+      composed.db.close();
+
+      fact("注入前 orphan", before.length);
+      fact("注入后 orphan", `${after.length}（${after.join(",")}）`);
+      const ok = before.length === 0 && after.length === 1 && after[0] === "tc_does_not_exist";
+      verdict(
+        ok,
+        ok
+          ? "注入一条锚点错配的 tool_result 后检查器立刻报出它 —— 前面那些「== 0」的断言因此是有判别力的"
+          : "findOrphanResults 没有报出注入的 orphan，前面所有断言都失去意义",
+      );
+      if (!ok) allOk = false;
     } finally {
       ws.cleanup();
     }

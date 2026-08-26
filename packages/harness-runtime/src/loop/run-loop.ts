@@ -31,7 +31,9 @@ import { settleOutcome, settleWallOutcome } from "../verification/settle-outcome
 import { ToolRegistry } from "../tool-runtime/index.js";
 import type { ApprovalDecider, VerificationResult } from "../types/tool.js";
 import type { RecoveryItem, ResumableRunFacts } from "../types/run.js";
-import { makeRunFactsEntry } from "../transcript/index.js";
+import { makeActionFactEntry, makeRunFactsEntry } from "../transcript/index.js";
+import { checkBudgets, hardLimitIsTurns } from "../budget/index.js";
+import { DriftDetector, EndpointDriftError } from "../model/capability/drift-detector.js";
 import { RunInterrupts } from "./interrupt/index.js";
 import { makeError } from "../types/error.js";
 
@@ -131,6 +133,55 @@ export async function* runLoop(
    * 但即便 kind 判不准，人也应该能从 outcome 里读到究竟发生了什么 —— 这就是这一行的价值。
    */
   let lastAssistantText: string | undefined;
+
+  /**
+   * ── R-2：墙钟拆分 ────────────────────────────────────────────────────
+   *
+   * V05 §16.1【定】`maxActiveWallClockMs` 只累计「RUNNING 且有在途步骤」的
+   * 时间，`WAITING_*` 不累计 —— 等审批一小时不该把预算耗光。
+   *
+   * 阶段 1 用 `now() - startedAt` 顶替，在单进程、无人值守的验收脚本里
+   * 看不出差别。跨进程之后它 100% 出问题：`startedAt` 由 RUN_META 原样继承，
+   * 于是「今晚关机、明早 resume」的那一整夜全被算成 active，
+   * 默认 10 分钟的墙一撞就穿。
+   *
+   * 算法：active = 上一段继承来的累计值 ＋ 本段已跑的时间 − 本段等待的时间。
+   *   · 段边界天然把关机时间排除在外（新段的 segmentStartedAt 是 now()）；
+   *   · 段内的等待由 Approval 事件对夹出来。
+   */
+  const segmentStartedAt = now();
+  const inheritedActiveMs = deps.resumeFrom?.budgetUsage.activeWallClockMs ?? 0;
+  let waitedMs = 0;
+  let waitingSince: number | undefined;
+
+  const activeNow = (): number =>
+    inheritedActiveMs + (now() - segmentStartedAt) - waitedMs - (waitingSince ? now() - waitingSince : 0);
+
+  /** U-5：软限每条轴只报一次，见下面消费点的说明。 */
+  const softLimitAnnounced = new Set<string>();
+
+  /**
+   * ── U-1：漂移检测接线 ────────────────────────────────────────────────
+   *
+   * 在此之前 `DriftDetector` 只被 export、从未实例化，`EndpointBehaviorDrift`
+   * 事件从未发出 —— §8.6 不变量 4「实际行为与声明不符时不得静默继续」
+   * 在运行时**没有任何载体**。
+   *
+   * 它是 §24.6「端点能力回归 ＋ DeepSeek 对照」的前置：对照测试的全部意义
+   * 建立在能观测到漂移上，不接线的话对照跑了也读不出东西。
+   *
+   * 【定】主循环持有它，但**不读 profile** —— 它读的是 detector 返回的
+   * observation，端点声明的比对发生在 detector 内部。循环纪律第 5 条
+   * （本文件不得出现 `profile.`）因此仍然成立。
+   */
+  const drift = new DriftDetector(ports.protocol.profile);
+  /**
+   * 每个字段只报一次。
+   *
+   * 与 U-5 的软限同一条理由：一个持续存在的偏差会**每轮**重发同一条事件，
+   * 而刷屏的信号等于没有信号。FAIL_FAST 那一档不受影响 —— 它只会发生一次。
+   */
+  const driftAnnounced = new Set<string>();
 
   let state: LoopState = {
     messages: deps.initialMessages ?? [],
@@ -249,26 +300,53 @@ export async function* runLoop(
 
     if (interrupts.aborted) return yield* finish({ reason: "ABORTED_TOOLS" });
 
-    // ── 预算硬墙。【定】不得由模型决定忽略（不变量 11）。
-    if (state.turnCount >= spec.budgets.maxTurns) {
+    /**
+     * ── 预算判定。【定】不得由模型决定忽略（不变量 11）。
+     *
+     * R-1：判定收进 `checkBudgets()` 纯函数，八条轴一次全查。在此之前
+     * 这里只比三个数，另外五条轴有声明、无读取点 —— 模型绕不过 turns，
+     * 却可以在一轮里发起任意多次工具调用、烧任意多 token。
+     *
+     * R-2：`activeWallClockMs` 现在是**累计值**（见下面的 `activeNow()`），
+     * 不再是 `now() - startedAt`。后者会把等审批的时间、以及跨进程 resume
+     * 之间关机的那一整夜都算进来 —— 隔夜 resume 会在第一次迭代就撞墙。
+     */
+    const budgetState = { ...state.budgetUsage, activeWallClockMs: activeNow() };
+    const verdict = checkBudgets({
+      usage: budgetState,
+      consecutiveFailures: state.consecutiveFailures,
+      budgets: spec.budgets,
+      now: now(),
+    });
+
+    if (verdict.kind === "HARD") {
       yield await emit("BudgetHardLimitReached", {
-        axis: "turns",
-        used: state.turnCount,
-        limit: spec.budgets.maxTurns,
+        axis: verdict.axis,
+        used: verdict.used,
+        limit: verdict.limit,
       });
-      return yield* finish({ reason: "MAX_TURNS", turnCount: state.turnCount });
+      state = { ...state, budgetUsage: budgetState };
+      return yield* finish(
+        hardLimitIsTurns(verdict)
+          ? { reason: "MAX_TURNS", turnCount: state.turnCount }
+          : { reason: "BUDGET_EXHAUSTED" },
+      );
     }
-    const elapsed = now() - state.budgetUsage.startedAt;
-    if (elapsed > spec.budgets.maxActiveWallClockMs) {
-      yield await emit("BudgetHardLimitReached", {
-        axis: "activeWallClockMs",
-        used: elapsed,
-        limit: spec.budgets.maxActiveWallClockMs,
+    if (verdict.kind === "SOFT" && !softLimitAnnounced.has(verdict.axis)) {
+      /**
+       * U-5：每条轴只报一次。
+       *
+       * 不去重的话，越过 0.8 之后**每一轮**都会重发同一条事件 ——
+       * 一个本该提示「快到头了，收一收」的信号会退化成刷屏，
+       * 而刷屏的信号等于没有信号。
+       */
+      softLimitAnnounced.add(verdict.axis);
+      yield await emit("BudgetSoftLimitReached", {
+        axis: verdict.axis,
+        used: verdict.used,
+        limit: verdict.limit,
+        ratio: verdict.ratio,
       });
-      return yield* finish({ reason: "BUDGET_EXHAUSTED" });
-    }
-    if (state.consecutiveFailures >= spec.budgets.maxConsecutiveFailures) {
-      return yield* finish({ reason: "BUDGET_EXHAUSTED" });
     }
 
     yield await emit("TurnStarted", { turn: state.turnCount + 1 });
@@ -286,6 +364,13 @@ export async function* runLoop(
       reservedOutputTokensOverride: state.maxOutputTokensOverride,
       runId,
       now: now(),
+      /**
+       * 决 3：模型看到的「当前时间」冻结在本执行段的起始时刻。
+       *
+       * 跨进程 resume 时 segmentStartedAt 会重新取，所以隔夜恢复看到的是
+       * 恢复当天 —— 冻到 Run 级会让产物写上启动那天的日期。
+       */
+      timeFactAt: segmentStartedAt,
     });
 
     if (compiled.compactionApplied.length > 0) {
@@ -351,11 +436,21 @@ export async function* runLoop(
     }
 
     if (compiled.status === "COMPACTION_INSUFFICIENT") {
-      // D-05：更激进的 Compact 已在 compileFrame 内尝试过，
-      // 到这里说明 irreducible 本身超窗 → DETERMINISTIC handoff，不再调用模型。
+      /**
+       * D-05：超硬限一律不发（R-3）。
+       *
+       * 修复前这个分支只在「irreducible 也超限」时才走到，其余情况**照常发出** ——
+       * 一个超长用户输入压不掉、帧仍然超硬限，却被当成正常帧发给 Provider。
+       * 现在超硬限就是超硬限，`irreducibleExceedsHardLimit` 只决定
+       * 「还能不能靠压缩救」，不决定发不发。
+       *
+       * `used` 直接用 irreducibleTokens：**不再叠加 fixedOverheadTokens**。
+       * 那是 R-3 的第二层错误 —— computeIrreducible 内部已经按计数路径
+       * 决定过要不要含工具开销了，外面再加一次就是同一笔算两遍。
+       */
       yield await emit("BudgetHardLimitReached", {
         axis: "contextTokens",
-        used: compiled.irreducibleTokens + compiled.fixedOverheadTokens,
+        used: compiled.irreducibleTokens,
         limit: spec.agentSpec.contextPolicy.hardInputLimitTokens,
       });
       return yield* finish({ reason: "CONTEXT_EXHAUSTED" });
@@ -429,6 +524,48 @@ export async function* runLoop(
       durationMs: now() - startedAt,
     });
 
+    /**
+     * U-1 的两个观测点。
+     *
+     * 规则 3（token 口径）用的是「编译帧时声明的 totalTokens」与
+     * 「端点实际计费的 inputTokens」之差 —— 这正是 2026-08-24 那两次实跑
+     * 手工比对出 D-3 的方式。现在它是自动的：同样的偏差再次出现时，
+     * 不需要有人恰好去翻日志。
+     */
+    for (const o of [
+      drift.observeToolCallCount(invocation.toolCalls.length, true),
+      drift.observeTokenAccuracy(frame.totalTokens, usage.inputTokens),
+    ]) {
+      if (!o) continue;
+      if (o.disposition === "RECORD" && driftAnnounced.has(o.field)) continue;
+      driftAnnounced.add(o.field);
+      yield await emit("EndpointBehaviorDrift", {
+        field: o.field,
+        declared: o.declared,
+        observed: o.observed,
+        disposition: o.disposition,
+      });
+      if (o.disposition === "FAIL_FAST") {
+        /**
+         * 【定】不得静默继续（§8.6 不变量 4）。
+         *
+         * FAIL_FAST 的两条规则都有同一个性质：**继续跑会让后续失败
+         * 离成因很远**。配对校验开始生效时，每一次疏漏都变成硬失败；
+         * token 口径失准时，D-05 的激进 Compact 失去可靠触发点。
+         */
+        const err = makeError({
+          code: "ENDPOINT_BEHAVIOR_DRIFT",
+          source: "MODEL_PROVIDER",
+          category: "PROTOCOL",
+          retryability: "NEVER",
+          sideEffectState: "NO_EFFECT",
+          safeMessage: new EndpointDriftError(o).message,
+        });
+        yield await emit("RuntimeErrorOccurred", { error: err });
+        return yield* finish({ reason: "MODEL_ERROR", error: err });
+      }
+    }
+
     const budget = {
       ...state.budgetUsage,
       modelCalls: state.budgetUsage.modelCalls + 1,
@@ -436,7 +573,9 @@ export async function* runLoop(
       outputTokens: state.budgetUsage.outputTokens + usage.outputTokens,
       // 【定】计费输入含缓存两项。只读 inputTokens 在命中时低估达 85%。
       billedInputTokens: state.budgetUsage.billedInputTokens + usage.billedInputTokens,
-      activeWallClockMs: now() - state.budgetUsage.startedAt,
+      // R-2：累计值，不是 now() - startedAt。等审批的时间与跨段关机的时间
+      // 都不算 active（V05 §16.1【定】）。
+      activeWallClockMs: activeNow(),
     };
 
     // 流式中断：半截内容不进入后续 Context，未闭合的 call 已被适配器丢弃。
@@ -552,6 +691,11 @@ export async function* runLoop(
         verification: ports.verification,
         approvalDecider: deps.approvalDecider,
         approvalPolicy: spec.agentSpec.approvalPolicy,
+        timezone: spec.agentSpec.timezone,
+        // 决 6：逐 Action 的执行前指纹落 transcript。它是 §18.2 分支二的真正判据。
+        recordActionFact: async (fact) => {
+          lastSequence = await ports.transcript.append(makeActionFactEntry(runId, fact));
+        },
         ids: ports.ids,
         now,
         signal: interrupts.signal,
@@ -564,6 +708,19 @@ export async function* runLoop(
       let r = await batchGen.next();
       while (!r.done) {
         const bev = r.value;
+        /**
+         * R-2：等审批的那段时间在这里被夹出来。
+         *
+         * 为什么在主循环测而不是在 settle-batch 里：`ApprovalRequested` 与
+         * `ApprovalDecided` 本来就都流经这里，主循环拿得到完整的事件对，
+         * 而 settle-batch 不认识「预算」这个概念。让它去报时会把预算语义
+         * 泄进批执行逻辑里。
+         */
+        if (bev.type === "ApprovalRequested") waitingSince = now();
+        else if (bev.type === "ApprovalDecided" && waitingSince !== undefined) {
+          waitedMs += now() - waitingSince;
+          waitingSince = undefined;
+        }
         // executeBatch 产出的事件带的是占位号 0 —— 它没有 store 也不该有。
         // 取号在这里统一做，与 emit() 走同一个分配器（D-2）。
         lastSequence = await ports.transcript.nextSequence(runId, lastSequence);

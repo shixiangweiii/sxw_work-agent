@@ -47,7 +47,20 @@ export function fakeProfile(overrides: FakeProfileOverrides = {}): EndpointCapab
     },
     tokens: {
       hasCountTokensEndpoint: true,
-      countTokensAccuracy: "EXACT",
+      /**
+       * 【定】虚拟端点**不得**声称 EXACT。
+       *
+       * 这是 U-1 接线时暴露的一个夹具错误：原本这里写的是 "EXACT"，
+       * 而虚拟端点根本没有被测量过 —— 它的 token 数由 ScriptedModelPort
+       * 的两个互不相关的常量决定（countTokens 与 usage）。
+       * 漂移检测一接上，规则 3 立刻 FAIL_FAST，而且**它是对的**：
+       * 声明说精确，实际对不上。
+       *
+       * 声明是「关于某个端点的实测事实」（原则十四）。
+       * 一个虚拟端点没有实测，就不该声称精确 —— 那正是 confidence 字段
+       * 存在的理由。改成 APPROXIMATE 不是为了让脚本变绿，是因为它是真的。
+       */
+      countTokensAccuracy: "APPROXIMATE",
       perRequestBaseTokens: 5,
       billedInputFormula: "INPUT_PLUS_CACHE",
       usageFieldMap: {},

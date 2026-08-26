@@ -16,36 +16,59 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 当前状态
 
-**阶段 1（Headless Walking Skeleton）主体实现完成，阶段 2 的四条前置已清完，可以开工阶段 2（持久化与 Resume）。**
+**阶段 2（持久化与 Resume）功能开发完成。** 依据 [阶段 2 实施方案 V20260826-03](sxw_aicoding/实施方案设计/阶段2实施方案_V20260826.md)，四批 18 步全部落地。
 
-- 57 个 TS 文件 / ~9300 行，`tsc --noEmit` 干净
-- 14 个 Port 定义，实现 10 个（D-14）
-- 四条验收脚本 **25 条判定全绿**；真实百炼 Anthropic 端点复跑归档盘点任务 4 轮完成（2026-08-25）
-- **阶段 2 的四条前置已于 2026-08-25 全部完成**：D-2 序列统一、R-6 Compact 落地、R-4 Port 异常收敛、D-3 推理块探针（推断证实：`count_tokens` 对 thinking 块**一个 token 都不算**）
-- **剩余缺口 29 项**，记录在 [阶段1存量问题清单](sxw_aicoding/存量BUG/阶段1存量问题清单_V20260824.md)——动阶段 2 之前必读第 0.2 / 0.2 追补 / 0.3 节（修了什么、新发现了什么、评审后补了什么）与第 7 节（处置顺序）
-- 进程退出即失忆（transcript 只在内存）；但**事件流会落 JSONL**（`.workagent-runs/`，`--no-trace` 关）
-- GUI 在阶段 4，阶段 1–3 全部 headless
+- **七条验收脚本 50 条判定全绿**，`tsc --noEmit` 干净，`eval:suite` pass^3 成立
+- **跨进程 resume 成立**：真 `kill -9` 之后另一个进程只凭 SQLite 接上并跑到终态
+- 15 个 Port（阶段 2 新增 `RunStorePort`）；SQLite 四张表；`node:sqlite` 零新增依赖
+- 五条边界 grep 全部守住（阶段 2 新增第 5 条：`node:sqlite` 只在 `packages/store-sqlite/`）
+
+**阶段 2 关掉了哪些存量**：R-1 / R-2 / R-3 / R-5 / U-1 / U-2 / U-5 / U-6 / U-7 / U-9 / M-1…M-7 / M-9 前半 / D-1 / D-4 / 验收脚本五条缺口 / E-1…E-8。
+**明确不做**：R-7 与 U-8 的 kind 值域扩展（决 2）、U-3（阶段 3）、M-8、M-9 后半。
+
+> ⚠️ **`.env` 的 `dashscope_model` 与端点声明不一致会在启动时被挡下**（M-5）。
+> 当前 `.env` 写的是 `deepseek-v4-flash`，而百炼声明是 `qwen3.7-plus` ——
+> 这个值在阶段 1 一直被静默忽略（实际用的是声明里的），阶段 2 把它变成了显式错误。
+> 二选一：把 `.env` 改回 `qwen3.7-plus`，或为 `deepseek-v4-flash` 补一份端点能力声明。
+
+GUI 在阶段 4，阶段 1–3 全部 headless。
 
 ## 常用命令
 
 ```bash
-npm install
+npm install                        # Node 24＋（.nvmrc / engines 都写了）
 npm run typecheck                  # tsc --noEmit，必须干净（每完成一步就跑一次）
 npm run dev -- --task "看看根目录里有什么，然后写一份 summary.txt"
+npm run dev -- --list-runs         # 库里有哪些 Run
+npm run dev -- --resume <runId>    # 接上一个没跑完的 Run
+npm run dev -- --resume <runId> --recovery-decision CONTINUE --recovery-note "已人工确认"
 ```
 
-`--yes` 跳过交互式审批；`--workspace <path>` 指定工作目录（默认 `.workagent-workspace`）；
-`--trace <file>` 指定事件流落盘位置（默认 `.workagent-runs/run-<ISO>.jsonl`），`--no-trace` 关闭。
+`--yes` **只自动批准「workspace 内的可逆写」**（E-3），其余仍逐次问；要旧的「批准一切」得显式写 `--yes-all`。
+`--workspace <path>` 指定工作目录（默认 `.workagent-workspace`）；`--db <path>` 指定 SQLite 库（默认 `.workagent-state/runs.db`）；
+`--trace <file>` 指定事件流落盘位置（默认按 runId 定名 `.workagent-runs/<runId>.jsonl`，**resume 续写同一文件**），`--no-trace` 关闭。
 
 ```bash
 npm run verify:endpoint-profile    # 端点差异能否被挡在主循环之外
-npm run verify:pairing             # 批内配对不变量能否守住（含 R-4 四条 Port 异常注入）
-npm run verify:resume              # 消息级恢复够不够用（最关键）；C2 段验 D-2 序列统一
+npm run verify:pairing             # 批内配对不变量能否守住（三条中断路径各一条真注入 ＋ R-4 四条 Port 异常 ＋ orphan 反向注入）
+npm run verify:resume              # 消息级恢复够不够用；C 段判据已收紧到「产物与基线逐字一致」
 npm run verify:compact             # Compact 是否真的落地（R-6）
+npm run verify:persistence         # 跨进程恢复：真 kill -9 之后能不能只凭 SQLite 接上
+npm run verify:budget              # 预算八轴逐条撞墙 ＋ 墙钟拆分 ＋ 时间事实段级冻结
+npm run verify:crash               # 三个崩溃窗口 × 三条恢复分支（决 6 的判别力在这里）
+npm run verify:drift               # 端点漂移检测 ＋ 对照端点装配（U-1 / U-6）
 npm run verify:all
 ```
 
-一次性探针，**要花钱、发真实请求，不在 `verify:all` 里**：
+Eval 层（不复用生产结算路径，§24.1【定】）：
+
+```bash
+npm run eval:suite                 # 脚本化，不花钱，验管路（夹具→Run→manifest→grader→报告）
+npm run eval:suite -- --live 5     # 真实端点跑 5 次，出 pass@1 / pass^5 / token 与时延分布
+npm run verify:drift -- --live     # DeepSeek 对照端点实跑（§24.6）
+```
+
+一次性探针，**要花钱、发真实请求，不在 `verify:all` 里**（上面带 `--live` 的两条同理）：
 
 ```bash
 npm run probe:reasoning-tokens     # D-3：count_tokens 算不算推理块
@@ -53,7 +76,7 @@ npm run probe:reasoning-tokens     # D-3：count_tokens 算不算推理块
 
 **不写单测、不引入测试框架**（D-25）。验收以**可运行脚本**交付，打印可读证据供人判断，而不是断言绿灯——与 Spike 0 的探针形态一致。新增验证时按这个形态写，放进 `apps/cli/src/verify/`，用 `harness.ts` 里的 `banner/section/fact/verdict` 输出。
 
-工程基线：**Node ＋ npm workspaces，不引入 pnpm / turbo / nx**。运行期依赖只有 `@anthropic-ai/sdk` 和 `dotenv`；`tsx` 直接跑 TS，无构建步骤。
+工程基线：**Node 24 ＋ npm workspaces，不引入 pnpm / turbo / nx**。运行期依赖只有 `@anthropic-ai/sdk` 和 `dotenv` —— **SQLite 用内置 `node:sqlite`，不新增依赖**；`tsx` 直接跑 TS，无构建步骤。
 
 ### 凭证
 
@@ -67,7 +90,8 @@ dashscope_api_key=...
 
 `compose.ts` 用 `override: true` 加载 dotenv 是刻意的——shell 里 export 过的 `ANTHROPIC_BASE_URL` 会把第三方 Key 发往官方端点（Spike 0 期间真实踩过）。`credential-guard.ts` 在启动前断言凭证去向，不是出错后记录。
 
-> 已知缺口：四条 verify 脚本即使全程用 fake model port 也要求真实 `.env` 才能 compose（存量清单 §4.5）。
+> 阶段 2 起：用 `modelPortOverride` 时不再要求真凭证（存量清单 §4.5 已关）。
+> 验收脚本一律用 `dbPath: ":memory:"` —— 同一条 SQLite 代码路径，但每次 compose 都是干净的一份。
 
 ## 架构
 
@@ -96,11 +120,19 @@ while (true) {
 4. 流式 delta、进度、心跳不进 `LoopState`，直接 yield；
 5. **循环不读取端点能力声明**（本文件出现 `profile.` 即违规）。
 
+阶段 2 在第 ① 步之前多了一次 `checkBudgets()`（八条轴一次判完，R-1），
+在第 ② 步之后多了一次漂移观测（U-1）——两者都收在纯函数/独立类里，
+循环只消费判定结果，纪律五条不变。
+
 `Terminal` ≠ Run 终结：`RECOVERY_REQUIRED` 是明确的**非终态**，不结算 outcome，`StartResult.outcome` 为 `undefined`。
 
 ### 恢复走 transcript，不走状态快照
 
-`resume()` = 读 transcript → 重建 messages ＋ 从 `RUN_META` 读回累计事实 → 按 §18.2 三条分支处置末尾未配对的 tool_use → 从下一轮继续。
+`resume()` = **从 `RunStorePort` 读回冻结的 RunSpec** → 读 transcript → 重建 messages ＋ 从 `RUN_META` 读回累计事实 → 按 §18.2 三条分支处置末尾未配对的 tool_use → 从下一轮继续。
+
+【定】RunSpec 必须是**启动时冻结的那一份**（深冻结，M-4）。三条分支的判定读的是
+`spec.agentSpec.toolSnapshots`——用今天 compose 出来的工具声明去判一条昨天的 transcript，
+改一次工具声明就会让同一条记录走进不同分支，而盘上看不出来。读不到就抛，**不回退到当前配置**。
 
 `LoopState` 因此**不需要可序列化**（可以放 Promise / AbortController / 完整 Message[]）——这是删掉纯 Kernel 后剩下的唯一自由度。代价：崩溃时正在执行的工具会重跑，「工具跑没跑」在 transcript 上不可区分。**这把「Tool 是否幂等」从可选属性变成了恢复正确性的前提。**
 
@@ -108,9 +140,16 @@ while (true) {
 
 | 工具 | 性质 | 分支 |
 |---|---|---|
-| `list_dir` | 只读、快、幂等（返回结构化 JSON，不是给人看的定宽文本） | 一：真的重新执行 |
-| `write_note` | 可控慢（`delay_ms`）、可验证、非幂等 | 二：真的调 Observation 读外部世界 |
-| `append_log` | 非幂等且 `verification.mode = "NONE"` | 三：停在 RECOVERY_REQUIRED |
+| `list_dir` | 只读、快、幂等（结构化 JSON ＋ cursor 分页） | 一：真的重新执行 |
+| `write_note` | 可控慢（`delay_ms`）、可验证、非幂等 | 二：观察「绝对」目标状态 |
+| `append_log` | 非幂等、执行后不可验、**相对**操作 | 二或三：**取决于有没有拍到执行前指纹** |
+| `now` | 只读、幂等（阶段 2 新增，时间事实的**补充**） | 一 |
+
+**【定】阶段 2 起，分支判据是 Action 级事实，不是工具的静态声明（决 6）。**
+阶段 1 用 `verification.mode !== "NONE"` 回答「崩溃后能不能观察」，而那个字段说的是
+「执行后能不能验」。两者不同：`append_log` 执行后验不了（不知道该有几行），
+但崩溃后能不能观察，取决于**执行前有没有留下指纹**（`ACTION_FACT` 条目）。
+拍不拍由 Runtime 侧的 Verifier 决定——这样测量的旋钮才不长在被测对象身上。
 
 停在 `RECOVERY_REQUIRED` 后，**再次 `resume()` 必须带 `recoveryDecision: "CONTINUE" | "ABORT"`**，否则抛错——不然「交用户决定」会退化成「停一次，下次自动放行」。
 
@@ -133,14 +172,17 @@ isBlockClosed     形状提供事件          端点提供有无
 
 主力端点是**百炼 Anthropic 形状 `qwen3.7-plus`**（D-16）。选它而不是评分更高的 DeepSeek，因为它**零协议兜底**（缺 tool_result、错 tool_call_id 一律 200 放行）且服务端无状态——用一个什么都不校验的端点开发，能逼出自持逻辑的全部漏洞。`compose.ts` 是全仓唯一写死端点名的地方。
 
-### 四条边界（有机械判据，改动后 grep 复核）
+### 五条边界（有机械判据，改动后 grep 复核）
 
 ```bash
 grep -rn "@anthropic-ai/sdk" packages apps cases     # 1. Provider SDK 只在形状适配器里
 grep -rn "dashscope" packages/harness-runtime/src    # 2. 端点名不进 Runtime 代码
-grep -n "profile\." packages/harness-runtime/src/loop/run-loop.ts  # 3. 主循环不读端点声明（仅文件头注释命中）
+grep -n "profile\." packages/harness-runtime/src/loop/run-loop.ts  # 3. 主循环不读端点声明（仅注释命中）
 grep -rn "micro-cases" packages/harness-runtime/src  # 4. Runtime Core 不 import Case Package
+grep -rn "node:sqlite" packages apps cases adapters  # 5. 只允许 packages/store-sqlite/ 命中
 ```
+
+第 5 条是阶段 2 新增：`node:sqlite` 是 Node 22.5 才引入的年轻 API，调用面收在一个包里，将来 API 变了只改一处。
 
 前两条是研究问题「端点差异能否被完全挡在主循环之外」的机械判据。判据要区分**注释、类型定义与真实依赖**——`ApiShape` 这类类型定义命中不算违规。
 
@@ -168,7 +210,13 @@ packages/harness-runtime/    Layer 3 全部
   src/model/capability/      端点能力声明的加载、冻结与漂移检测
   src/ports/                 14 个 Port 接口（★ 标记的 10 个已实现）
   src/facade/                HarnessRuntime：start / resume / cancel / interject / inspect
-packages/testkit/            fake-endpoint-profile、fake-clock、in-memory-transcript-store 等
+packages/store-sqlite/       ★阶段 2。唯一允许 import node:sqlite 的地方
+  src/migrations/            单一 runner，固定顺序（§26.3【定】）
+  src/transcript-store.ts    TranscriptStorePort 的 SQLite 实现（接口一字未改）
+  src/run-repository.ts      RunStorePort：RunSpec / AgentSpecSnapshot / status
+packages/testkit/            fake-endpoint-profile、fake-clock、crash-harness（真 kill -9）等
+eval/                        ★阶段 2。graders / suite / fixtures
+                             【定】只经 Facade，不依赖 Runtime 私有类，不读 RunOutcome 判成败
 adapters/shape-anthropic-messages/   唯一允许 import Provider SDK 的地方
 adapters/endpoint-profiles/  端点行为的**数据**形态，不是代码
 cases/micro-cases/           三个工具（见上表）
@@ -191,9 +239,11 @@ apps/cli/                    Composition Root（compose.ts）＋ 入口 ＋ 四�
 | [Atlas 阶段 1 Agent 评测报告](评测/Atlas阶段1_Agent评测报告_20260824.md) | 真实端点单任务评测（84/100）。它暴露的四项已于 2026-08-25 修完 |
 | [阶段 1 Bugfix 批次评审](sxw_aicoding/代码评审/2026-08-25/阶段1Bugfix批次评审-zcode.md) | 对上述修复批次的评审。逐条复核结论见存量清单 §0.2 追补 |
 | [阶段 1 实施方案](sxw_aicoding/实施方案设计/阶段1实施方案_V20260823.md) | 分步计划与不得绕过清单 |
+| [**阶段 2 实施方案 V20260826-03**](sxw_aicoding/实施方案设计/阶段2实施方案_V20260826.md) | **阶段 2 的实现依据**。§0 七个决定、§0.3 十七条修订记录、§7 的 36 项处置映射 |
+| [阶段 2 方案评审](sxw_aicoding/方案评审/2026-08-26/阶段2实施方案评审-zcode.md) | 逐条核源码的评审，P1 四条已吸收进方案 §0.3 |
 | `WorkAgent调研/ProviderProtocolFacts_*.md` | Spike 0 三轮实测事实（75 份证据 / 4 个端点） |
 | `代码评审/` | 按日期分目录。`2026-08-24/` 两份阶段 1 评审；`2026-08-25/` 一份 Bugfix 批次评审 |
-| `ADR/` | 决策记录；阶段 1 的四份**待补写** |
+| `ADR/` | 决策记录。阶段 2 的三份已写：[0001 outcome.kind](sxw_aicoding/ADR/0001-outcome-kind-不区分是谁没做成.md)、[0002 恢复可观测性](sxw_aicoding/ADR/0002-恢复可观测性改为-action-级事实.md)、[0003 时间事实粒度](sxw_aicoding/ADR/0003-受信时间事实冻结到执行段.md)；**阶段 1 的四份仍待补写** |
 | `spikes/s0-provider-protocol/` | 一次性探针，已完成，不进主干依赖（`tsconfig.json` 已 exclude） |
 
 V04 及更早的架构设计、`V03_Spike0回填清单.md` **不再作为实现依据**，只作过程记录。

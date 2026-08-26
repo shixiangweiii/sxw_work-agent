@@ -25,7 +25,23 @@ export type TranscriptEntryKind =
   | "RUN_META"
   | "MESSAGE"
   | "COMPACT_BOUNDARY"
-  | "BLOB_REF";
+  | "BLOB_REF"
+  /**
+   * 逐 Action 的事实（阶段 2 新增，决 6）。
+   *
+   * ── 这是对 §18.5【定】的 Contract 扩展，不是顺手加一个枚举值 ──────────
+   *
+   * 为什么非扩不可：§18.2 分支二的判据要从「工具的静态声明」改成
+   * 「**这次执行**有没有留下前置指纹」，而前置指纹是逐 Action 的事实。
+   * 原来的四个 kind 里放不下它 —— 塞进 `RUN_META` 语义是错的
+   * （那是滚动聚合，每轮覆写，不是逐条事实）。
+   *
+   * 为什么现在扩是安全的：§28.6 本就把 TranscriptEntry 的冻结放在阶段 2，
+   * 扩它正好在窗口内。但**冻结范围要收窄** —— 只冻 resume 真实用到的部分，
+   * Replay 相关的语义（起始位置定位、exact recorded 的字节级要求）
+   * 保持【验】不冻：Replay 推到阶段 3 了，现在冻它的人还不知道它会怎么用。
+   */
+  | "ACTION_FACT";
 
 export interface TranscriptEntry {
   runId: RunId;

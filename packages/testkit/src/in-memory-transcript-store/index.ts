@@ -1,6 +1,15 @@
 /**
  * In-memory transcript store（阶段 1）。
  *
+ * ⚠️ **阶段 2 起已无使用者，优先用 `openDb({ path: ":memory:" })` ＋
+ * `SqliteTranscriptStore`。** 后者是**同一条 SQLite 代码路径**，只是不落盘 ——
+ * 既同样密封，又不牺牲覆盖（跑的是真 SQL，不是内存桩）。
+ * 全部验收脚本都已改用它。
+ *
+ * 保留本文件的理由只有一条：它是「接口按最终形态定」这个判断的**历史证物** ——
+ * 阶段 2 换实现时 `TranscriptStorePort` 一个字没改。要新写 store 实现时，
+ * 对照它和 SQLite 版看接口哪些地方是被两种实现共同兑现的。
+ *
  * 阶段 2 换 SQLite 实现，接口不变 —— TranscriptStorePort 已按最终形态定。
  *
  * 「进程关了就忘」是阶段 1 的已知限制，不是缺陷：

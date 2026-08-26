@@ -8,7 +8,11 @@
  * —— 一个只读快工具 ＋ 一个可控慢的可验证写工具。
  */
 
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import type {
+  ObservationResult,
   PreparedAction,
   ToolExecutionContext,
   ToolExecutionOutcome,
@@ -20,10 +24,15 @@ import type {
 import { makeError } from "@workagent/harness-runtime";
 import { appendLogSnapshot, executeAppendLog } from "./tools/append-log.js";
 import { executeListDir, listDirSnapshot } from "./tools/list-dir.js";
+import { executeNow, nowSnapshot } from "./tools/now.js";
 import { executeWriteNote, verifyWriteNote, writeNoteSnapshot } from "./tools/write-note.js";
 
 export { appendLogDefinition, appendLogSnapshot } from "./tools/append-log.js";
 export { listDirDefinition, listDirSnapshot } from "./tools/list-dir.js";
+export { nowDefinition, nowSnapshot } from "./tools/now.js";
+// E-3 的有限 auto-grant 与工具内部用的是**同一道**边界判定 —— 两处若各写一份，
+// 会出现「授权时判在里面、执行时判在外面」这种最难查的不一致。
+export { isInsideWorkspace } from "./tools/fs-common.js";
 export { writeNoteDefinition, writeNoteSnapshot } from "./tools/write-note.js";
 
 /**
@@ -39,6 +48,9 @@ export const microCaseTools: ToolSnapshot[] = [
   listDirSnapshot,
   writeNoteSnapshot,
   appendLogSnapshot,
+  // 阶段 2 新增。只读 ＋ 幂等 → §18.2 分支一，不扰动分支分布统计。
+  // 【定】它是注入时间事实的**补充**，不是替代 —— 见 tools/now.ts 的文件头。
+  nowSnapshot,
 ];
 
 export class MicroCaseToolHandler implements ToolHandlerPort {
@@ -49,7 +61,13 @@ export class MicroCaseToolHandler implements ToolHandlerPort {
     const input = action.normalizedInput as Record<string, unknown>;
     switch (action.toolName) {
       case "list_dir":
-        return executeListDir({ path: String(input["path"] ?? ".") }, ctx);
+        return executeListDir(
+          {
+            path: String(input["path"] ?? "."),
+            ...(input["cursor"] === undefined ? {} : { cursor: Number(input["cursor"]) }),
+          },
+          ctx,
+        );
       case "write_note":
         return executeWriteNote(
           {
@@ -59,6 +77,8 @@ export class MicroCaseToolHandler implements ToolHandlerPort {
           },
           ctx,
         );
+      case "now":
+        return executeNow({}, ctx);
       case "append_log":
         return executeAppendLog(
           { path: String(input["path"] ?? ""), line: String(input["line"] ?? "") },
@@ -88,7 +108,111 @@ export class MicroCaseToolHandler implements ToolHandlerPort {
  * 【定】Tool Handler 的 "success" 不能替代独立 Verification（V05 §15.1）。
  * write_note 报告成功之后，这里会真的把文件读回来比对。
  */
+export interface MicroCaseVerifierOptions {
+  /**
+   * 允不允许拍执行前指纹（决 6 的旋钮）。
+   *
+   * 【定】这个开关在 **Runtime 侧**，不在工具身上 —— 这正是决 6 的要点。
+   * 阶段 2 的研究问题是「有多少次 resume 落进第三条分支」，
+   * 分流依据若长在被测对象身上，测的就是它自己。
+   *
+   * 故障注入把它关掉，同一个 `append_log` 就从分支二掉到分支三，
+   * 而工具声明一个字没改。
+   */
+  recoveryObservationEnabled?: boolean;
+}
+
 export class MicroCaseVerifier implements VerificationPort {
+  constructor(private readonly opts: MicroCaseVerifierOptions = {}) {}
+
+  /**
+   * 执行前拍指纹（决 6）。
+   *
+   * 拍什么由工具的 `recoveryObservation.kind` 决定：
+   *   TARGET_APPEND_TAIL —— 追加是相对操作，要记住起始时的字节数与尾部 hash；
+   *   TARGET_CONTENT_HASH —— 覆盖写是绝对操作，其实不需要前置状态，
+   *                          但记一份也无妨（能顺带回答「本来就有没有」）。
+   *
+   * 返回 undefined = 这次观察不了 → 该 Action 崩溃后落第三条分支。
+   */
+  async observePre(
+    action: PreparedAction,
+    ctx: ToolExecutionContext,
+  ): Promise<ObservationResult | undefined> {
+    if (this.opts.recoveryObservationEnabled === false) return undefined;
+    const path = String((action.normalizedInput as Record<string, unknown>)["path"] ?? "");
+    if (!path) return undefined;
+    const target = resolve(ctx.workspaceRoot, path);
+    try {
+      const buf = await readFile(target);
+      return {
+        fingerprint: { exists: true, bytes: buf.byteLength, sha256: sha256(buf) },
+        at: Date.now(),
+      };
+    } catch {
+      // 文件还不存在也是一个有效的起始状态 —— 「本来没有」同样能用来比对。
+      return { fingerprint: { exists: false, bytes: 0, sha256: "" }, at: Date.now() };
+    }
+  }
+
+  /**
+   * 崩溃后：拿执行前的指纹和现在比，判断那次执行发生没发生。
+   *
+   * 这是把 §18.2 窗口 A/B 的「不可区分」变成「可区分」的那一步 ——
+   * 也是消息级恢复这个取舍成不成立的关键。
+   */
+  async observePost(
+    action: PreparedAction,
+    ctx: ToolExecutionContext,
+    pre: unknown,
+  ): Promise<{ applied: boolean; detail: string } | undefined> {
+    const p = pre as { exists: boolean; bytes: number; sha256: string } | undefined;
+    const path = String((action.normalizedInput as Record<string, unknown>)["path"] ?? "");
+    if (!path) return undefined;
+    const target = resolve(ctx.workspaceRoot, path);
+
+    let now: { exists: boolean; bytes: number; sha256: string };
+    try {
+      const buf = await readFile(target);
+      now = { exists: true, bytes: buf.byteLength, sha256: sha256(buf) };
+    } catch {
+      now = { exists: false, bytes: 0, sha256: "" };
+    }
+
+    /**
+     * 没有前置指纹时的**绝对**判据。
+     *
+     * 只对覆盖写这类「目标状态与起始状态无关」的操作成立 ——
+     * 文件内容等于计划内容，就说明那次写发生过。
+     * 追加操作走不到这里：它声明了 requiresPreFingerprint: true，
+     * 没有指纹时 Runtime 根本不会把它归进分支二。
+     */
+    if (!p) {
+      const planned = String((action.normalizedInput as Record<string, unknown>)["content"] ?? "");
+      if (!now.exists) {
+        return { applied: false, detail: "目标不存在 —— 那次写入没有发生" };
+      }
+      const same = now.sha256 === sha256(Buffer.from(planned, "utf8"));
+      return same
+        ? { applied: true, detail: "目标内容与计划内容一致 —— 那次写入确实发生了" }
+        : { applied: false, detail: "目标内容与计划内容不一致 —— 那次写入没有完成" };
+    }
+
+    if (!p.exists && !now.exists) {
+      return { applied: false, detail: "执行前后目标都不存在 —— 那次写入没有发生" };
+    }
+    if (p.exists && now.exists && p.sha256 === now.sha256) {
+      return {
+        applied: false,
+        detail: `目标内容与执行前完全一致（${now.bytes} bytes）—— 那次写入没有发生`,
+      };
+    }
+    return {
+      applied: true,
+      detail: `目标已变化（${p.bytes} → ${now.bytes} bytes）—— 那次写入确实发生了`,
+    };
+  }
+
   async verify(
     action: PreparedAction,
     outcome: ToolExecutionOutcome,
@@ -138,4 +262,8 @@ export class MicroCaseVerifier implements VerificationPort {
       detail: r.detail,
     };
   }
+}
+
+function sha256(buf: Buffer): string {
+  return createHash("sha256").update(buf).digest("hex");
 }

@@ -142,6 +142,7 @@ async function main(): Promise<void> {
     const trace = new CollectingTraceSink();
     try {
       const composed = compose({
+        dbPath: ":memory:",
         workspaceRoot: ws.root,
         approvalDecider: async () => ({ approved: true }),
         trace,

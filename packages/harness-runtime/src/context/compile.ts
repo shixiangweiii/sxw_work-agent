@@ -51,6 +51,24 @@ export interface CompileDeps {
   reservedOutputTokensOverride?: number | undefined;
   runId: RunId;
   now: number;
+  /**
+   * 注入给模型的那条受信时间事实用的时刻（决 3）。
+   *
+   * 【定】它是**本执行段的起始时刻**，不是 `now` —— 两者刻意分开：
+   *
+   *   · `now` 每轮变，服务于预算、事件时间戳这些「此刻」语义；
+   *   · `timeFactAt` 一段内不变，服务于「模型看到的当前时间」。
+   *
+   * 为什么要冻：STRICT_PREFIX 下每轮重渲染时间戳会让前缀从第一条 item
+   * 就分叉，历史永远缓存不到；而分钟粒度还让失效**不确定** ——
+   * 跑得快就不失效，跨了分钟边界就在某个说不准的轮次失效一次。
+   *
+   * 为什么冻到「段」而不是「整个 Run」：跨进程 resume 是阶段 2 的招牌能力，
+   * 冻到 Run 级会让周一起的 Run 在周三 resume 时把周一的日期写进产物 ——
+   * 那比编造更糟，因为它是被 system prompt 背书的错误。
+   * 段边界重新冻结，段内稳定，两头都要得到。
+   */
+  timeFactAt: number;
 }
 
 export async function compileFrame(
@@ -106,20 +124,42 @@ export async function compileFrame(
     }
   }
 
-  const irreducible = computeIrreducible(frame, deps);
+  const irreducible = computeIrreducible(frame, deps, count.accuracy);
   frame.irreducibleTokens = irreducible;
 
-  // ③ hard limit 且不可再压 → 交主循环决策（D-05）
+  /**
+   * ③ hard limit（R-3）。
+   *
+   * ── 修之前这里有三个叠在一起的口径错误 ────────────────────────────
+   *
+   * 1. **可以超限发出。** 只有 `irreducible + fixedOverhead` 也超硬限时才返回
+   *    COMPACTION_INSUFFICIENT，否则**照常 READY 发出去**。而 Compact 永久
+   *    保留全部用户输入、`computeIrreducible()` 又不把它们计入 irreducible ——
+   *    于是「压缩完仍然超硬限」的帧会被当成正常帧发给 Provider。
+   *    超硬限就是超硬限，压不压得动是**下一个**问题。
+   *
+   * 2. **重复相加。** `computeIrreducible()` 起手就是 `sum = fixedOverheadTokens`，
+   *    这里又加了一次。同一笔开销在同一个比较里算了两遍。
+   *
+   * 3. **精确路径上根本不该加。** `fixedOverheadTokens` 是「工具数 × 180」的
+   *    本地估算，而端点的 `count_tokens` 返回值**已经包含**工具定义开销
+   *    （Spike p4 实测：无 tool 15 → 有 tool 374，差 359 就是工具）。
+   *    在精确路径上再扣一次，阈值基准本身就是错的。
+   *
+   * 修法是把三种口径显式分开，见 `computeIrreducible` 的判定表。
+   * 这里只做一件事：**超硬限一律不发**，区分的只是「还能不能靠压缩救」。
+   */
   if (count.tokens > deps.policy.hardInputLimitTokens) {
-    if (irreducible + deps.fixedOverheadTokens > deps.policy.hardInputLimitTokens) {
-      return {
-        status: "COMPACTION_INSUFFICIENT",
-        totalTokens: count.tokens,
-        irreducibleTokens: irreducible,
-        fixedOverheadTokens: deps.fixedOverheadTokens,
-        compactionApplied,
-      };
-    }
+    return {
+      status: "COMPACTION_INSUFFICIENT",
+      totalTokens: count.tokens,
+      irreducibleTokens: irreducible,
+      fixedOverheadTokens: deps.fixedOverheadTokens,
+      compactionApplied,
+      // 主循环据此选处置（D-05）：还有可压空间就更激进地压一轮，
+      // 连不可压缩集都超限就只能 DETERMINISTIC handoff。
+      irreducibleExceedsHardLimit: irreducible > deps.policy.hardInputLimitTokens,
+    };
   }
 
   // ④ 协议校验。失败不得发起模型调用（V05 §11.5 不变量 7）
@@ -186,10 +226,15 @@ function buildFrame(messages: ContextMessage[], deps: CompileDeps): ContextFrame
    * 把每次都变的时间戳拼进 system block，等于让将来接 cache_control 时
    * 整个前缀永远命不中。单独一条排在 system 之后，system block 保持完全稳定。
    *
-   * ── 为什么不做成 now 工具 ─────────────────────────────────────
+   * ── 注入 vs now 工具：主次不能颠倒 ────────────────────────────
    *
-   * 工具要模型记得调。它上次就没调 —— 直接编了一个。注入是零轮次、
-   * 零 token 往返、且不可能被跳过的那条路径。
+   * 工具要模型记得调。**它上次就没调 —— 直接编了一个。**
+   * 注入是零轮次、零 token 往返、且不可能被跳过的那条路径，所以它是主机制。
+   *
+   * 阶段 2 补了一个只读 `now` 工具，但那是**补充**：段级冻结之后这条事实
+   * 最多过时「本段已跑的时长」，需要精确到分钟的任务才需要去调它。
+   * 【定】不得反过来 —— 删掉这条注入、改由模型自己调 now，
+   * 那正是上面那句实测记录否掉过的方案。
    */
   items.push(
     finishItem(
@@ -198,7 +243,7 @@ function buildFrame(messages: ContextMessage[], deps: CompileDeps): ContextFrame
         source: { kind: "SYSTEM" },
         trust: "SYSTEM_TRUSTED",
         protocolRole: "ORDINARY",
-        content: { type: "text", text: renderTimeFact(deps.now, deps.timezone) },
+        content: { type: "text", text: renderTimeFact(deps.timeFactAt, deps.timezone) },
       },
       deps,
     ),
@@ -267,7 +312,8 @@ function renderTimeFact(now: number, timezone: string): string {
   });
   return (
     `[系统事实] 当前时间：${fmt.format(new Date(now))}（${timezone}）。\n` +
-    `这是本次运行唯一可信的时间来源。需要写日期、时间戳或做时间推算时以它为准，不要另行推测。`
+    `这是本次执行开始时的可信时间。需要写日期、时间戳或做时间推算时以它为准，不要另行推测；\n` +
+    `若任务需要精确到分钟，或本次运行已持续较久，调用 now 工具取当前时刻。`
   );
 }
 
@@ -339,8 +385,30 @@ function summarize(items: ContextItem[]): TrustSummary {
  * 【端点】选定端点 reasoningBlockRule = DROPPABLE，所以只需覆盖配对组；
  * 换成 PLACEHOLDER_REQUIRED 的端点时，占位块也进入不可压缩集。
  */
-function computeIrreducible(frame: ContextFrame, deps: CompileDeps): number {
-  let sum = deps.fixedOverheadTokens;
+/**
+ * 不可压缩集（R-3）。
+ *
+ * ── 判定表：工具定义开销到底该不该算进来 ──────────────────────────────
+ *
+ * | 计数路径   | count_tokens 是否已含工具开销 | 这里该不该再加 |
+ * |------------|------------------------------|----------------|
+ * | EXACT      | **已含**（Spike p4 实测）      | **不加**       |
+ * | ESTIMATED  | 不含（items 里没有工具定义）    | 加             |
+ *
+ * 混算的后果不是差几个 token，是**阈值基准整体偏移**：精确路径上多算一遍
+ * 工具开销，20 个工具就是凭空多出 3600 token 的「不可压缩」额度，
+ * 于是本来还能压的帧被判成压不动。
+ *
+ * 【定】调用方**不得**在这个返回值之外再加 `fixedOverheadTokens`。
+ * 这个函数返回的就是完整的不可压缩集，加法只发生在这里一处。
+ */
+function computeIrreducible(
+  frame: ContextFrame,
+  deps: CompileDeps,
+  accuracy: "EXACT" | "ESTIMATED",
+): number {
+  // 精确路径上 count_tokens 已经把工具定义算进 totalTokens 了，这里再加就是加两遍。
+  let sum = accuracy === "EXACT" ? 0 : deps.fixedOverheadTokens;
   for (const item of frame.items) {
     if (
       item.protocolRole === "PROTOCOL_GROUP_MEMBER" ||
@@ -348,7 +416,17 @@ function computeIrreducible(frame: ContextFrame, deps: CompileDeps): number {
       item.protocolRole === "PLACEHOLDER_REQUIRED" ||
       item.kind === "SYSTEM_INSTRUCTION" ||
       // 时间事实每帧重新生成，Compact 永远够不到它 —— 算进不可压缩集才是事实。
-      item.kind === "SYSTEM_NOTICE"
+      item.kind === "SYSTEM_NOTICE" ||
+      /**
+       * 用户输入（R-3 的第一层）。
+       *
+       * Compact 明确永久保留「有 text 块的 user 消息」，也就是说它们
+       * **压不掉**。而修复前 irreducible 不把它们算进去，于是一个超长
+       * 用户输入会得到「irreducible 很小 → 还能压 → 照常发出」的判定，
+       * 而实际上一条都压不动。超硬限的帧就这样被放行了。
+       */
+      item.kind === "USER_MESSAGE" ||
+      item.kind === "USER_INTERJECTION"
     ) {
       sum += item.estimatedTokens;
     }
