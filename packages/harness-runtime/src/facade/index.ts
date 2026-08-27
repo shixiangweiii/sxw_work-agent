@@ -19,7 +19,7 @@ import type {
 import type { ActionBatchId, ActionId, ModelInvocationId, RunId } from "../types/ids.js";
 import { asId } from "../types/ids.js";
 import type { RunListItem, RuntimePorts, ToolExecutionContext } from "../ports/index.js";
-import { freezeRunSpec } from "../model/capability/profile-loader.js";
+import { assertResumeEndpointMatches, freezeRunSpec } from "../model/capability/profile-loader.js";
 import type {
   ApprovalDecider,
   PreparedAction,
@@ -27,6 +27,7 @@ import type {
   VerificationResult,
 } from "../types/tool.js";
 import type { ContextMessage } from "../types/transcript.js";
+import type { EndpointCapabilityProfile } from "../types/endpoint.js";
 import type { ModelContent } from "../types/context.js";
 import { runLoop } from "../loop/run-loop.js";
 import { settleWallOutcome } from "../verification/settle-outcome.js";
@@ -46,6 +47,14 @@ export interface HarnessRuntimeDeps {
   ports: RuntimePorts;
   approvalDecider: ApprovalDecider;
   workspaceRoot: string;
+  /**
+   * 当前进程 compose 出来的端点能力声明。
+   *
+   * 【定】它只在 `resume()` 里被用来**比对**冻结的那一份（§18.3），
+   * 绝不用来顶替它。放在 deps 里而不是从 Port 里挖，是因为「当前端点是谁」
+   * 是 Composition Root 的知识 —— Runtime 不该有办法自己去查。
+   */
+  currentEndpointProfile: EndpointCapabilityProfile;
 }
 
 export interface StartResult {
@@ -169,6 +178,17 @@ export class HarnessRuntime {
           `用 --list-runs 看看有哪些 Run，或确认 --db 指向的是同一个库。`,
       );
     }
+
+    /**
+     * §18.3【定】：端点一致性闸门。**必须在做任何事之前**。
+     *
+     * 排在生命周期闸门前面是刻意的：换了端点之后，连「这个 Run 现在是什么状态」
+     * 都该被怀疑。让它在最早的地方失败，错误信息才指得准。
+     */
+    assertResumeEndpointMatches(
+      { model: spec.agentSpec.model, profile: spec.endpointProfile },
+      this.deps.currentEndpointProfile,
+    );
 
     /**
      * 【定】生命周期闸门。
@@ -690,6 +710,9 @@ export class HarnessRuntime {
       budgetUsage: facts?.budgetUsage ?? emptyBudget(spec.createdAt),
       messageCount: messages.length,
       updatedAt: ports.clock.now(),
+      // 阶段 2 测量装置的对外出口（P1-2）。见 RunSnapshot 上的注释。
+      resumeBranchCounts: { ...(facts?.resumeBranchCounts ?? {}) },
+      unmetCauseCounts: tallyUnmetCauses(facts?.verifications ?? []),
     };
   }
 
@@ -726,6 +749,26 @@ function emptyBudget(startedAt: number): ResumableRunFacts["budgetUsage"] {
     activeWallClockMs: 0,
     startedAt,
   };
+}
+
+/**
+ * 未达成的**必需**项按成因聚合。
+ *
+ * 只数 `required && status !== "PASSED"` —— 与 `settle-outcome.ts` 判
+ * `COMPLETED_WITH_LIMITS` / `USER_REJECTED` 用的是同一个筛子，
+ * 两处口径必须一致，否则报告里的数字和 outcome 会互相打架。
+ *
+ * 没写 `unmetCause` 的记成 `UNSPECIFIED`，不悄悄丢掉：一条「没做成但说不出
+ * 为什么」的记录本身就是要暴露的东西（P3-9 记的三种口径不统一就是这么来的）。
+ */
+function tallyUnmetCauses(verifications: VerificationResult[]): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const v of verifications) {
+    if (!v.required || v.status === "PASSED") continue;
+    const key = v.unmetCause ?? "UNSPECIFIED";
+    out[key] = (out[key] ?? 0) + 1;
+  }
+  return out;
 }
 
 function digest(s: string): string {

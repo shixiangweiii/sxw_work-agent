@@ -9,6 +9,7 @@
 import { createHash } from "node:crypto";
 import {
   asId,
+  freezeRunSpec,
   type AgentSpecSnapshot,
   type RunId,
   type RunListItem,
@@ -92,7 +93,20 @@ export class SqliteRunStore implements RunStorePort {
 
     const rest = JSON.parse(row.spec_json) as Omit<RunSpec, "agentSpec">;
     const agentSpec = JSON.parse(row.agent_json) as AgentSpecSnapshot;
-    return { ...rest, agentSpec };
+
+    /**
+     * 【定】读回来的 spec 必须**重新深冻结**（M-4）。
+     *
+     * `start()` 里的 `freezeRunSpec()` 冻的是内存里那一份，而 `JSON.parse`
+     * 产出的是一棵全新的可变树 —— 深冻结在「落库 → 读回」这一趟往返里丢了。
+     * 于是 resume 路径（也就是**唯一真正需要这条不变量的路径**）拿到的
+     * 恰恰是没被冻住的那份：谁在恢复过程中改了 `toolSnapshots` 或某条 policy，
+     * 不会有任何报错，而 §18.2 的三条分支判定读的正是 `toolSnapshots`。
+     *
+     * 二次评审（2026-08-27，P3-2）发现。阶段 2 的实施记录曾把 M-4 记为已落地，
+     * 那个结论只对 `start()` 成立。
+     */
+    return freezeRunSpec({ ...rest, agentSpec });
   }
 
   async getStatus(runId: RunId): Promise<RunStatus | undefined> {

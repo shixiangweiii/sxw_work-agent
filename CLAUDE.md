@@ -16,15 +16,32 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 当前状态
 
-**阶段 2（持久化与 Resume）功能开发完成。** 依据 [阶段 2 实施方案 V20260826-03](sxw_aicoding/实施方案设计/阶段2实施方案_V20260826.md)，四批 18 步全部落地。
+**阶段 2（持久化与 Resume）已收口，可以进阶段 3。** 依据 [阶段 2 实施方案 V20260826-03](sxw_aicoding/实施方案设计/阶段2实施方案_V20260826.md) 四批 18 步，
+再加 2026-08-27 的收口批次（两轮代码评审后修 8 项，见[存量清单 §0.5](sxw_aicoding/存量BUG/阶段1存量问题清单_V20260824.md)）。
 
-- **七条验收脚本 50 条判定全绿**，`tsc --noEmit` 干净，`eval:suite` pass^3 成立
+- **八条验收脚本 51 条判据全绿**，`tsc --noEmit` 干净，`eval:suite` pass^3 成立
 - **跨进程 resume 成立**：真 `kill -9` 之后另一个进程只凭 SQLite 接上并跑到终态
 - 15 个 Port（阶段 2 新增 `RunStorePort`）；SQLite 四张表；`node:sqlite` 零新增依赖
 - 五条边界 grep 全部守住（阶段 2 新增第 5 条：`node:sqlite` 只在 `packages/store-sqlite/`）
 
 **阶段 2 关掉了哪些存量**：R-1 / R-2 / R-3 / R-5 / U-1 / U-2 / U-5 / U-6 / U-7 / U-9 / M-1…M-7 / M-9 前半 / D-1 / D-4 / 验收脚本五条缺口 / E-1…E-8。
-**明确不做**：R-7 与 U-8 的 kind 值域扩展（决 2）、U-3（阶段 3）、M-8、M-9 后半。
+**明确不做**：R-7 与 U-8 的 kind 值域扩展（决 2）、U-3（阶段 3）、M-8、M-9 后半、P3-21（末块闭合，标【验】等反例端点）。
+
+> ⚠️ **两条退出门槛仍开着，都要花钱**：跨进程 resume 的真实端点实跑、DeepSeek 对照端点实跑。
+> 见 [Roadmap §4](sxw_aicoding/阶段roadmap/WorkAgent阶段Roadmap_V20260823.md) 的门槛表。
+
+### 改验收脚本前必读
+
+**【定】退出码由 `harness.ts` 的判据登记表推出，不得手写布尔表达式。**
+每次 `verdict()` 自动计入，`runVerify()` 负责收尾（并保证 `finally` 的清理先于退出跑完）。
+
+理由是实测：阶段 2 期间有**四条判据算出来了、打印了，却没接在退出码上** ——
+其中一条正是被实施记录列为「最有价值的发现」的那条。手写表达式漏一项不会有任何征兆。
+D-25 决定不写单测，这些脚本就是本项目唯一的测量仪器；**仪器上有一根线没接，比没有那根线更糟，它还会打绿勾。**
+
+同源的一条：`run-loop` 的 `persistFacts()` 每轮**整体重写** RUN_META，
+漏写一个字段 ≠「这条没有」，而是**整个 Run 的那个累计量被抹掉**（`readRunFacts` 只读最后一条）。
+`lastSequence` 和 `resumeBranchCounts` 都在这里栽过。加字段时必须同时改它。
 
 > ⚠️ **`.env` 的 `dashscope_model` 与端点声明不一致会在启动时被挡下**（M-5）。
 > 当前 `.env` 写的是 `deepseek-v4-flash`，而百炼声明是 `qwen3.7-plus` ——
@@ -56,7 +73,7 @@ npm run verify:compact             # Compact 是否真的落地（R-6）
 npm run verify:persistence         # 跨进程恢复：真 kill -9 之后能不能只凭 SQLite 接上
 npm run verify:budget              # 预算八轴逐条撞墙 ＋ 墙钟拆分 ＋ 时间事实段级冻结
 npm run verify:crash               # 三个崩溃窗口 × 三条恢复分支（决 6 的判别力在这里）
-npm run verify:drift               # 端点漂移检测 ＋ 对照端点装配（U-1 / U-6）
+npm run verify:drift               # 端点漂移检测 ＋ 对照端点装配 ＋ resume 端点一致性闸门（U-1 / U-6 / P1-1）
 npm run verify:all
 ```
 

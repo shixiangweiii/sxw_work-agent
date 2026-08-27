@@ -245,9 +245,70 @@ class AnthropicMessagesProtocol implements ModelProtocolPort {
     const message = String(e?.message ?? err ?? "unknown");
     const discriminators = this.profile.errors?.discriminators ?? ["HTTP_STATUS", "MESSAGE_MATCH"];
 
-    // SDK 自己拦截的错误（没有 status）。实测：max_tokens 过大被 SDK 拦下，
-    // 根本没发出请求。归到 MODEL_PROVIDER 会让 retryability 判断出错 —— 重试多少次都没用。
-    if (status === undefined && !/fetch|network|socket|ECONN|timeout/i.test(message)) {
+    /**
+     * 没有 status 的错误 = SDK 侧，分两类，**默认方向很关键**。
+     *
+     * ── 原来的写法错在哪（N-4，二次评审 2026-08-27）──────────────────────
+     *
+     * 原判据是「没有 status 且消息不含 fetch|network|socket|ECONN|timeout
+     * → SDK 发请求前拒绝 / NEVER」。而 Anthropic SDK 的连接错误消息是
+     * **`"Connection error."`**（`APIConnectionError`，SDK 源码 core/error.js:76），
+     * 上述关键词一个都不含（"connection" 不含子串 "econn"）。
+     * 于是一次断网被判成「永不重试」，`run-loop` 直接 `MODEL_ERROR` 收尾。
+     *
+     * 更要命的是它和 `client.ts` 的 `maxRetries: 0` 互相拆台：那行注释写着
+     * 「重试由 Runtime 按 retryability 决定，不交给 SDK 盲重」—— SDK 让出了
+     * 自己的重试，而 Runtime 这边判 NEVER。两端都以为对方在管。
+     *
+     * ── 现在的形状 ────────────────────────────────────────────────────
+     *
+     * 判别式用**构造器名**而不是消息文案。类名是 SDK 的导出符号，改动会破坏
+     * 使用方，比一句提示语稳定得多 —— ADR-0001 记过同一条教训：
+     * 「解析文案的判据会在改一句提示语时静默失效」。
+     * 消息关键词只作为兜底，覆盖非 SDK 抛出的裸 fetch / Node 错误。
+     *
+     * 【端点】这段不读端点声明：SDK 是形状层的东西，四个端点共用同一份 SDK。
+     */
+    if (status === undefined) {
+      const ctor = (err as { constructor?: { name?: string } } | undefined)?.constructor?.name ?? "";
+
+      // 我们自己 abort 的。不是故障，更不是「SDK 拒绝」——取消由主循环的
+      // interrupt 路径处置，这里只保证它不会被误判成永久失败。
+      if (ctor === "APIUserAbortError" || /aborted/i.test(message)) {
+        return makeError({
+          code: "MODEL_ABORTED",
+          source: "MODEL_SDK",
+          category: "CANCELLED",
+          retryability: "NEVER",
+          sideEffectState: "NO_EFFECT",
+          safeMessage: "模型调用被取消",
+          endpointId: this.profile.endpointId,
+        });
+      }
+
+      const isTimeout = ctor === "APIConnectionTimeoutError" || /timed?\s?out|ETIMEDOUT/i.test(message);
+      const isNetwork =
+        isTimeout ||
+        ctor === "APIConnectionError" ||
+        /fetch|network|socket|ECONN|EAI_AGAIN|ENOTFOUND|EPIPE|connection/i.test(message);
+
+      if (isNetwork) {
+        return makeError({
+          code: isTimeout ? "MODEL_TIMEOUT" : "MODEL_NETWORK",
+          source: "MODEL_SDK",
+          category: isTimeout ? "TIMEOUT" : "UNAVAILABLE",
+          // 退避重试。跨进程 resume 的招牌能力意味着长时运行，撞上网络抖动
+          // 是常态而不是异常 —— 对着一个本该退避的瞬时故障收尾，方向是反的。
+          retryability: "SAME_INPUT_BACKOFF",
+          // 与 5xx 分支一致：请求可能已经到达服务端，也可能没有。诚实的答案是不知道。
+          sideEffectState: "UNKNOWN",
+          safeMessage: `${isTimeout ? "请求超时" : "连接失败"}：${message.slice(0, 160)}`,
+          endpointId: this.profile.endpointId,
+        });
+      }
+
+      // 剩下的才是真正的「SDK 发请求前就拒绝了」。
+      // 实测：max_tokens 过大被 SDK 拦下，根本没发出请求 —— 重试多少次都没用。
       return makeError({
         code: "MODEL_SDK_REJECTED",
         source: "MODEL_SDK",

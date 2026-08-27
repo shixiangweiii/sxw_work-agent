@@ -326,6 +326,10 @@ export function compose(opts: ComposeOptions): Composed {
     ports,
     approvalDecider: opts.approvalDecider,
     workspaceRoot: opts.workspaceRoot,
+    // §18.3：resume 时拿它跟 RunSpec 里冻结的那一份比对。
+    // 「当前端点是谁」是 Composition Root 的知识 —— 从这里往里传，
+    // Runtime 自己没有任何途径去查它（那正是边界 2 要守的东西）。
+    currentEndpointProfile: profile,
   });
 
   const makeRunSpec = (task: string): RunSpec => ({

@@ -5,6 +5,7 @@
  * Run 启动时冻结进 RunSpec —— Replay 使用冻结版本，不使用当前配置。
  */
 
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type {
   EndpointCapabilityProfile,
@@ -116,6 +117,83 @@ export function profileMatches(
   modelId: string,
 ): boolean {
   return p.endpointId === endpointId && p.modelId === modelId;
+}
+
+/**
+ * 只覆盖**会改变 Runtime 行为**的字段的指纹。
+ *
+ * 不含 `sourceEvidenceRefs` / `observedAt` / `confidence` —— 补一条证据引用、
+ * 改一次观测日期不该让昨天的 Run 恢复不了。`_comment_*` 在 `loadProfileFromFile`
+ * 里就已经剥掉了。
+ */
+function behaviorFingerprint(p: EndpointCapabilityProfile): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        protocol: p.protocol,
+        context: p.context,
+        tokens: p.tokens,
+        errors: p.errors ?? null,
+      }),
+    )
+    .digest("hex")
+    .slice(0, 16);
+}
+
+/**
+ * §18.3【定】的兑现：resume 前必须校验「当前端点声明是否仍与 RunSpec 冻结的一致」。
+ *
+ * ── 为什么这条一直是欠账（P1-1，首评 / 二次评审）─────────────────────────
+ *
+ * `profileMatches` 在阶段 1 就写好了，**零调用点**；`profile-loader.ts` 自己的
+ * 注释里还写着「§18.3【定】要求 resume 时校验」—— 代码自认的欠账。
+ *
+ * 现有的两道断言都拦不住它：
+ *   · U-6（`assertProfileMatchesEndpoint`）只校验**新环境自身**声明与 baseUrl 配套；
+ *   · M-5 只校验**新环境自身**的 `.env` 模型名与声明一致。
+ * 两者都不知道昨天那个 Run 是用什么跑的。于是「改 `.env` 换个模型，再
+ * `--resume` 一个昨天的 Run」在今天是完全静默的 —— 而 §18.2 的三条恢复分支、
+ * 协议校验强度、token 口径全都会跟着变，盘上却看不出任何异常。
+ *
+ * 【定】不一致时**抛错，不静默降级**。与 `getRunSpec` 读不到时的处置同理：
+ * 「用现在的顶上去」是这条不变量最容易被顺手写出来的破法。
+ */
+export function assertResumeEndpointMatches(
+  frozen: { model: { endpointId: string; modelId: string }; profile: EndpointCapabilityProfileSnapshot },
+  current: EndpointCapabilityProfile,
+): void {
+  const { model, profile } = frozen;
+
+  if (!profileMatches(current, model.endpointId, model.modelId)) {
+    throw new Error(
+      `拒绝 resume：端点身份与这个 Run 启动时不一致。\n` +
+        `  Run 冻结的是   ${model.endpointId} / ${model.modelId}\n` +
+        `  当前 compose 的 ${current.endpointId} / ${current.modelId}\n` +
+        `换端点或换模型之后恢复一条旧 transcript，协议校验强度、推理块档位、` +
+        `token 口径与 §18.2 的三条恢复分支判定都会跟着变，而盘上看不出来。\n` +
+        `要么把环境切回原端点，要么用 --list-runs 另起一个新 Run。`,
+    );
+  }
+
+  if (current.id !== profile.id) {
+    throw new Error(
+      `拒绝 resume：端点能力声明换了一份。\n` +
+        `  Run 冻结的是 ${profile.id}，当前是 ${current.id}。\n` +
+        `声明是行为的载体（原则十四），换一份等于换了一套行为。`,
+    );
+  }
+
+  const was = behaviorFingerprint(profile);
+  const now = behaviorFingerprint(current);
+  if (was !== now) {
+    throw new Error(
+      `拒绝 resume：端点能力声明 ${current.id} 的内容自这个 Run 启动后被改过。\n` +
+        `  冻结时指纹 ${was}，当前 ${now}（只比对 protocol / context / tokens / errors 四段，` +
+        `证据引用与观测日期不计入）。\n` +
+        `恢复必须用启动时的那一份声明 —— 用今天的规则去判一条昨天的 transcript，` +
+        `同一条记录会走进不同的分支。`,
+    );
+  }
 }
 
 /**

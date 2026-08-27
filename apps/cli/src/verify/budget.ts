@@ -21,7 +21,7 @@ import type { BudgetAxis, RunEvent } from "@workagent/harness-runtime";
 import { DEFAULT_BUDGETS, NullTraceSink, asId, readRunFacts, type RunId } from "@workagent/harness-runtime";
 import { listDirSnapshot, writeNoteSnapshot } from "@workagent/micro-cases";
 import { compose, DEFAULT_SYSTEM_PROMPT } from "../compose.js";
-import { ScriptedModelPort, banner, fact, makeUsage, section, verdict, type ScriptedTurn } from "./harness.js";
+import { ScriptedModelPort, banner, fact, makeUsage, runVerify, section, verdict, type ScriptedTurn } from "./harness.js";
 
 interface RunResult {
   terminal: string;
@@ -281,10 +281,9 @@ async function main(): Promise<void> {
         ? "预算八条轴由一个纯函数统一判定，软限每轴一次，active 墙钟不含等待，时间事实按执行段冻结"
         : `失败段：${results.filter((r) => !r.ok).map((r) => r.name).join(" ")}`,
     );
-    process.exit(ok ? 0 : 1);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
 }
 
-void main();
+void runVerify(main);

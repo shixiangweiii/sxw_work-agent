@@ -33,8 +33,72 @@ export function fact(label: string, value: unknown): void {
   console.log(`   ${label.padEnd(34)} ${String(value)}`);
 }
 
-export function verdict(ok: boolean, text: string): void {
+// ══════════════════════════════════════════════ 判据登记与统一收尾
+
+/**
+ * 本次运行打印过的每一条判据。
+ *
+ * 【定】退出码只能由这个登记表推出，**不得手写布尔表达式**。
+ *
+ * 理由是实测，不是洁癖：`verify:resume` 的 C 段判据（「恢复产物与基线逐字一致」）
+ * 算出来了、打印了、还被实施记录列为阶段 2 最有价值的发现之一 ——
+ * 却漏在 `process.exit(...)` 的合取式外面。那条判据在 `verify:all` 的 `&&` 链
+ * 语义里只读不判：恢复写坏产物、丢掉基线做过的调用，退出码照样是 0。
+ * 同一批还查出 persistence 的 F 段（批 1 期间的「已知红」豁免）在转绿之后
+ * 仍被排除在退出码外。
+ *
+ * 手写表达式漏一项**不会有任何征兆**。D-25 决定不写单测，这些脚本就是本项目
+ * 唯一的测量仪器；仪器上有一根线没接，比没有那根线更糟 —— 它还会打绿勾。
+ * 让退出码从 `verdict()` 的调用本身推出，是唯一能机械杜绝这件事的形状。
+ */
+const verdictLog: Array<{ ok: boolean; text: string }> = [];
+
+export function verdict(ok: boolean, text: string): boolean {
+  verdictLog.push({ ok, text });
   console.log(`\n   ${ok ? "\x1b[32m✓\x1b[0m" : "\x1b[31m✗\x1b[0m"} ${text}`);
+  return ok;
+}
+
+/** 汇总登记表。返回 true 表示每一条判据都通过。零判据也算失败——脚本没跑起来。 */
+export function concludeVerdicts(): boolean {
+  const failed = verdictLog.filter((v) => !v.ok);
+  const passed = verdictLog.length - failed.length;
+  console.log(
+    `\n   判据合计 ${verdictLog.length} 条：\x1b[32m${passed} ✓\x1b[0m / ` +
+      (failed.length > 0 ? `\x1b[31m${failed.length} ✗\x1b[0m` : "0 ✗"),
+  );
+  for (const f of failed) console.log(`     \x1b[31m✗\x1b[0m ${f.text}`);
+  return failed.length === 0 && verdictLog.length > 0;
+}
+
+/**
+ * 验收脚本的统一入口。两件事，各自有实测理由：
+ *
+ * 1. **清理先于退出。** `process.exit()` **不解开 try/finally** ——
+ *    把 exit 写在 try 里，`finally { rmSync }` 就是死代码。实测：本机 `$TMPDIR`
+ *    积了 104 个 `workagent-*` 残留目录，每跑一次 `verify:all` 约增 4 个，
+ *    里面是完整的 runs.db 与 workspace。这里把 exit 移到 finally 之后。
+ * 2. **退出码由登记表推出**（见 `verdictLog`）。
+ *
+ * 仍用 `process.exit()` 而不是 `process.exitCode`：脚本里有 SQLite 句柄与子进程，
+ * 靠事件循环自然退出有挂住的风险，而验收脚本挂住比泄漏更难排查。
+ * 清理已经在 finally 里跑完了，此时强制退出是安全的。
+ *
+ * `body` 里的早退站点直接 `return` 即可 —— 它此前打印的那条 `verdict(false, …)`
+ * 会把退出码带成 1，不需要也不应该再手动 exit。
+ */
+export async function runVerify(body: () => Promise<void>, cleanup?: () => void): Promise<void> {
+  let ok = false;
+  try {
+    await body();
+    ok = concludeVerdicts();
+  } catch (err) {
+    console.error(err);
+    ok = false;
+  } finally {
+    cleanup?.();
+  }
+  process.exit(ok ? 0 : 1);
 }
 
 export function tempWorkspace(): { root: string; cleanup: () => void } {

@@ -227,6 +227,22 @@ export async function* runLoop(
       recoveryItems,
       // D-2：事件不落 transcript，高水位只能显式存。见 ResumableRunFacts 的说明。
       lastSequence,
+      /**
+       * 【定】必须**原样带过来**，哪怕这一轮循环跟恢复分支毫无关系。
+       *
+       * `readRunFacts()` 读的是**最后一条** RUN_META。而这里每轮边界都写一条。
+       * 漏掉这个字段的后果不是「这一条没有」，是**整个 Run 的分支计数被抹掉** ——
+       * `resume()` 在 facade 里刚记下的三条分支命中，下一轮循环写 RUN_META 时
+       * 就没了。阶段 2 的研究问题（有多少次 resume 落进最坏那条分支）
+       * 因此在盘上根本无法回答，而 RUN_META 里明明「有这个字段」。
+       *
+       * 这与批 1 那个 `lastSequence` 是同一个形状的错误：**累计量落在一条会被
+       * 整体覆盖的记录里，就必须每次都完整重写，漏一个字段等于删一个字段。**
+       * 由二次评审的 P1-2 顺藤摸出来（当时以为只是「Eval 没有出口」）。
+       */
+      ...(deps.resumeFrom?.resumeBranchCounts
+        ? { resumeBranchCounts: deps.resumeFrom.resumeBranchCounts }
+        : {}),
     };
     await ports.transcript.append(makeRunFactsEntry(runId, facts, now()));
   };

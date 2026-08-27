@@ -41,7 +41,7 @@ import {
 } from "@workagent/harness-runtime";
 import { approveExcept } from "@workagent/testkit";
 import { compose, type ComposeOptions } from "../compose.js";
-import { ScriptedModelPort, banner, fact, section, tempWorkspace, verdict } from "./harness.js";
+import { ScriptedModelPort, banner, fact, runVerify, section, tempWorkspace, verdict } from "./harness.js";
 
 /**
  * 会抛异常的 Port 实现（R-4 的注入器）。
@@ -448,7 +448,6 @@ async function main(): Promise<void> {
       "   「所有出口都经过 finalize()」这条手写纪律 —— 所以它需要被反复审视。\n",
   );
 
-  process.exit(allOk ? 0 : 1);
 }
 
 function countBlocks(messages: ContextMessage[], type: "tool_call" | "tool_result"): number {
@@ -457,7 +456,4 @@ function countBlocks(messages: ContextMessage[], type: "tool_call" | "tool_resul
   return n;
 }
 
-main().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+void runVerify(main);

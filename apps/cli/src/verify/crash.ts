@@ -31,7 +31,8 @@ import {
 } from "@workagent/harness-runtime";
 import { SqliteTranscriptStore, openDb } from "@workagent/store-sqlite";
 import { runSegment, type SegmentResult } from "@workagent/testkit";
-import { banner, fact, section, verdict } from "./harness.js";
+import { compose } from "../compose.js";
+import { banner, fact, runVerify, section, verdict } from "./harness.js";
 
 const WORKER = resolve(fileURLToPath(new URL(".", import.meta.url)), "workers/run-segment.ts");
 
@@ -126,6 +127,8 @@ async function main(): Promise<void> {
     );
 
     const branchTally: Record<string, number> = {};
+    /** 留着给 C 段：拿 Facade 的 inspect() 跟直读 RUN_META 的结果对一遍。 */
+    const runsOnDisk: Array<{ dbPath: string; runId: RunId; workspace: string }> = [];
 
     for (const c of CASES) {
       const dir = join(tmp, c.name.slice(0, 8).replace(/\W/g, "_") + Math.random().toString(36).slice(2, 6));
@@ -165,6 +168,7 @@ async function main(): Promise<void> {
         ...(c.disableObservation ? { disableObservation: true } : {}),
       });
 
+      runsOnDisk.push({ dbPath, runId, workspace: ws });
       const branch = pickBranch(seg2.stdout) ?? pickBranchFromFacts(await readEntries(dbPath, runId));
       const hit = branch === c.expectBranch;
       if (branch) branchTally[branch] = (branchTally[branch] ?? 0) + 1;
@@ -244,12 +248,51 @@ async function main(): Promise<void> {
         "   是脚本决定的。**不得**用它下「消息级恢复的粒度选对了」这个结论 ——\n" +
         "   那要等阶段 3 有真工具、真任务。阶段 2 只负责让这个数**能被导出**。\n",
     );
-    const cOk = Object.keys(branchTally).length >= 3;
+    /**
+     * 【P1-2】「Eval 可据此导出分布」这句话此前**只是一句话**。
+     *
+     * RUN_META 里确实有计数，但 Eval 层没有任何读它的路径：`eval/` 全目录
+     * grep `resumeBranch` 零命中。而阶段 2 的退出门槛写的是「分支计数落
+     * transcript **＋ Eval 能导出分布**」—— 后半句没做到，门槛却标了绿。
+     *
+     * 现在出口在 Facade 的 `inspect()` 上（§24.1：Eval 只经 Facade）。
+     * 这一段就是那条出口的判据：拿 `inspect()` 的返回跟本脚本直读 RUN_META
+     * 算出来的 tally 逐条比对。**两者必须一字不差** ——
+     * 出口要是漏读、少算、或者读了另一个字段，这里当场翻红。
+     */
+    const viaFacade: Record<string, number> = {};
+    for (const r of runsOnDisk) {
+      const composed = compose({
+        dbPath: r.dbPath,
+        workspaceRoot: r.workspace,
+        approvalDecider: async () => ({ approved: true }),
+        trace: { emit: async () => {} },
+        modelPortOverride: {
+          invoke: async function* () {
+            throw new Error("inspect() 不该调模型");
+          },
+          countTokens: async () => 0,
+        },
+      });
+      const snap = await composed.runtime.inspect(r.runId);
+      for (const [k, v] of Object.entries(snap?.resumeBranchCounts ?? {})) {
+        viaFacade[k] = (viaFacade[k] ?? 0) + v;
+      }
+      composed.db.close();
+    }
+    fact("直读 RUN_META", fmtTally(branchTally));
+    fact("经 Facade inspect()", fmtTally(viaFacade));
+
+    const exportMatches = fmtTally(branchTally) === fmtTally(viaFacade);
+    const cOk = Object.keys(branchTally).length >= 3 && exportMatches;
     verdict(
       cOk,
       cOk
-        ? `三条分支都有计数并落进 RUN_META，Eval 可据此导出分布（覆盖 ${Object.keys(branchTally).length} 条分支）`
-        : `只观测到 ${Object.keys(branchTally).length} 条分支，测量装置不完整`,
+        ? `三条分支都有计数，且 Facade 的 inspect() 导出的分布与直读 RUN_META 逐条一致` +
+            `（覆盖 ${Object.keys(branchTally).length} 条分支）—— Eval 现在真的拿得到这个数`
+        : !exportMatches
+          ? `Facade 导出与直读 RUN_META 不一致：${fmtTally(viaFacade)} vs ${fmtTally(branchTally)}`
+          : `只观测到 ${Object.keys(branchTally).length} 条分支，测量装置不完整`,
     );
     results.push({ name: "测量装置", ok: cOk });
 
@@ -267,13 +310,20 @@ async function main(): Promise<void> {
         "   BlobStore 按决 1 推到了阶段 3，当前没有任何工具会产出 Blob ——\n" +
         "   造一个假的 Blob 来测它，测的是假货不是机制。\n",
     );
-    process.exit(ok ? 0 : 1);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
 }
 
 // ══════════════════════════════════════════════════════════════ 工具
+
+/** 稳定序：两边用同一个渲染函数，比对的才是内容而不是键序。 */
+function fmtTally(c: Record<string, number>): string {
+  return Object.keys(c)
+    .sort()
+    .map((k) => `${k}=${c[k]}`)
+    .join(" ");
+}
 
 async function readEntries(dbPath: string, runId: RunId): Promise<TranscriptEntry[]> {
   if (!existsSync(dbPath)) return [];
@@ -300,4 +350,4 @@ function pickBranchFromFacts(entries: TranscriptEntry[]): string | undefined {
   return hit.length === 1 ? hit[0]![0] : undefined;
 }
 
-void main();
+void runVerify(main);

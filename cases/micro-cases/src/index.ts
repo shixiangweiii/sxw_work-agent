@@ -149,9 +149,22 @@ export class MicroCaseVerifier implements VerificationPort {
         fingerprint: { exists: true, bytes: buf.byteLength, sha256: sha256(buf) },
         at: Date.now(),
       };
-    } catch {
+    } catch (err) {
       // 文件还不存在也是一个有效的起始状态 —— 「本来没有」同样能用来比对。
-      return { fingerprint: { exists: false, bytes: 0, sha256: "" }, at: Date.now() };
+      if (isNotFound(err)) {
+        return { fingerprint: { exists: false, bytes: 0, sha256: "" }, at: Date.now() };
+      }
+      /**
+       * 【定】读失败 ≠ 不存在。
+       *
+       * 裸 `catch` 把 EACCES / EISDIR / ELOOP 一并折叠成「本来没有」，
+       * 而那是一句**假的确信**。整条决 6 机制存在的意义就是把窗口 A/B 的
+       * 「不知道」变成「知道」——在读不了外部世界的时候硬给一个结论，
+       * 恰恰是在最需要判别力的地方失去判别力。
+       *
+       * 返回 undefined = 这次观察不了 → 老老实实降级到第三条分支，交人决定。
+       */
+      return undefined;
     }
   }
 
@@ -175,7 +188,12 @@ export class MicroCaseVerifier implements VerificationPort {
     try {
       const buf = await readFile(target);
       now = { exists: true, bytes: buf.byteLength, sha256: sha256(buf) };
-    } catch {
+    } catch (err) {
+      // 同 observePre：只有 ENOENT 才是「不存在」。其余读错误说明**看不了**，
+      // 而「看不了」的正确答案是 undefined（观察不了），不是「没发生」。
+      // 把它判成「没发生」会让模型去补做一次已经做过的非幂等操作 ——
+      // 追加日志因此会多出一行，而这正是分支二本来要防的事。
+      if (!isNotFound(err)) return undefined;
       now = { exists: false, bytes: 0, sha256: "" };
     }
 
@@ -266,4 +284,15 @@ export class MicroCaseVerifier implements VerificationPort {
 
 function sha256(buf: Buffer): string {
   return createHash("sha256").update(buf).digest("hex");
+}
+
+/**
+ * 只有 ENOENT 才是「目标不存在」。
+ *
+ * 其余读错误（EACCES 无权限、EISDIR 路径是目录、ELOOP 符号链接成环、
+ * 底层 I/O 失败）说的都是「我看不了」，不是「它没有」。
+ * 两者在恢复判定里的结论完全相反，混在一起会得到一个自信的错误答案。
+ */
+function isNotFound(err: unknown): boolean {
+  return (err as NodeJS.ErrnoException | undefined)?.code === "ENOENT";
 }

@@ -10,12 +10,15 @@
  * 挂了意味着：Roadmap 那句「关掉终端明天再开能接上」不成立 ——
  * 而那是阶段 2 的招牌能力。
  *
- * ── F 段是【已知红】────────────────────────────────────────────────────
+ * ── F 段的来历 ────────────────────────────────────────────────────────
  *
  * 批 1 结束时 F 段必然失败，批 2（R-2 墙钟拆分）做完才转绿。这是刻意的：
  * 缺口应当在它被引入的那一批就可见。两个进程挨着跑撞不到 10 分钟墙，
  * 只有把时间推回去才暴露得出来 —— 不专门测，它会一直藏到用户第一次
  * 真的隔夜 resume。
+ *
+ * 批 2 之后它就是普通硬判据。**当时给它开的退出码豁免却留在了代码里**，
+ * 直到二次评审才被发现 —— 见「总判定」那段注释。
  */
 
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -34,7 +37,7 @@ import {
 } from "@workagent/harness-runtime";
 import { SqliteRunStore, SqliteTranscriptStore, openDb } from "@workagent/store-sqlite";
 import { runSegment } from "@workagent/testkit";
-import { banner, fact, section, verdict } from "./harness.js";
+import { banner, fact, runVerify, section, verdict } from "./harness.js";
 
 const WORKER = resolve(fileURLToPath(new URL(".", import.meta.url)), "workers/run-segment.ts");
 
@@ -106,13 +109,13 @@ async function main(): Promise<void> {
       // kill 没触发就等于这条脚本什么都没验 —— 段 1 跑完了，段 2 只会撞终态闸门。
       // 让它当场炸，不要让「事件名写错」表现成「恢复失败」。
       verdict(false, "段 1 没有被 kill —— --kill-at 的事件类型没匹配上，本次验收无效");
-      process.exit(1);
+      return;
     }
     fact("段 1 死在", seg1.killedAt ? `${seg1.killedAt.at} @seq ${seg1.killedAt.sequence}` : "—");
     fact("段 1 runId", seg1.runId || `（拿不到）${seg1.error ?? ""}`);
     if (!seg1.runId) {
       verdict(false, `段 1 没跑起来：${seg1.error ?? "未知"}`);
-      process.exit(1);
+      return;
     }
     const runId = asId<RunId>(seg1.runId);
 
@@ -272,7 +275,7 @@ async function main(): Promise<void> {
     results.push({ seg: "E", ok: eOk });
 
     // ─────────────────────────────────────────────────────────── F
-    section("F. 【已知红·批 2 转绿】跨天 resume 不得因关机时间撞预算墙");
+    section("F. 跨天 resume 不得因关机时间撞预算墙（R-2，批 2 已转绿）");
     const facts = readRunFacts(entries);
     const startedAt = facts?.budgetUsage.startedAt ?? 0;
     const active = facts?.budgetUsage.activeWallClockMs ?? 0;
@@ -318,23 +321,20 @@ async function main(): Promise<void> {
 
     // ─────────────────────────────────────────────────────── 总判定
     section("总判定");
-    const hard = results.filter((r) => r.seg !== "F");
-    const hardOk = hard.every((r) => r.ok);
-    const fSeg = results.find((r) => r.seg === "F")?.ok ?? false;
+    /**
+     * F 段曾被排除在硬判据外：批 1 期间它是「已知红」，等批 2 的 S7 修 R-2。
+     * S7 落地后这个豁免就该撤掉，但它留在了代码里 —— 一条**已经能通过**的判据
+     * 继续被排除在退出码之外，是最难发现的那种失效：它常年打绿勾，没人会去看。
+     * 现在所有段一视同仁。
+     */
+    const allOk = results.every((r) => r.ok);
     verdict(
-      hardOk,
-      hardOk
+      allOk,
+      allOk
         ? "跨进程恢复成立：真 SIGKILL 之后另一个进程只凭 SQLite 接上并跑到终态，" +
-            "序列、配对、schema 降级、深冻结、Trace 续写全部守住"
-        : `批 1 硬判据有失败：${hard.filter((r) => !r.ok).map((r) => r.seg).join(" ")}`,
+            "序列、配对、schema 降级、深冻结、跨天预算、Trace 续写全部守住"
+        : `失败段：${results.filter((r) => !r.ok).map((r) => r.seg).join(" ")}`,
     );
-    console.log(
-      `\n   F 段（跨天 resume）：${
-        fSeg ? "\x1b[32m已转绿\x1b[0m" : "\x1b[33m已知红 —— 待批 2 的 S7（R-2 墙钟拆分）\x1b[0m"
-      }`,
-    );
-
-    process.exit(hardOk ? 0 : 1);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -452,4 +452,4 @@ function isActiveBased(): boolean {
   return !/const elapsed = now\(\) - state\.budgetUsage\.startedAt/.test(src);
 }
 
-void main();
+void runVerify(main);

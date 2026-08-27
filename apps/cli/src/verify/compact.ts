@@ -39,6 +39,7 @@ import {
   banner,
   estimateFromBody,
   fact,
+  runVerify,
   section,
   tempWorkspace,
   verdict,
@@ -130,9 +131,10 @@ async function main(): Promise<void> {
 
     const triggered = compactedEvents.length > 0;
     verdict(triggered, triggered ? "压缩确实触发了" : "压缩没有触发 —— 阈值或脚本要调");
-    if (!triggered) {
-      process.exit(1);
-    }
+    // 没触发就没什么可验的了。直接 return —— 上面那条 verdict(false) 已把退出码
+    // 带成 1，而 return 会让 finally 的 cleanup 正常跑完（process.exit() 不解开
+    // try/finally，那正是 $TMPDIR 里那 104 个残留目录的成因）。
+    if (!triggered) return;
 
     // ── C. 关键判据：压缩之后，下一轮真的变小了吗
     //
@@ -286,7 +288,6 @@ async function main(): Promise<void> {
         "   下一轮的实际 token 数和 transcript 的实际内容上。\n",
     );
 
-    process.exit(allOk ? 0 : 1);
   } finally {
     ws.cleanup();
   }
@@ -335,7 +336,4 @@ async function countReasoningMarksWithProfile(
   }
 }
 
-main().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+void runVerify(main);

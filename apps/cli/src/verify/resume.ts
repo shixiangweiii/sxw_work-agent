@@ -41,7 +41,7 @@ import {
   type TranscriptEntry,
 } from "@workagent/harness-runtime";
 import { compose } from "../compose.js";
-import { ScriptedModelPort, banner, fact, section, tempWorkspace, verdict } from "./harness.js";
+import { ScriptedModelPort, banner, fact, runVerify, section, tempWorkspace, verdict } from "./harness.js";
 
 /**
  * 三轮脚本。第 2 轮那次「重写」不是冗余 —— 它模拟的是真 Agent 的行为。
@@ -333,7 +333,15 @@ async function main(): Promise<void> {
       "   比例不低       → 该把粒度往细里推 —— 但那时会有真实数据，而不是推演。\n",
   );
 
-  process.exit(bothCompleted && noUnpaired && b2Ok && abortOk && seqOk && budgetInherited ? 0 : 1);
+  /**
+   * 【N-2】这里曾经手写过一个退出表达式，而 **C 段的 `cOk` 漏在外面** ——
+   * 「恢复产物与基线逐字一致、基线做过的工具调用一个不少」算出来了、打印了、
+   * 被实施记录列为阶段 2 最有价值的发现之一，却不进退出码。
+   * 恢复写坏产物、丢掉基线调用，`verify:all` 的 `&&` 链照样返回 0。
+   *
+   * 现在退出码由 harness 的判据登记表统一推出（`runVerify`），
+   * 每一条 `verdict()` 自动计入 —— 漏一项这件事在形状上不再可能发生。
+   */
 }
 
 interface RunResult {
@@ -657,10 +665,7 @@ function resultStatusOf(messages: ContextMessage[], toolCallId: string): string 
   return undefined;
 }
 
-main().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+void runVerify(main);
 
 /** 消息里出现过的所有 toolCallId（按出现顺序，去重）。 */
 function toolCallIdsOf(messages: ContextMessage[]): string[] {

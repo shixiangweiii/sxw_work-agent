@@ -65,6 +65,16 @@ export interface TrialResult {
   toolCalls: number;
   billedInputTokens: number;
   outputTokens: number;
+  /**
+   * §18.2 三条恢复分支各命中几次（P1-2）。
+   *
+   * 经 `runtime.inspect()` 拿，不去翻 transcript —— §24.1【定】Eval 只经 Facade。
+   * 脚本化模式下它恒为空（没有崩溃就没有恢复），这**不是缺陷**：
+   * 阶段 2 只负责让装置可用，真实分布要等阶段 3 有真工具真任务。
+   */
+  resumeBranchCounts: Record<string, number>;
+  /** 未达成的必需项按成因聚合（USER_REJECTED / TOOL_FAILED / …）。 */
+  unmetCauseCounts: Record<string, number>;
   error?: string;
 }
 
@@ -75,6 +85,9 @@ export interface SuiteReport {
   passAt1: number;
   passPowK: boolean;
   k: number;
+  /** k 次合计的分支分布与失败成因分布 —— 阶段 2 研究问题的数据出口。 */
+  resumeBranchTotals: Record<string, number>;
+  unmetCauseTotals: Record<string, number>;
 }
 
 function git(args: string[]): string {
@@ -248,6 +261,12 @@ async function runTrial(index: number, live: boolean, outDir: string): Promise<T
     JSON.stringify({ before, after }, null, 2),
     "utf8",
   );
+  /**
+   * 【定】必须在 `db.close()` 与 `rmSync` **之前**取快照 —— 库关了就读不到了。
+   * 这也是为什么它不能在 main() 里事后补：trial 的临时目录已经不在了。
+   */
+  const snap = runId ? await composed.runtime.inspect(runId as never) : undefined;
+
   composed.db.close();
   rmSync(root, { recursive: true, force: true });
 
@@ -262,6 +281,8 @@ async function runTrial(index: number, live: boolean, outDir: string): Promise<T
     toolCalls: traceEvents.filter((e) => e["type"] === "AttemptStarted").length,
     billedInputTokens: usage.reduce((n, u) => n + (u?.billedInputTokens ?? 0), 0),
     outputTokens: usage.reduce((n, u) => n + (u?.outputTokens ?? 0), 0),
+    resumeBranchCounts: snap?.resumeBranchCounts ?? {},
+    unmetCauseCounts: snap?.unmetCauseCounts ?? {},
     ...(error ? { error } : {}),
   };
 }
@@ -331,6 +352,8 @@ async function main(): Promise<void> {
     passAt1: passed / trials.length,
     passPowK: passed === trials.length,
     k,
+    resumeBranchTotals: mergeCounts(trials.map((t) => t.resumeBranchCounts)),
+    unmetCauseTotals: mergeCounts(trials.map((t) => t.unmetCauseCounts)),
   };
   writeFileSync(join(outDir, "report.json"), JSON.stringify(report, null, 2), "utf8");
 
@@ -345,6 +368,29 @@ async function main(): Promise<void> {
     `  Runtime 自报与 grader 一致  ` +
       `${trials.filter((t) => (t.runtimeOutcome === "SUCCESS") === t.grader.hardPassed).length}/${k}`,
   );
+
+  /**
+   * 阶段 2 研究问题的数据出口（P1-2）。
+   *
+   * Roadmap §4 的问题是「有多少次 resume() 落进『非幂等且不可观察』那条分支」。
+   * 这里把 k 次的分支分布与失败成因分布打出来并落进 report.json。
+   *
+   * 【定】**不在这里下结论。** 脚本化模式一次崩溃都没有，分支分布必然是空的；
+   * 就算 --live 也只是正常执行的分布，不含故障。真实分布要等阶段 3 有真工具、
+   * 真任务、真崩溃 —— 阶段 2 交付的是装置，不是答案（Roadmap §4 的 B 方案）。
+   */
+  console.log(`\n${"─".repeat(72)}`);
+  console.log("  §18.2 恢复分支分布（阶段 2 的测量装置）");
+  console.log(`    ${fmtCounts(report.resumeBranchTotals) || "（本次 k 轮没有发生任何 resume —— 分支分布为空）"}`);
+  console.log("  未达成必需项的成因分布");
+  console.log(`    ${fmtCounts(report.unmetCauseTotals) || "（无未达成的必需项）"}`);
+  const worst = report.resumeBranchTotals["RECOVERY_REQUIRED"] ?? 0;
+  const totalBranches = Object.values(report.resumeBranchTotals).reduce((a, b) => a + b, 0);
+  console.log(
+    `    落进最坏分支（非幂等且不可观察）：${worst}/${totalBranches}` +
+      (totalBranches === 0 ? "　—— 样本为 0，这个比例现在没有意义" : ""),
+  );
+
   console.log(`\n  artifact：${outDir}`);
   if (!live) {
     console.log(
@@ -355,6 +401,17 @@ async function main(): Promise<void> {
   }
 
   process.exit(report.passPowK ? 0 : 1);
+}
+
+function mergeCounts(all: Array<Record<string, number>>): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const one of all) for (const [k, v] of Object.entries(one)) out[k] = (out[k] ?? 0) + v;
+  return out;
+}
+
+function fmtCounts(c: Record<string, number>): string {
+  const keys = Object.keys(c).sort();
+  return keys.map((k) => `${k}=${c[k]}`).join("  ");
 }
 
 function dist(ns: number[]): string {

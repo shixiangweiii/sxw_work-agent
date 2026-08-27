@@ -241,6 +241,26 @@ export interface RunSnapshot {
   budgetUsage: BudgetUsage;
   messageCount: number;
   updatedAt: Timestamp;
+  /**
+   * §18.2 三条分支各命中过多少次。**阶段 2 测量装置的对外出口。**
+   *
+   * 它在 `ResumableRunFacts` 里落了盘（那条注释还写着「可以被 Eval 导出」），
+   * 但一直没有出口 —— Eval 全目录零命中，而阶段 2 的退出门槛
+   * 「分支分布测量装置可用」写的是「分支计数落 transcript **＋ Eval 能导出分布**」。
+   * 后半句当时没做到，门槛却标了绿（P1-2）。
+   *
+   * 【定】出口必须在 Facade 上。§24.1 要求 Eval 只经 Facade、不碰 Runtime 私有类 ——
+   * 让 Eval 自己去读 transcript 的 RUN_META，等于把测量装置和被测对象焊在一起。
+   */
+  resumeBranchCounts: Record<string, number>;
+  /**
+   * 未达成的必需项按**成因**聚合（`USER_REJECTED` / `TOOL_FAILED` / …）。
+   *
+   * 与 `outcome.kind` 是两件事：后者只说「没全做成」，这里说「是哪一类没做成」。
+   * ADR-0001 决定不扩 `outcome.kind` 的值域，代价就是「是谁没做成」只能从
+   * 事实表里聚合 —— 这就是那个聚合。
+   */
+  unmetCauseCounts: Record<string, number>;
 }
 
 // ─────────────────────────────────────────────────────────── Usage

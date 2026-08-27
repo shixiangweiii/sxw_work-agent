@@ -16,7 +16,7 @@
  * 声明能不能加载、U-6 的 baseUrl 断言灵不灵。真跑要显式加 `--live`。
  */
 
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import type { RunEvent } from "@workagent/harness-runtime";
 import {
   CollectingTraceSink,
@@ -26,7 +26,7 @@ import {
 } from "@workagent/harness-runtime";
 import { fakeProfile, strictFakeProfile } from "@workagent/testkit";
 import { compose, REPO_ROOT, readEndpointConfig, loadEnv } from "../compose.js";
-import { ScriptedModelPort, banner, fact, section, tempWorkspace, verdict } from "./harness.js";
+import { ScriptedModelPort, banner, fact, runVerify, section, tempWorkspace, verdict } from "./harness.js";
 
 async function main(): Promise<void> {
   banner(
@@ -190,6 +190,108 @@ async function main(): Promise<void> {
   );
   results.push({ name: "D", ok: dOk });
 
+  // ────────────────────────────────────────────────────────── E
+  /**
+   * P1-1：§18.3【定】resume 前必须校验端点仍与 RunSpec 冻结的一致。
+   *
+   * 这条在阶段 1、阶段 2 一直是欠账：`profileMatches` 写好了、零调用点，
+   * `profile-loader.ts` 自己的注释还写着「§18.3【定】要求 resume 时校验」。
+   *
+   * D 段那两条断言拦不住它 —— 它们只校验**新环境自身**的声明与 baseUrl / 模型名
+   * 配套，压根不知道那个 Run 昨天是用什么跑的。于是「改 .env 换个模型，
+   * 再 --resume 一个昨天的 Run」在阶段 2 是完全静默的。
+   *
+   * 这一段的判别力在于：**同一条 transcript，只换 compose 时的端点声明**，
+   * 前者必须放行、后者必须被拒。只测「被拒」不够 —— 一个永远拒绝的闸门
+   * 同样能让这条判据变绿。
+   */
+  section("E. P1-1：resume 的端点一致性闸门");
+  const wsE = tempWorkspace();
+  let eOk = false;
+  try {
+    const dbPath = join(wsE.root, "runs.db");
+    const startedWith = compose({
+      dbPath,
+      workspaceRoot: wsE.root,
+      approvalDecider: async () => ({ approved: true }),
+      trace: new CollectingTraceSink(),
+      profileOverride: lenient,
+      modelPortOverride: new ScriptedModelPort([
+        { text: "看一眼", toolCalls: [{ toolCallId: "e1", name: "list_dir", input: { path: "." } }] },
+        { text: "好了", toolCalls: [] },
+      ]),
+    });
+    /**
+     * 【定】这个对照 Run 必须停在**可恢复**的状态。
+     *
+     * 跑到 COMPLETED 的话，「同一份声明也能 resume」这条对照会被生命周期闸门
+     * 挡掉（终态拒绝 resume），于是三条结果全是「拒绝」—— 一个永远拒绝的闸门
+     * 看起来和一个有判别力的闸门一模一样。所以这里当场 cancel，收在 CANCELLED。
+     */
+    const gen = startedWith.runtime.start(startedWith.makeRunSpec("起一个 Run"));
+    let runId = "";
+    let r = await gen.next();
+    while (!r.done) {
+      if (!runId) {
+        runId = String(r.value.runId);
+        startedWith.runtime.cancel(runId as never, "verify:drift E 段：留一个可恢复的 Run");
+      }
+      r = await gen.next();
+    }
+    fact("对照 Run 的终态", `${r.value.terminal.reason}（可恢复）`);
+    startedWith.db.close();
+
+    // 同一个库、同一条 transcript，两次 resume 只差 compose 时的那份声明。
+    const tryResume = async (profile: typeof lenient, label: string): Promise<string> => {
+      const c = compose({
+        dbPath,
+        workspaceRoot: wsE.root,
+        approvalDecider: async () => ({ approved: true }),
+        trace: new CollectingTraceSink(),
+        profileOverride: profile,
+        modelPortOverride: new ScriptedModelPort([{ text: "收尾", toolCalls: [] }]),
+      });
+      try {
+        const g = c.runtime.resume(runId as never);
+        let x = await g.next();
+        while (!x.done) x = await g.next();
+        return "放行";
+      } catch (err) {
+        return `拒绝：${(err as Error).message.split("\n")[0]}`;
+      } finally {
+        c.db.close();
+      }
+    };
+
+    // 换了 modelId 的另一份声明 —— 其余字段一模一样。
+    const otherModel = { ...lenient, modelId: `${lenient.modelId}-v2` };
+    // 同一个 modelId，但把行为字段改了（相当于有人改了那份 JSON）。
+    const editedBehavior = {
+      ...lenient,
+      protocol: { ...lenient.protocol, validatesToolResultPairing: !lenient.protocol.validatesToolResultPairing },
+    };
+
+    const same = await tryResume(lenient, "同一份声明");
+    const changedModel = await tryResume(otherModel, "换了模型");
+    const changedBehavior = await tryResume(editedBehavior, "声明被改过");
+
+    fact("同一份声明 resume", same);
+    fact("换了 modelId 再 resume", changedModel);
+    fact("声明内容被改过再 resume", changedBehavior);
+
+    eOk =
+      same === "放行" && changedModel.startsWith("拒绝") && changedBehavior.startsWith("拒绝");
+    verdict(
+      eOk,
+      eOk
+        ? "同一条 transcript：端点未变时放行，换模型或改过声明内容时当场拒绝 —— §18.3 第一次有了运行时载体"
+        : `闸门无判别力（同=${same} 换模型=${changedModel} 改声明=${changedBehavior}）`,
+    );
+  } finally {
+    wsE.cleanup();
+  }
+  results.push({ name: "E", ok: eOk });
+
   if (!live) {
     console.log(
       "\n   \x1b[33mD 段的真实对照实跑未执行\x1b[0m（要花钱）。装配已就绪，跑它：\n" +
@@ -254,7 +356,6 @@ async function main(): Promise<void> {
       "   `profileMatches` 与 `DriftDetector` 双双零调用点的状态下，\n" +
       "   把 baseUrl 换成 DeepSeek 而保留百炼声明，compose 会一声不吭。",
   );
-  process.exit(ok ? 0 : 1);
 }
 
-void main();
+void runVerify(main);
