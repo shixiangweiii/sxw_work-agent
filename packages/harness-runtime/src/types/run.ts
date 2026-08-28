@@ -137,6 +137,35 @@ export interface ResumableRunFacts {
    * 「恢复粒度选对了」这句话。
    */
   resumeBranchCounts?: Record<string, number>;
+  /**
+   * Artifact 级检查的结果（阶段 3 S8，§10.4 第二层）。
+   *
+   * 【定】它与 `verifications` **分开存**，不是懒得合并。
+   *
+   * 两层问的不是同一个问题（一层问「这一步的副作用达成没有」，
+   * 二层问「这个产物本身完不完整合法」），而**结算映射也不同**：
+   * 二层还要按 `role` 分流（DELIVERABLE 失败 → FAILED，
+   * 其余失败 → COMPLETED_WITH_LIMITS）。`VerificationResult` 里没有
+   * role 这个维度，硬塞进去就得再加一个字段，然后一层的代码要开始判
+   * 一个跟它无关的字段 —— 那正是「两层互相替代」的开始。
+   */
+  artifactChecks?: ArtifactCheckFact[];
+}
+
+/**
+ * 一次 Artifact 级检查的事实（§10.4 第二层）。
+ *
+ * 【定】`checksRun` 为空**不等于**通过 —— 那是「没有适用的检查器」。
+ * 两者必须分得开，否则「我们验过了」这句话会被一个空集合背书。
+ */
+export interface ArtifactCheckFact {
+  artifactId: string;
+  logicalId: string;
+  role: "DELIVERABLE" | "INTERMEDIATE" | "RESULT";
+  ok: boolean;
+  checksRun: string[];
+  detail: string;
+  at: Timestamp;
 }
 
 // ───────────────────────────────────────────────────────── RunSpec

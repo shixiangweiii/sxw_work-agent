@@ -3,8 +3,8 @@
   "endpointId": "ep_bailian_anthropic",
   "shape": "ANTHROPIC_MESSAGES",
   "modelId": "qwen3.7-plus",
-  "_comment_expectedBaseUrlHost": "U-6：compose 据此断言「配置的 baseUrl」与「加载的声明」指向同一个端点。换了 baseUrl 却没换声明，会在启动时被挡下而不是静默跑错。",
-  "expectedBaseUrlHost": "dashscope.aliyuncs.com",
+  "_comment_expectedBaseUrlHost": "U-6：compose 据此断言「配置的 baseUrl」与「加载的声明」指向同一个端点。换了 baseUrl 却没换声明，会在启动时被挡下而不是静默跑错。值从 dashscope.aliyuncs.com 改为 maas.aliyuncs.com（2026-08-28）：实际使用的是百炼**专属部署** llm-*.cn-beijing.maas.aliyuncs.com，不是公共网关。这条断言此前从未对真实 .env 生效过 —— M-5 的模型名校验排在它前面，一直先失败，U-6 因此被遮住了（verify:drift D 段用的是故意错配的组合，测不到这个）。",
+  "expectedBaseUrlHost": "maas.aliyuncs.com",
 
   "_comment_protocol": "全部 false。缺 3 个 tool_result → 200；篡改 tool_call_id → 200；非法 tool schema → 200；disable_parallel_tool_use 静默接受但 4/4/4 完全无效。这不降低不变量的重要性，反而提高了：没有任何外部兜底会替你发现违反。",
   "protocol": {

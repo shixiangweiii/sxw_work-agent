@@ -23,21 +23,54 @@
  * 注意它不改变循环何时终止，只改变终止后打什么标签。
  */
 
-import type { IncompleteItem, RecoveryItem, RunOutcome } from "../types/run.js";
+import type { ArtifactCheckFact, IncompleteItem, RecoveryItem, RunOutcome } from "../types/run.js";
 import type { VerificationResult } from "../types/tool.js";
 
 export interface SettleInput {
   verifications: VerificationResult[];
   recoveryItems: RecoveryItem[];
   summary?: string;
+  /**
+   * 第二层（Artifact 级）Verification 的事实（阶段 3 S8，§10.4）。
+   *
+   * 【定】Run 层**不提出自己的问题，只汇总前两层已经产生的事实**。
+   * 这里也一样：不重新去看产物，只读已经记下的检查结果。
+   */
+  artifactChecks?: ArtifactCheckFact[];
 }
 
 export function settleOutcome(input: SettleInput): RunOutcome {
+  const art = splitArtifactChecks(input.artifactChecks ?? []);
   const base = {
     summary: input.summary,
-    deliveredArtifactIds: [] as string[],
+    /**
+     * 阶段 1、2 恒空，阶段 3 接上（S8）。
+     *
+     * 【定】只列**检查通过**的。§17【定】「Deliverable 原则上必须 Verified」——
+     * 把一个检查失败的产物列进 `deliveredArtifactIds`，等于对外宣称交付了
+     * 一份坏东西。失败的那些走 incompleteItems，在那里说清楚坏在哪。
+     */
+    deliveredArtifactIds: art.delivered,
     recoveryItems: input.recoveryItems,
   };
+
+  /**
+   * ── 【定】核心交付物检查失败 → `FAILED`，先于其他一切判定 ──────────────
+   *
+   * §1.2 第 3 条。原版方案一律降级为 `COMPLETED_WITH_LIMITS`，那会让
+   * 「**交付物是坏的**」和「某个中间步骤有瑕疵」在 outcome 上不可区分 ——
+   * 而这两件事对用户的意义差着一个数量级：前者意味着这次 Run 白跑了。
+   *
+   * 排在 recoveryItems 之前是刻意的：一份坏掉的交付物是**已知的**失败，
+   * 而 recoveryItem 只是「有一步状态未知」。已知的坏消息优先于不确定的。
+   */
+  if (art.failedDeliverables.length > 0) {
+    return {
+      ...base,
+      kind: "FAILED",
+      incompleteItems: [...art.failedDeliverables, ...art.failedOthers],
+    };
+  }
 
   // 副作用状态未知先于完成判定生效 —— 它是一个独立的非终态分支，
   // 不需要一条 criterion 去表达。
@@ -45,20 +78,33 @@ export function settleOutcome(input: SettleInput): RunOutcome {
     return {
       ...base,
       kind: "COMPLETED_WITH_LIMITS",
-      incompleteItems: input.recoveryItems.map(
-        (r): IncompleteItem => ({
-          what: r.what,
-          why: `副作用状态 ${r.sideEffectState}，需要人工确认`,
-          actionId: r.actionId,
-        }),
-      ),
+      incompleteItems: [
+        ...input.recoveryItems.map(
+          (r): IncompleteItem => ({
+            what: r.what,
+            why: `副作用状态 ${r.sideEffectState}，需要人工确认`,
+            actionId: r.actionId,
+          }),
+        ),
+        ...art.failedOthers,
+      ],
     };
   }
 
   const unmet = unmetRequired(input.verifications);
 
-  if (unmet.length === 0) {
+  if (unmet.length === 0 && art.failedOthers.length === 0) {
     return { ...base, kind: "SUCCESS", incompleteItems: [] };
+  }
+
+  /**
+   * 中间产物检查失败 → `COMPLETED_WITH_LIMITS` ＋ **具名** incompleteItems。
+   *
+   * 「具名」是关键：`what` 里要出现是哪个产物、`why` 里要出现坏在哪 ——
+   * 一条「有中间产物没通过检查」的记录，事后既查不到是哪个，也修不了。
+   */
+  if (unmet.length === 0) {
+    return { ...base, kind: "COMPLETED_WITH_LIMITS", incompleteItems: art.failedOthers };
   }
 
   /**
@@ -84,8 +130,38 @@ export function settleOutcome(input: SettleInput): RunOutcome {
   return {
     ...base,
     kind: allUserRejected ? "USER_REJECTED" : "COMPLETED_WITH_LIMITS",
-    incompleteItems: unmet,
+    incompleteItems: [...unmet, ...art.failedOthers],
   };
+}
+
+/**
+ * 把 Artifact 级检查事实拆成三堆：交付成功的、坏掉的交付物、坏掉的其他产物。
+ *
+ * 【定】按 `role` 分流是这一层的**全部意义**。不分流的话，
+ * 「交付物是坏的」会和「某个中间步骤有瑕疵」结算成同一个 kind。
+ */
+function splitArtifactChecks(facts: ArtifactCheckFact[]): {
+  delivered: string[];
+  failedDeliverables: IncompleteItem[];
+  failedOthers: IncompleteItem[];
+} {
+  const delivered: string[] = [];
+  const failedDeliverables: IncompleteItem[] = [];
+  const failedOthers: IncompleteItem[] = [];
+
+  for (const f of facts) {
+    if (f.ok) {
+      if (!delivered.includes(f.artifactId)) delivered.push(f.artifactId);
+      continue;
+    }
+    const item: IncompleteItem = {
+      what: `产物 ${f.logicalId}（${f.role}）未通过完整性检查`,
+      why: f.detail,
+    };
+    if (f.role === "DELIVERABLE") failedDeliverables.push(item);
+    else failedOthers.push(item);
+  }
+  return { delivered, failedDeliverables, failedOthers };
 }
 
 /**
@@ -131,13 +207,18 @@ export function settleWallOutcome(
   >,
   input: SettleInput & { handoff?: string },
 ): RunOutcome {
+  const art = splitArtifactChecks(input.artifactChecks ?? []);
   return {
     kind,
     summary: input.handoff ?? input.summary,
-    deliveredArtifactIds: [],
+    // 撞墙也可能已经产出了合格的交付物 —— 撞墙的是 Run，不是那份产物。
+    // 恒空会让「跑到一半没预算了，但清单已经写好了」在 outcome 上看不出来。
+    deliveredArtifactIds: art.delivered,
     recoveryItems: input.recoveryItems,
     incompleteItems: [
       ...unmetRequired(input.verifications),
+      ...art.failedDeliverables,
+      ...art.failedOthers,
       ...input.recoveryItems.map((r) => ({
         what: r.what,
         why: `副作用状态 ${r.sideEffectState}`,

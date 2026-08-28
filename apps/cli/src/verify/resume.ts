@@ -29,11 +29,13 @@
  * ══════════════════════════════════════════════════════════════════════
  */
 
+import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
   CollectingTraceSink,
   findUnpairedToolUses,
+  makeActionFactEntry,
   readRunFacts,
   type ContextMessage,
   type ResumableRunFacts,
@@ -67,13 +69,13 @@ const SCRIPT = () =>
       reasoning: "先看目录再写文件",
       toolCalls: [
         { toolCallId: "tc_1", name: "list_dir", input: { path: "." } },
-        { toolCallId: "tc_2", name: "write_note", input: { path: "note.txt", content: "hello" } },
+        { toolCallId: "tc_2", name: "write_file", input: { path: "note.txt", content: "hello" } },
       ],
     },
     {
       text: "确认一下 note.txt 写好了没有，没有就补上。",
       toolCalls: [
-        { toolCallId: "tc_3", name: "write_note", input: { path: "note.txt", content: "hello" } },
+        { toolCallId: "tc_3", name: "write_file", input: { path: "note.txt", content: "hello" } },
       ],
     },
     { text: "两件事都做完了。", toolCalls: [] },
@@ -475,7 +477,7 @@ async function runOnce(opts: {
  * 这是进程硬崩在 transcript 上留下的形态，也是 §18.2 三条分支的唯一触发条件。
  * 注入三个不同性质的工具，三条分支才都被走到：
  *   list_dir    只读幂等              → IDEMPOTENT_RETRY
- *   write_note  非幂等 + REOBSERVE     → OBSERVE_FIRST
+ *   write_file  非幂等 + REOBSERVE     → OBSERVE_FIRST
  *   append_log  非幂等 + 无 Observation → RECOVERY_REQUIRED
  *
  * 第三个是补上来的：只有前两个时，第三条分支在这套工具集下永远不可达 ——
@@ -530,15 +532,41 @@ async function simulateHardCrash(decision: "CONTINUE" | "ABORT" = "CONTINUE"): P
     }
 
     /**
-     * 分支二要证明的是「真的去读了外部世界」，不是「返回了一个常量」。
-     * 所以注入**两个** write_note：一个的目标文件已经存在且内容一致
-     * （= 崩溃前那次写其实已经落盘），一个不存在。
-     * 观察必须给出两个不同的结论，才谈得上「观察」。
+     * ── 分支二的载体：阶段 3 收口批从 `write_file` 换成 `edit_file` ──────────
+     *
+     * 覆盖写**本来就是幂等的**，它当年被标成非幂等只是为了给分支二凑一个
+     * 通用工具（见 write-file.ts 的注释）—— 那等于拿被测对象身上的一个
+     * 假声明去测分支分布。现在 `write_file` 诚实地落分支一，
+     * 分支二交给天然非幂等的 `edit_file`（替换是**相对**操作）。
+     *
+     * 【定】换载体的同时必须注入 **ACTION_FACT 前置指纹**。
+     * `edit_file` 声明了 `requiresPreFingerprint: true`，而 `canObserve`
+     * 的最后一个合取项就是「这次拍到指纹没有」—— 光注入 tool_call 的话
+     * 它会落**分支三**，分支二在这条脚本里就静默地不可达了，
+     * 而分支二恰恰是这一段存在的理由。
+     *
+     * 分支二要证明的是「真的去读了外部世界」，不是「返回了一个常量」：
+     *   · done.txt   盘上是**改过之后**的样子，指纹记的是改之前 → 观察到「已发生」
+     *   · crash.txt  盘上与指纹**一模一样**                    → 观察到「没发生」
+     * 同一个工具、两个不同的外部状态，必须给出两个不同的结论。
      */
-    writeFileSync(resolve(ws.root, "done.txt"), "已经写好了", "utf8");
+    const BEFORE = "第一行\n待替换\n第三行\n";
+    const AFTER = "第一行\n已替换\n第三行\n";
+    writeFileSync(resolve(ws.root, "done.txt"), AFTER, "utf8");
+    writeFileSync(resolve(ws.root, "crash.txt"), BEFORE, "utf8");
+
+    /** 与 `CommonVerifier.snapshotFile()` 同构：exists / bytes / sha256(原始字节)。 */
+    const fingerprintOf = (content: string): { exists: boolean; bytes: number; sha256: string } => {
+      const buf = Buffer.from(content, "utf8");
+      return {
+        exists: true,
+        bytes: buf.byteLength,
+        sha256: createHash("sha256").update(buf).digest("hex"),
+      };
+    };
 
     // ── 注入：assistant 回合含四个 tool_call，没有任何 result
-    const injected = ["tc_crash_read", "tc_crash_write_done", "tc_crash_write", "tc_crash_append"];
+    const injected = ["tc_crash_read", "tc_crash_edit_done", "tc_crash_edit", "tc_crash_append"];
     await composed.ports.transcript.append({
       runId: runId as RunId,
       schemaVersion: 1,
@@ -551,15 +579,15 @@ async function simulateHardCrash(decision: "CONTINUE" | "ABORT" = "CONTINUE"): P
           { type: "tool_call", toolCallId: "tc_crash_read", name: "list_dir", input: { path: "." } },
           {
             type: "tool_call",
-            toolCallId: "tc_crash_write_done",
-            name: "write_note",
-            input: { path: "done.txt", content: "已经写好了" },
+            toolCallId: "tc_crash_edit_done",
+            name: "edit_file",
+            input: { path: "done.txt", old_string: "待替换", new_string: "已替换" },
           },
           {
             type: "tool_call",
-            toolCallId: "tc_crash_write",
-            name: "write_note",
-            input: { path: "crash.txt", content: "x" },
+            toolCallId: "tc_crash_edit",
+            name: "edit_file",
+            input: { path: "crash.txt", old_string: "待替换", new_string: "已替换" },
           },
           {
             type: "tool_call",
@@ -571,6 +599,21 @@ async function simulateHardCrash(decision: "CONTINUE" | "ABORT" = "CONTINUE"): P
       },
       createdAt: Date.now(),
     });
+
+    // 两条执行前指纹 —— 崩溃前 Runtime 侧的 Verifier 拍下的那两张。
+    for (const [toolCallId, content] of [
+      ["tc_crash_edit_done", BEFORE],
+      ["tc_crash_edit", BEFORE],
+    ] as const) {
+      await composed.ports.transcript.append(
+        makeActionFactEntry(runId as RunId, {
+          toolCallId,
+          toolName: "edit_file",
+          fingerprint: fingerprintOf(content),
+          at: Date.now(),
+        }),
+      );
+    }
 
     const before = await composed.ports.transcript.rebuildMessages(runId as RunId);
     const unpairedBefore = findUnpairedToolUses(before).map((u) => u.toolCallId);
@@ -640,9 +683,9 @@ async function simulateHardCrash(decision: "CONTINUE" | "ABORT" = "CONTINUE"): P
       afterDecisionOutcome: r3.value.outcome?.kind,
       afterDecisionLoopTerminated,
       afterDecisionSummary: r3.value.outcome?.summary,
-      // 分支二的行为证据：两个 write_note 必须得到**不同**的观察结论。
-      observedStatus: resultStatusOf(after, "tc_crash_write"),
-      observedAppliedStatus: resultStatusOf(after, "tc_crash_write_done"),
+      // 分支二的行为证据：两个 write_file 必须得到**不同**的观察结论。
+      observedStatus: resultStatusOf(after, "tc_crash_edit"),
+      observedAppliedStatus: resultStatusOf(after, "tc_crash_edit_done"),
       modelCallsAfterResume,
     };
   } finally {

@@ -18,6 +18,16 @@
  * 只看下一轮的实际 token 数和 transcript 的实际内容。
  *
  * 挂了意味着：Replay 的重建语义从第一天起就对不上，而且没人看得出来。
+ *
+ * ── 阶段 3：C 段判据被换过，因为老判据两个方向都会骗人 ──────────────────
+ *
+ * 老判据是「帧内条目数出现过一次下降」。实测下来它**假红也假绿**：
+ * 压缩发生在 `compileFrame` 内部，`ContextFrameCompiled` 报的永远是压缩
+ * **后**的帧 —— 回不回写，那一帧都是压过的，从帧的大小上看不出区别。
+ *
+ * 新判据看的是「压缩每轮要干多少活」。判别力已实测（只改回写那一行）：
+ *   有回写 freedTokens 128→167→167→167→167（丢 0→2→2→2→2）→ 6 ✓ / 0 ✗
+ *   无回写 freedTokens 128→295→462→629→796（丢 0→2→4→6→8）→ 4 ✓ / 2 ✗
  * ══════════════════════════════════════════════════════════════════════
  *
  * 默认阈值是 60k/100k，脚本化模型撞不到 —— 这正是它一直没被跑过的原因。
@@ -32,7 +42,7 @@ import {
   type ContextMessage,
   type TranscriptEntry,
 } from "@workagent/harness-runtime";
-import { listDirSnapshot } from "@workagent/micro-cases";
+import { listDirSnapshot } from "@workagent/tools-common";
 import { compose } from "../compose.js";
 import {
   ScriptedModelPort,
@@ -63,14 +73,43 @@ const REASONING_MARK = "我需要仔细想一想";
  */
 const FIXTURE_TOOLS = [listDirSnapshot];
 
+/**
+ * 【定】system prompt 也要锁死，理由与 FIXTURE_TOOLS 一模一样。
+ *
+ * 阶段 3 的 S2.5 把生产 prompt 从 10 行扩到 40 行（工具选择指引），
+ * 这条脚本当场翻红 —— 而且是**假红**：帧的起步价从 ~250 涨到 ~890，
+ * 一举越过 softInputLimitTokens(600)，于是第一轮就触发压缩、
+ * `compactTargetTokens - nonMessageTokens` 被夹到 0，Compact 每轮
+ * 把能丢的都丢了，可帧内条目数照样单调上涨（新消息进得比丢得快）。
+ *
+ * 症状看起来正是 R-6「压了但没回写」，实际成因却是**夹具的基准被挪动了**。
+ * 这类假红比漏测更贵：它会让人去改一段本来是对的 Runtime 代码。
+ *
+ * 夹具要验的是 Compact 的落地，不是「今天的 prompt 有多长」。
+ */
+const FIXTURE_PROMPT = "你是一个测试用的执行体。按要求调用工具，完成后用一句话说明。";
+
 const POLICY = {
   ...DEFAULT_CONTEXT_POLICY,
   reservedOutputTokens: 1_024,
   softInputLimitTokens: 600,
   hardInputLimitTokens: 20_000,
-  // 注意它是**帧级**预算：1 个工具的固定开销 180，system prompt ＋ 时间事实
-  // 再占一百多。compileFrame 会先扣掉这些，剩下的才是留给 messages 的额度。
-  compactTargetTokens: 440,
+  /**
+   * 注意它是**帧级**预算：1 个工具的固定开销 180，system prompt ＋ 时间事实
+   * 再占一百多。compileFrame 会先扣掉这些，剩下的才是留给 messages 的额度。
+   *
+   * 【定】取值必须让**消息级**丢弃真的发生在中途，而不只是剥推理块。
+   *
+   * 阶段 3 调整前这里是 440。它当时能过 C 段是个巧合：老的 system prompt
+   * 恰好把 `compactTargetTokens - nonMessageTokens` 压到了 0，于是每一轮
+   * 都把能丢的全丢了。换一段长度不同的 prompt，目标变成正数，
+   * 压缩就退化成「只剥推理块」—— C 段（帧内条目数出现下降）永远不成立。
+   *
+   * 也就是说：**这个判据此前依赖的是一个没写下来的巧合。**
+   * 现在把目标显式压到「只够留最近两轮」的量级，让丢弃在第 3–4 轮真的发生，
+   * 后面还剩两轮能观察到条目数下降。
+   */
+  compactTargetTokens: 280,
 };
 
 async function main(): Promise<void> {
@@ -83,13 +122,25 @@ async function main(): Promise<void> {
   const trace = new CollectingTraceSink();
 
   try {
-    // 六轮：前五轮各调一次工具并附一段长推理，第六轮收尾。
-    // 上下文因此单调增长，中途必然越过 softInputLimit。
+    /**
+     * 六轮：前五轮各调一次工具并附一段长推理，第六轮收尾。
+     * 上下文因此单调增长，中途必然越过 softInputLimit。
+     *
+     * ── 【定】每轮的入参必须**不同**（阶段 3 起）─────────────────────────
+     *
+     * Progress Guard（S9）会在「同工具 ＋ 同 normalized input ＋ 同 effect
+     * digest」连续 3 次时具名终止 Run。原来这个夹具每轮都发完全相同的
+     * `list_dir({path:"."})`，于是它在第 3 轮就被判成原地打转 ——
+     * 压缩只来得及发生 2 次，C 段拿不到足够样本。
+     *
+     * 这不是 Guard 太严，是**夹具本身就长得像一个死循环**。
+     * 换成每轮翻一页（cursor 递增）：入参不同、语义合理、上下文照样单调增长。
+     */
     const script = [
       ...Array.from({ length: 5 }, (_, i) => ({
         reasoning: LONG_REASONING,
         text: `第 ${i + 1} 步。`,
-        toolCalls: [{ toolCallId: `tc_${i}`, name: "list_dir", input: { path: "." } }],
+        toolCalls: [{ toolCallId: `tc_${i}`, name: "list_dir", input: { path: ".", cursor: i } }],
       })),
       { text: "全部做完了。", toolCalls: [] },
     ];
@@ -103,6 +154,7 @@ async function main(): Promise<void> {
       modelPortOverride: model,
       contextPolicy: POLICY,
       tools: FIXTURE_TOOLS,
+      systemPrompt: FIXTURE_PROMPT,
     });
 
     section("A. 阈值与脚本");
@@ -171,27 +223,59 @@ async function main(): Promise<void> {
     fact("压缩之后各轮", after.join(" → ") || "（压缩发生在最后一轮）");
 
     /**
-     * 主判据用**帧内条目数**，不用 token 数。
+     * ── 主判据：**每轮压缩的工作量是不是稳定的** ────────────────────────
      *
-     * 理由是它不是启发式：`state.messages` 每轮只增不减（助手回合 ＋ 工具结果），
-     * 所以 `ContextFrameCompiled.items` 在没有回写时必然单调不降。
-     * **只要出现过一次下降，就证明压缩结果真的进了 state.messages** ——
-     * 没有别的机制能让它变小。
+     * 【定】不要用「帧内条目数出现过一次下降」。
      *
-     * token 数只作为辅助观察：压缩之后还会继续加新消息，涨回去是正常的，
-     * 拿它做主判据就得挑一个「涨多少算失控」的阈值，而那个阈值没有依据。
+     * 那是阶段 3 之前的写法，它在 HEAD 上绿得很脆，而且**判别力实测下会漏**：
+     *   · 本脚本每轮固定新增 3 个条目，稳态压缩每轮丢一个协议单元（2 条），
+     *     净增 1 —— **有回写也永远不下降**（假红）；
+     *   · 反过来，把回写整个删掉，条目数变成 3→6→7→7→7→7，
+     *     同样「没有下降」—— **无回写也判不出来**（假绿）。
+     *   HEAD 之所以看到一次下降，是某一轮恰好攒够两个可丢单元一次丢了 4 条。
+     *
+     * 根因是：压缩发生在 `compileFrame` **内部**，所以 `ContextFrameCompiled`
+     * 报的永远是压缩**后**的帧 —— 无论回写与否，那一帧都是压过的。
+     * 从帧的大小上根本看不出回写。
+     *
+     * ── 看得出来的地方是「压缩每轮要干多少活」──────────────────────
+     *
+     * 没有回写时，`state.messages` 保留全部历史，于是**每一轮都在重压一份
+     * 越来越长的历史**：同一批老消息被反复丢弃，freedTokens 单调递增。
+     * 有回写时，老消息已经不在 messages 里了，每轮只需处理新增的那点，
+     * freedTokens 进入平台期。
+     *
+     * 实测（同一份夹具，只改回写那一行）：
+     *   无回写：128 → 295 → 462 → 629 → 796（丢 2 → 4 → 6 → 8 条）
+     *   有回写：128 → 167 → 167 → 167 → 167（每次都只丢 2 条）
+     *
+     * 判据因此是：**压缩的 freedTokens 序列不得全程严格递增**。
+     * 它不依赖「一次丢几条」，也不依赖任何阈值 —— 严格递增就是
+     * 「同一批消息被反复重压」的定义。
      */
     const itemCounts = frames.map((f) => f.payload.items);
-    const drops = itemCounts.filter((n, i) => i > 0 && n < itemCounts[i - 1]!);
     fact("逐轮帧内条目数", itemCounts.join(" → "));
 
-    const writebackOk = drops.length > 0;
+    const freed = compactedEvents.map((e) => e.payload.freedTokens);
+    const droppedCounts = compactedEvents.map(
+      (e) => Number(/丢弃 (\d+) 条/.exec(e.payload.reason)?.[1] ?? 0),
+    );
+    fact("逐次压缩 freedTokens", freed.join(" → "));
+    fact("逐次压缩丢弃条数", droppedCounts.join(" → "));
+
+    // 需要至少 3 次压缩才谈得上「趋势」；少于 3 次说明夹具没跑到稳态。
+    const enoughSamples = freed.length >= 3;
+    const strictlyGrowing = freed.every((n, i) => i === 0 || n > freed[i - 1]!);
+    const writebackOk = enoughSamples && !strictlyGrowing;
     verdict(
       writebackOk,
-      writebackOk
-        ? `压缩结果确实回写进了 state.messages —— 帧内条目数出现 ${drops.length} 次下降，` +
-          `而 messages 只增不减，没有回写就不可能变小`
-        : "压缩结果没有回写：帧内条目数全程单调不降，说明下一轮仍从未压缩的 state.messages 追加",
+      !enoughSamples
+        ? `只压缩了 ${freed.length} 次，不足以判断趋势 —— 夹具需要跑到稳态`
+        : writebackOk
+          ? `压缩结果确实回写进了 state.messages —— freedTokens 进入平台期` +
+            `（${freed.join("→")}），说明老消息已经不在 messages 里了`
+          : `压缩结果没有回写：freedTokens 全程严格递增（${freed.join("→")}），` +
+            `丢弃条数也在涨（${droppedCounts.join("→")}）—— 同一批老消息每轮被重压一遍`,
     );
 
     // ── D. COMPACT_BOUNDARY 有没有真的落盘
@@ -308,7 +392,7 @@ async function countReasoningMarksWithProfile(
       ...Array.from({ length: 5 }, (_, i) => ({
         reasoning: LONG_REASONING,
         text: `第 ${i + 1} 步。`,
-        toolCalls: [{ toolCallId: `tc_${i}`, name: "list_dir", input: { path: "." } }],
+        toolCalls: [{ toolCallId: `tc_${i}`, name: "list_dir", input: { path: ".", cursor: i } }],
       })),
       { text: "全部做完了。", toolCalls: [] },
     ];
@@ -321,6 +405,7 @@ async function countReasoningMarksWithProfile(
       modelPortOverride: model,
       contextPolicy: POLICY,
       tools: FIXTURE_TOOLS,
+      systemPrompt: FIXTURE_PROMPT,
       profileOverride: {
         ...base,
         context: { ...base.context, reasoningBlockRule: "VERBATIM_REQUIRED" },

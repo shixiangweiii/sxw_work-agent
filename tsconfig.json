@@ -10,13 +10,16 @@
       "@workagent/store-sqlite": ["packages/store-sqlite/src/index.ts"],
       "@workagent/store-sqlite/*": ["packages/store-sqlite/src/*"],
       "@workagent/shape-anthropic-messages": ["adapters/shape-anthropic-messages/src/index.ts"],
-      "@workagent/micro-cases": ["cases/micro-cases/src/index.ts"]
+      "@workagent/micro-cases": ["cases/micro-cases/src/index.ts"],
+      "@workagent/tools-common": ["tools/common/src/index.ts"],
+      "@workagent/tools-common/*": ["tools/common/src/*"]
     }
   },
   "include": [
     "packages/*/src/**/*.ts",
     "adapters/*/src/**/*.ts",
     "cases/*/src/**/*.ts",
+    "tools/*/src/**/*.ts",
     "apps/*/src/**/*.ts",
     "eval/**/*.ts"
   ],

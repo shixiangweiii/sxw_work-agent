@@ -19,7 +19,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BudgetAxis, RunEvent } from "@workagent/harness-runtime";
 import { DEFAULT_BUDGETS, NullTraceSink, asId, readRunFacts, type RunId } from "@workagent/harness-runtime";
-import { listDirSnapshot, writeNoteSnapshot } from "@workagent/micro-cases";
+import { listDirSnapshot, writeFileSnapshot } from "@workagent/tools-common";
 import { compose, DEFAULT_SYSTEM_PROMPT } from "../compose.js";
 import { ScriptedModelPort, banner, fact, makeUsage, runVerify, section, verdict, type ScriptedTurn } from "./harness.js";
 
@@ -67,7 +67,7 @@ async function runWith(opts: {
     trace: new NullTraceSink(),
     modelPortOverride: model,
     timezone: "Asia/Shanghai",
-    tools: [listDirSnapshot, writeNoteSnapshot],
+    tools: [listDirSnapshot, writeFileSnapshot],
     systemPrompt: DEFAULT_SYSTEM_PROMPT,
     approvalDecider: async () => {
       if (opts.approvalDelayMs) await new Promise((r) => setTimeout(r, opts.approvalDelayMs));
@@ -105,11 +105,23 @@ async function runWith(opts: {
   };
 }
 
-/** 一个永远要工具的脚本：不撞墙就不会停。 */
+/**
+ * 一个永远要工具的脚本：不撞墙就不会停。
+ *
+ * ── 【定】每轮入参必须**不同**（阶段 3 起）──────────────────────────────
+ *
+ * Progress Guard（S9）会在「同工具 ＋ 同 normalized input ＋ 同 effect digest」
+ * 连续 3 次时具名终止 Run。原来这里每轮都发完全相同的 `list_dir({path:"."})`，
+ * 于是它在第 3 轮就停在 `NO_PROGRESS` —— **任何一条预算轴都还没来得及撞到**，
+ * A 段与 B 段一起翻红。
+ *
+ * 这不是 Guard 太严：一个逐字重复同一个调用的脚本，本来就长得像死循环。
+ * 换成每轮翻一页（cursor 递增），「不撞墙就不会停」这句话才重新成立。
+ */
 function endlessScript(n = 60): ScriptedTurn[] {
   return Array.from({ length: n }, (_, i) => ({
     text: `第 ${i + 1} 步`,
-    toolCalls: [{ toolCallId: `t${i}`, name: "list_dir", input: { path: "." } }],
+    toolCalls: [{ toolCallId: `t${i}`, name: "list_dir", input: { path: ".", cursor: i } }],
   }));
 }
 
@@ -204,7 +216,7 @@ async function main(): Promise<void> {
       script: [
         {
           text: "写一份",
-          toolCalls: [{ toolCallId: "w1", name: "write_note", input: { path: "n.txt", content: "x" } }],
+          toolCalls: [{ toolCallId: "w1", name: "write_file", input: { path: "n.txt", content: "x" } }],
         },
         { text: "好了", toolCalls: [] },
       ],

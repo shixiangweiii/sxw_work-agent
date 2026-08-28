@@ -20,7 +20,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
-import { compose, REPO_ROOT } from "../../apps/cli/src/compose.js";
+import { compose, parseEndpointArg, REPO_ROOT, type EndpointChoice } from "../../apps/cli/src/compose.js";
 import { FileTraceSink } from "../../apps/cli/src/trace/file-sink.js";
 import { ScriptedModelPort } from "../../apps/cli/src/verify/harness.js";
 import {
@@ -169,7 +169,7 @@ function scriptedTurns() {
     {
       text: "写清单",
       toolCalls: [
-        { toolCallId: "w1", name: "write_note", input: { path: "2026Q2归档/交接清单.md", content: body } },
+        { toolCallId: "w1", name: "write_file", input: { path: "2026Q2归档/交接清单.md", content: body } },
       ],
     },
     {
@@ -189,7 +189,12 @@ function scriptedTurns() {
   ];
 }
 
-async function runTrial(index: number, live: boolean, outDir: string): Promise<TrialResult> {
+async function runTrial(
+  index: number,
+  live: boolean,
+  outDir: string,
+  endpoint: EndpointChoice,
+): Promise<TrialResult> {
   const root = mkdtempSync(join(tmpdir(), `workagent-eval-${index}-`));
   const ws = join(root, "ws");
   mkdirSync(ws, { recursive: true });
@@ -203,7 +208,14 @@ async function runTrial(index: number, live: boolean, outDir: string): Promise<T
     () => tracePath,
     () => ({
       commit: git(["rev-parse", "HEAD"]) || "unknown",
-      endpointProfile: "eval",
+      /**
+       * 【定】记**真实**端点名，不是写死的 "eval"。
+       *
+       * 写死的话 manifest 上读不出这一次跑的是哪个端点 —— 而 §24.6 的
+       * 对照端点与主力端点的三组判定几乎处处相反，「哪个端点」正是
+       * 复核一份 Eval 结果时第一个要问的问题。
+       */
+      endpointProfile: endpoint,
       modelId: live ? "live" : "scripted",
       task: ARCHIVE_TASK,
       workspaceRoot: ws,
@@ -218,6 +230,7 @@ async function runTrial(index: number, live: boolean, outDir: string): Promise<T
     trace: sink,
     dbPath: join(root, "runs.db"),
     timezone: "Asia/Shanghai",
+    endpoint,
     ...(live ? {} : { modelPortOverride: new ScriptedModelPort(scriptedTurns()) }),
   });
 
@@ -305,6 +318,12 @@ async function main(): Promise<void> {
   const live = argv.includes("--live");
   const kArg = argv[argv.indexOf("--live") + 1];
   const k = live ? Number(kArg) || 5 : Number(argv[argv.indexOf("-n") + 1]) || 3;
+  /**
+   * 方案 S1 要求 CLI **与 `eval/suite`** 都加受枚举约束的 `--endpoint`。
+   * 这一半此前没做：Eval 只能跑主力端点，而 manifest 里记的是写死的 "eval"。
+   * 校验函数与 CLI 共用一个（见 compose.ts 的说明）。
+   */
+  const endpoint = parseEndpointArg(argv);
 
   const outDir = join(REPO_ROOT, ".workagent-eval", new Date().toISOString().replace(/[:.]/g, "-"));
   mkdirSync(outDir, { recursive: true });
@@ -327,12 +346,12 @@ async function main(): Promise<void> {
     `\n  commit ${prov.commit.slice(0, 8)}${prov.gitDirty ? ` \x1b[33m+dirty(${prov.diffHash})\x1b[0m` : " (clean)"}` +
       `  node ${prov.nodeVersion}  npm ${prov.npmVersion}`,
   );
-  console.log(`  夹具 ${prov.fixtureHash}   grader ${prov.graderVersion}\n`);
+  console.log(`  夹具 ${prov.fixtureHash}   grader ${prov.graderVersion}   端点 ${endpoint}\n`);
 
   const trials: TrialResult[] = [];
   for (let i = 1; i <= k; i++) {
     process.stdout.write(`  trial ${i}/${k} … `);
-    const t = await runTrial(i, live, outDir);
+    const t = await runTrial(i, live, outDir, endpoint);
     trials.push(t);
     console.log(
       `${t.grader.hardPassed ? "\x1b[32mPASS\x1b[0m" : "\x1b[31mFAIL\x1b[0m"} ` +

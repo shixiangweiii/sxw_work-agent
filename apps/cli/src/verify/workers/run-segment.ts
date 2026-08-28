@@ -22,8 +22,18 @@
  */
 
 import { mkdirSync } from "node:fs";
-import type { RunEvent, RunId } from "@workagent/harness-runtime";
+import type {
+  PreparedAction,
+  RunEvent,
+  RunId,
+  ToolExecutionContext,
+  ToolExecutionOutcome,
+  VerificationPort,
+  VerificationResult,
+} from "@workagent/harness-runtime";
 import { NullTraceSink, asId } from "@workagent/harness-runtime";
+import { CommonVerifier, type HandoffChannel } from "@workagent/tools-common";
+import { MicroCaseVerifier } from "@workagent/micro-cases";
 import { compose } from "../../compose.js";
 import { ScriptedModelPort, estimateFromBody, type ScriptedTurn } from "../harness.js";
 import { FileTraceSink } from "../../trace/file-sink.js";
@@ -31,6 +41,72 @@ import { FileTraceSink } from "../../trace/file-sink.js";
 function arg(name: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
   return i >= 0 ? process.argv[i + 1] : undefined;
+}
+
+/**
+ * 故障注入：**只路由 `verify`** 的组合器（阶段 3 §2.4 的判别力旋钮）。
+ *
+ * 它逐字模拟写组合器时最容易犯的那个错 —— 想着「验证要按工具名分派」，
+ * 忘了 `observePre` / `observePost` 也要。类上没有这两个方法，
+ * 于是 `settle-batch` 的 `deps.verification.observePre` 判定为 falsy，
+ * 执行前指纹一次都不会拍；facade 的 `canObserve` 也因为
+ * `typeof observePost !== "function"` 直接不成立。
+ *
+ * 【定】它必须住在 worker（故障注入侧），不能污染生产的 CompositeVerifier。
+ */
+class VerifyOnlyComposite implements VerificationPort {
+  private readonly members = [new CommonVerifier(), new MicroCaseVerifier()];
+
+  async verify(
+    action: PreparedAction,
+    outcome: ToolExecutionOutcome,
+    ctx: ToolExecutionContext,
+  ): Promise<VerificationResult> {
+    for (const m of this.members) {
+      if ((m as { handles(n: string): boolean }).handles(action.toolName)) {
+        return m.verify(action, outcome, ctx);
+      }
+    }
+    return {
+      id: `ver_${action.id}`,
+      actionId: action.id,
+      at: Date.now(),
+      mode: "NONE",
+      required: false,
+      status: "SKIPPED",
+      detail: "无人认领",
+    };
+  }
+  // 【定】刻意不实现 observePre / observePost —— 这就是被测的那个 bug。
+}
+
+/**
+ * 脚本化的接管通道（阶段 3 S10 的故障注入）。
+ *
+ * 三种形态，各测一件事：
+ *   answer —— 立刻应答。默认值，让普通 Run 不会挂在等人上。
+ *   hang   —— **永不应答**（除非被 abort）。崩溃测试要在「正在等人」
+ *             那一刻 SIGKILL，所以必须真的停在那里。
+ *   none   —— 不注入通道，验「能发起接管却无人接收」会不会被如实报出来。
+ *
+ * 【定】`hang` 必须接 signal。不接的话子进程被 kill 之后这个 Promise
+ * 仍然挂着，`spawnSync` 的 timeout 才收得了场 —— 那会让一次本该 2 秒的
+ * 崩溃测试跑满 60 秒，而失败原因看起来像是「超时」。
+ */
+function scriptedHandoff(mode: string): HandoffChannel | undefined {
+  if (mode === "none") return undefined;
+  if (mode === "hang") {
+    return {
+      async await({ signal }) {
+        await new Promise<void>((resolve) => {
+          if (signal.aborted) return resolve();
+          signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+        return undefined;
+      },
+    };
+  }
+  return { async await() { return { note: "脚本化接管：已完成" }; } };
 }
 
 async function main(): Promise<void> {
@@ -75,6 +151,15 @@ async function main(): Promise<void> {
     timezone: "Asia/Shanghai",
     // 决 6 的旋钮：关掉执行前指纹，同一个工具就从分支二掉到分支三。
     disableRecoveryObservation: process.argv.includes("--disable-observation"),
+    // §2.4 的旋钮：断掉组合器到 Verifier 的 observePre / observePost 那条线。
+    ...(process.argv.includes("--break-verifier-routing")
+      ? { portOverrides: { verification: new VerifyOnlyComposite() } }
+      : {}),
+    // S10：接管通道。默认立刻应答，`hang` 用于「正在等人时被 kill」的窗口。
+    ...(() => {
+      const ch = scriptedHandoff(arg("handoff-mode") ?? "answer");
+      return ch ? { handoff: ch } : {};
+    })(),
   });
 
   let runId = arg("run-id") ?? "";

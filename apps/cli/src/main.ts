@@ -17,9 +17,9 @@
 import { execFileSync } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { createInterface } from "node:readline/promises";
 import type {
   ApprovalDecider,
+  ApprovalDecision,
   PreparedAction,
   RunEvent,
   RunId,
@@ -28,10 +28,11 @@ import type {
 } from "@workagent/harness-runtime";
 import { NullTraceSink, asId, readRunFacts } from "@workagent/harness-runtime";
 import { SqliteRunStore, openDb } from "@workagent/store-sqlite";
-import { isInsideWorkspace } from "@workagent/micro-cases";
-import { compose, REPO_ROOT, resolveDbPath } from "./compose.js";
+import { isInsideWorkspace, type HandoffChannel } from "@workagent/tools-common";
+import { compose, parseEndpointArg, REPO_ROOT, resolveDbPath, type EndpointChoice } from "./compose.js";
 import { FileTraceSink } from "./trace/file-sink.js";
 import { finishRendering, renderEvent } from "./render.js";
+import { StdinChannel } from "./stdin-channel.js";
 
 type Mode = "start" | "resume" | "list";
 
@@ -39,15 +40,39 @@ interface Args {
   mode: Mode;
   task: string;
   workspace: string;
+  /**
+   * 【定】阶段 3 决 3 起，「workspace 内的可逆写自动放行」是**默认行为**，
+   * `--yes` 只是它的显式写法（保留是为了不破坏既有命令行与文档）。
+   *
+   * 理由：本阶段不接 Capability 授权层，而每写一个文件就停下来问一次，
+   * 在「读一批文档 → 汇总 → 产出」这种任务里会问十几次 —— 那不是安全，
+   * 那是把闸门变成噪音，用户会开始无脑回车（而无脑回车比自动放行更糟：
+   * 它看起来像是有人在把关）。
+   *
+   * 边界仍在，只是位置不同：越界写由 Policy **直接拒绝**（不给审批机会），
+   * 不可逆与 EXECUTE 仍然逐次问。要恢复「每一步都问」用 `--confirm`。
+   */
   yes: boolean;
   /** 显式的「批准一切」。见 interactiveApproval 里 E-3 那段说明。 */
   yesAll: boolean;
+  /** 恢复阶段 1–2 的行为：每一个需要审批的操作都停下来问。 */
+  confirm: boolean;
   /** undefined = --no-trace；string = 显式 --trace 路径；"auto" = 按 runId 定名 */
   trace: string | undefined;
   dbPath: string;
   runId: string;
   recoveryDecision: "CONTINUE" | "ABORT" | undefined;
   recoveryNote: string | undefined;
+  /**
+   * P1-1：官方入口终于能选端点了。
+   *
+   * `compose()` 从阶段 2 起就支持 `endpoint`，但**只有验收脚本传得进去** ——
+   * `npm run dev` 没有任何办法换端点。这是「装配完成 ≠ 可达」的第三次显形
+   * （前两次是 `interject` 与 `resume`）：能力在，入口不在。
+   *
+   * 开发期要频繁换端点验证工具行为，所以它是批 1 的第一步。
+   */
+  endpoint: EndpointChoice;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -64,12 +89,22 @@ function parseArgs(argv: string[]): Args {
     throw new Error(`--recovery-decision 只能是 CONTINUE 或 ABORT，收到：${decision}`);
   }
 
+  /**
+   * 【定】`--endpoint` 受**枚举约束**，拼错立刻失败。
+   *
+   * 校验在 `compose.ts` 里（那是全仓唯一写死端点名的地方），`eval/suite`
+   * 调的是同一个函数 —— 抄一份的话，两个入口的枚举迟早会不一致。
+   */
+  const endpoint = parseEndpointArg(argv);
+
   return {
     mode,
     task: get("task") ?? "看看 workspace 根目录里有什么，然后写一份 summary.txt 说明你看到了什么。",
     workspace: resolve(get("workspace") ?? resolve(REPO_ROOT, ".workagent-workspace")),
-    yes: argv.includes("--yes") || argv.includes("--yes-all"),
+    // 决 3：默认放行（有限 auto-grant）。`--confirm` 显式恢复逐次询问。
+    yes: !argv.includes("--confirm"),
     yesAll: argv.includes("--yes-all"),
+    confirm: argv.includes("--confirm"),
     /**
      * 【定】默认开着。
      *
@@ -82,6 +117,7 @@ function parseArgs(argv: string[]): Args {
     runId: resumeId ?? "",
     recoveryDecision: decision as Args["recoveryDecision"],
     recoveryNote: get("recovery-note"),
+    endpoint,
   };
 }
 
@@ -121,6 +157,14 @@ function interactiveApproval(
   yesAll: boolean,
   workspaceRoot: string,
   signal: AbortSignal,
+  /**
+   * 【定】审批走**共用**的 stdin 通道，不再自建 readline。
+   *
+   * 阶段 3 加了运行期插话之后，两个各自 `createInterface` 的消费者会抢同一行
+   * —— 恰好在等审批时敲了一句插话，那一行会被谁吃掉是不确定的。
+   * 见 stdin-channel.ts 的文件头。
+   */
+  stdin: StdinChannel,
 ): ApprovalDecider {
   /**
    * ── E-3：`--yes` 不再是「批准一切」──────────────────────────────────
@@ -129,14 +173,16 @@ function interactiveApproval(
    * 措辞是「应增加基于 effect、路径和 operation 的有限 auto-grant，
    * 并在执行前用 realpath/lstat 重新校验」。
    *
-   * 现在 `--yes` 的语义是「**workspace 内的可逆写，我事先同意**」——
+   * 现在的语义是「**workspace 内、找得回来的写，我事先同意**」——
    * 三条都要满足才自动放行：
    *   ① 作用域落在 workspace 内（realpath 之后，与 R-5 同一道判定）；
-   *   ② 可逆（覆盖写可逆；追加、删除不可逆）；
+   *   ② 不是 IRREVERSIBLE（覆盖写算「找得回来」，追加与删除不算）；
    *   ③ 不是 EXECUTE。
    *
    * 不满足的仍然停下来问。真要恢复旧的「批准一切」，得显式写 `--yes-all` ——
-   * 让那个决定有名字，而不是藏在一个看起来很无害的 `--yes` 后面。
+   * 让那个决定有名字，而不是藏在一个看起来很无害的开关后面。
+   *
+   * 【定】阶段 3 决 3 起这是**默认档位**，`--confirm` 才回到「每一步都问」。
    */
   if (yesAll) {
     return async (a: PreparedAction) => {
@@ -147,9 +193,30 @@ function interactiveApproval(
 
   const autoGrant = (a: PreparedAction): { ok: true } | { ok: false; why: string } => {
     const e = a.resolvedEffect;
-    if (e.effectType === "EXECUTE") return { ok: false, why: "EXECUTE 类操作不在 --yes 的授权范围内" };
-    if (e.reversibility !== "REVERSIBLE") {
-      return { ok: false, why: `${e.reversibility}（不可逆操作需要逐次确认）` };
+    if (e.effectType === "EXECUTE") return { ok: false, why: "EXECUTE 类操作不在自动放行范围内" };
+    /**
+     * ── 档位：只有 IRREVERSIBLE 才逐次问 ──────────────────────────────────
+     *
+     * 【定】`PARTIALLY_REVERSIBLE` 属于放行范围。
+     *
+     * E-3 原文写的是「② 可逆（**覆盖写可逆**；追加、删除不可逆）」——
+     * 也就是说它本来就打算放行覆盖写。但实现写的是
+     * `reversibility !== "REVERSIBLE"` 就拒，而 `write_file` 声明的是
+     * `PARTIALLY_REVERSIBLE`（文件还在，旧内容没了）。
+     *
+     * 后果是：**这条自动放行规则从来没有覆盖过它唯一为之而写的那个工具。**
+     * 2026-08-28 的真实端点实跑撞出来的 —— 模型正确地读完文档、
+     * 正确地生成了汇总，两次写入都被「非交互环境下无人应答」挡掉，
+     * Run 结算成 USER_REJECTED，而全程没有任何一个人拒绝过任何东西。
+     *
+     * 这与 §0.7 记的 U-6 是同一个形状：一条闸门被另一条挡在后面，
+     * 于是它想放行的东西从来没被放行过，而没有人会发现 ——
+     * 因为「被拒绝」看起来完全像是正常工作。
+     *
+     * 【定】线仍然在，只是画在真正不可逆的地方：追加与删除逐次问。
+     */
+    if (e.reversibility === "IRREVERSIBLE") {
+      return { ok: false, why: "IRREVERSIBLE（追加 / 删除这类找不回来的操作需要逐次确认）" };
     }
     // 【定】执行前用 realpath 重新校验一次，与工具内部那道是同一个判定。
     // 授权是在「决定的那一刻」给的，而路径可能在那之后被换掉。
@@ -162,8 +229,42 @@ function interactiveApproval(
     return { ok: true };
   };
 
+  /**
+   * 停下来问一句。
+   *
+   * U-2 / R-2 的一半：等待接上 signal —— 在此之前 Ctrl+C 打不断审批等待，
+   * 用户得再敲一次回车才轮得到取消生效。
+   *
+   * 【定】无 TTY 时按**拒绝**处置，不是按批准。没人应答不能当作默许
+   * （与 ApprovalPolicySnapshot.approvalTimeoutMs 同一个口径）——
+   * 那会让「写操作要人确认」这条闸门在无人值守时自动敞开，
+   * 而无人值守恰恰是最不该敞开的场景。
+   */
+  const ask = async (a: PreparedAction, prefix: string): Promise<ApprovalDecision> => {
+    const e = a.resolvedEffect;
+    finishRendering();
+    stdin.setMode("WAITING_FOR_APPROVAL");
+    try {
+      const line = await stdin.askLine(
+        `${prefix}  是否允许 ${a.toolName} 执行 ${e.effectType} → ${e.scope.value} ？[y/N] `,
+        signal,
+      );
+      if (line === undefined) {
+        return {
+          approved: false,
+          reason: stdin.isInteractive ? "等待被中断" : "非交互环境下无人应答，按拒绝处置",
+        };
+      }
+      const ans = line.toLowerCase();
+      return ans === "y" || ans === "yes"
+        ? { approved: true }
+        : { approved: false, reason: "用户在终端拒绝" };
+    } finally {
+      stdin.setMode("RUNNING");
+    }
+  };
+
   if (autoYes) {
-    const rl = createInterface({ input: process.stdin, output: process.stdout });
     return async (a: PreparedAction) => {
       const grant = autoGrant(a);
       const e = a.resolvedEffect;
@@ -173,40 +274,10 @@ function interactiveApproval(
       }
       finishRendering();
       console.log(`  \x1b[33m--yes 不覆盖这一步\x1b[0m：${grant.why}`);
-      const ans = (
-        await rl.question(`  是否允许 ${a.toolName} 执行 ${e.effectType} → ${e.scope.value} ？[y/N] `, {
-          signal,
-        })
-      )
-        .trim()
-        .toLowerCase();
-      return ans === "y" || ans === "yes"
-        ? { approved: true }
-        : { approved: false, reason: "用户在终端拒绝" };
+      return ask(a, "");
     };
   }
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  return async (a: PreparedAction) => {
-    const e = a.resolvedEffect;
-    finishRendering();
-    /**
-     * U-2 / R-2 的一半：`rl.question` 接上 signal。
-     *
-     * 在此之前 Ctrl+C 打不断审批等待 —— 用户得再敲一次回车才轮得到取消生效。
-     * 这条和「等审批的时间被计入 active 墙钟」是同一条路径上的两个缺口。
-     */
-    const ans = (
-      await rl.question(
-        `\n  是否允许 ${a.toolName} 执行 ${e.effectType} → ${e.scope.value} ？[y/N] `,
-        { signal },
-      )
-    )
-      .trim()
-      .toLowerCase();
-    return ans === "y" || ans === "yes"
-      ? { approved: true }
-      : { approved: false, reason: "用户在终端拒绝" };
-  };
+  return async (a: PreparedAction) => ask(a, "\n");
 }
 
 /** `--list-runs`：只读一张表，不需要模型也不需要凭证。 */
@@ -254,9 +325,50 @@ async function main(): Promise<void> {
   mkdirSync(args.workspace, { recursive: true });
   console.log(`workspace: ${args.workspace}`);
   console.log(`db       : ${args.dbPath}`);
+  /**
+   * 【定】把当前的审批档位**打出来**。
+   *
+   * 决 3 把默认行为从「逐次问」改成了「workspace 内的可逆写自动放行」——
+   * 这是一次对用户可见的行为变更，而没打印的行为变更等于没通知。
+   */
+  console.log(
+    `approval : ${
+      args.yesAll
+        ? "--yes-all，无条件批准一切"
+        : args.confirm
+          ? "--confirm，每一步都问"
+          : "默认：workspace 内的写自动放行；IRREVERSIBLE（追加/删除）与 EXECUTE 仍逐次问；越界写直接拒绝"
+    }`,
+  );
 
   // Ctrl+C 的传播源。审批等待也挂在它上面（U-2）。
   const sigint = new AbortController();
+
+  /**
+   * S1：运行期插话的入口。
+   *
+   * 主循环第 ⓪ 步的排空逻辑（`run-loop.ts`）与 `runtime.interject()`
+   * （`facade/index.ts`）从阶段 1 就都在，**缺的一直只是调用点** ——
+   * 也就是说这条能力写完之后从来没有被任何人触发过。
+   * 这与 P1-1（官方入口不能选端点）是同一个形状：装配完成 ≠ 可达。
+   */
+  let currentRunId = "";
+  /**
+   * 晚绑定：`compose()` 需要 approvalDecider，而 decider 需要 stdin 通道，
+   * 而通道的插话回调需要 runtime —— 三者成环。用一个可变引用打破它，
+   * 而不是把通道拆成两半（拆开就又回到「两个 readline 抢一行」）。
+   */
+  let interjectInto: ((runId: string, text: string) => void) | undefined;
+  const stdin = new StdinChannel({
+    onInterject: (text) => {
+      if (!currentRunId || !interjectInto) {
+        console.log(`  \x1b[33m还没有正在跑的 Run，这句话没有去处\x1b[0m：${text}`);
+        return;
+      }
+      interjectInto(currentRunId, text);
+      console.log(`  \x1b[36m已排队插话\x1b[0m（下一轮编帧时进入上下文）：${text}`);
+    },
+  });
 
   // thunk 只在第一个事件到达时被读，那时下面这两个变量都已赋值。
   let profileRef = "unknown";
@@ -286,16 +398,46 @@ async function main(): Promise<void> {
 
   const composed = compose({
     workspaceRoot: args.workspace,
-    approvalDecider: interactiveApproval(args.yes, args.yesAll, args.workspace, sigint.signal),
+    approvalDecider: interactiveApproval(
+      args.yes,
+      args.yesAll,
+      args.workspace,
+      sigint.signal,
+      stdin,
+    ),
     trace,
     dbPath: args.dbPath,
+    endpoint: args.endpoint,
+    // S10：接管通道是 stdin 三方复用里的第三方（语义在 S1 定死）。
+    handoff: terminalHandoff(stdin, sigint.signal),
   });
+  interjectInto = (runId, text) => composed.runtime.interject(asId<RunId>(runId), text);
   profileRef = `${composed.profile.id}@${composed.profile.observedAt}`;
   modelId = composed.profile.modelId;
+
+  /**
+   * S1：把**解析后**的端点如实打出来。
+   *
+   * 【定】只打 baseUrl 的 host、声明 id 与模型 id，**绝不打印 key**。
+   * 打 host 而不是完整 URL 是刻意的：路径里有时带部署标识，而这一行会被
+   * 贴进 issue 和评测报告。
+   *
+   * 为什么必须打：U-6 的教训是「闸门排在另一个闸门后面等于没有闸门」——
+   * 而更早一层的问题是**当时根本看不出实际连的是哪个端点**。
+   */
+  console.log(`endpoint : ${args.endpoint}（${hostOf(composed.endpointBaseUrl)}）`);
+  console.log(`profile  : ${composed.profile.id}`);
+  console.log(`model    : ${composed.profile.modelId}`);
+  if (!stdin.isInteractive) {
+    console.log(`stdin    : 非交互环境，插话与审批应答不可用（审批按拒绝处置）`);
+  } else {
+    console.log(`stdin    : 运行期直接敲一句话回车 = 插话；审批时回车 = 应答`);
+  }
 
   for (const n of composed.notices) console.log(`⚠️  ${n}\n`);
 
   let runId = args.runId;
+  currentRunId = runId;
   let gen: AsyncGenerator<RunEvent, { terminal: unknown; outcome?: unknown }>;
 
   if (args.mode === "resume") {
@@ -324,11 +466,17 @@ async function main(): Promise<void> {
   let r = await gen.next();
   while (!r.done) {
     const e: RunEvent = r.value;
-    if (!runId) runId = String(e.runId);
+    if (!runId) {
+      runId = String(e.runId);
+      // 插话要知道往哪个 Run 排队。start() 的 runId 是第一个事件才带出来的。
+      currentRunId = runId;
+    }
     renderEvent(e);
     r = await gen.next();
   }
   finishRendering();
+  // 【定】跑完就交还 stdin，否则进程不会退出（readline 持有 stdin 的引用）。
+  stdin.close();
 
   const { terminal, outcome } = r.value as {
     terminal: { reason: string; recoveryItems?: Array<{ what: string; sideEffectState: string }> };
@@ -400,6 +548,59 @@ async function main(): Promise<void> {
   }
 
   process.exit(0);
+}
+
+/**
+ * 终端上的人工接管通道（阶段 3 S10，§20）。
+ *
+ * 它是 stdin 三方复用里的第三方 —— 语义在 S1 就定死了：
+ * `WAITING_FOR_INTERACTION` 状态下的回车 = 接管完成信号。
+ *
+ * 【定】无 TTY 时返回 undefined，**不得当成「做完了」**。
+ * 非交互环境里没有人可以去操作外部世界；假装有人做过，
+ * 会让模型在一个它以为已完成、实际没发生的前提上继续往下走 ——
+ * 那正是 §20.3「完成信号不等于任务成功」要防的事情的更坏版本。
+ */
+function terminalHandoff(stdin: StdinChannel, signal: AbortSignal): HandoffChannel {
+  return {
+    async await(request) {
+      finishRendering();
+      console.log(`\n${"─".repeat(60)}`);
+      console.log(`\x1b[33m需要你接手一步\x1b[0m`);
+      console.log(`\n要做什么：\n  ${request.instructions.split("\n").join("\n  ")}`);
+      console.log(`\n做完之后应该能看到：\n  ${request.expectedCompletion.split("\n").join("\n  ")}`);
+      console.log(
+        `\n\x1b[2m（完成后回车继续；也可以先写一句说明再回车。` +
+          `系统会重新去核实，不会只凭你说完成就往下走。）\x1b[0m`,
+      );
+      console.log("─".repeat(60));
+
+      stdin.setMode("WAITING_FOR_INTERACTION");
+      try {
+        const line = await stdin.askLine("  完成后回车 > ", signal);
+        if (line === undefined) {
+          console.log(
+            stdin.isInteractive
+              ? "  \x1b[33m等待被中断\x1b[0m"
+              : "  \x1b[33m非交互环境，没有人能接管这一步\x1b[0m",
+          );
+          return undefined;
+        }
+        return line.length > 0 ? { note: line } : {};
+      } finally {
+        stdin.setMode("RUNNING");
+      }
+    },
+  };
+}
+
+/** 只取 host —— 完整 URL 的路径里有时带部署标识，而这一行会被贴进报告。 */
+function hostOf(baseUrl: string): string {
+  try {
+    return new URL(baseUrl).host;
+  } catch {
+    return baseUrl ? "（无法解析的 baseUrl）" : "（未配置）";
+  }
 }
 
 /**

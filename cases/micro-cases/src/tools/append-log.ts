@@ -47,7 +47,9 @@ import type {
   ToolSnapshot,
 } from "@workagent/harness-runtime";
 import { asId, makeError } from "@workagent/harness-runtime";
-import { isInsideWorkspace } from "./fs-common.js";
+// 边界判定只有一份实现，住在 tools/common（见那个文件的头注释）。
+// 方向是 cases → tools，不违反边界 6b（那条禁的是 tools → cases）。
+import { isInsideWorkspace, outsideWorkspaceError } from "@workagent/tools-common";
 
 export const appendLogDefinition: ToolDefinition = {
   id: asId("tool_append_log"),
@@ -64,6 +66,7 @@ export const appendLogDefinition: ToolDefinition = {
     },
     required: ["path", "line"],
   },
+  // 【定】本字段当前零消费，授权层推到 bugfix 阶段（阶段 3 方案 S12）。
   requiredCapabilities: ["fs.write"],
   effectResolution: {
     kind: "DECLARATIVE",
@@ -122,14 +125,7 @@ export async function executeAppendLog(
       ok: false,
       output: "",
       sideEffectState: "NO_EFFECT",
-      error: makeError({
-        code: "TOOL_PATH_ESCAPE",
-        source: "TOOL_INPUT",
-        category: "AUTHORIZATION",
-        retryability: "AFTER_MODEL_CORRECTION",
-        sideEffectState: "NO_EFFECT",
-        safeMessage: `路径 "${input.path}" 落在 workspace 之外，拒绝追加`,
-      }),
+      error: outsideWorkspaceError(input.path, "追加"),
     };
   }
 

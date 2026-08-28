@@ -126,4 +126,92 @@ const M002: Migration = {
   `,
 };
 
-export const MIGRATIONS: Migration[] = [M001, M002];
+/**
+ * 003：阶段 3 的大结果外置（§11.4）与 Artifact 登记（§17）。
+ *
+ * ── 为什么这两张表现在才建 ──────────────────────────────────────────────
+ *
+ * M001 的注释说「其余九张不建，因为消费者还不存在」。阶段 3 让其中两个
+ * 消费者出现了：`read_file` / `fetch_url` 会产出超过
+ * `inlineToolResultLimitTokens` 的结果（Blob），三个场景都要产交付物（Artifact）。
+ *
+ * 这正是阶段 3 §1.1 的顺序：**先建工具面，让机制被真需求逼出来** ——
+ * 而不是先实现 Port 再找用例（D-14 反复警告的「盲写」）。
+ *
+ * ── blobs：内容寻址 ────────────────────────────────────────────────────
+ *
+ * 【定】主键是内容 hash，不是 ref。同一份内容被两个工具产出两次时
+ * 只存一份，而两次的 ref 都指得到它。大结果动辄几百 KB，
+ * 按调用存会让库在一个长 Run 里胀几十倍。
+ *
+ * 【定】blob 与 Artifact 是**两回事**（§17【定】：Runtime Blob 不自动升级
+ * 为 Artifact）。blob 是「一次工具调用的结果太大，先放一边」；
+ * Artifact 是「这是本次 Run 的交付物」。自动升级会把用户自己放进 workspace
+ * 的文件误当成交付物。
+ *
+ * ── artifacts：版本链 ＋ Tombstone ＋ lineage ────────────────────────────
+ *
+ * 【定】这不是「实现现成接口」，是接口重设计。原来的
+ * `register(input: unknown)` / `markVerified(id, ok)` 承载不了 §17 的
+ * 版本链、Tombstone、lineage、来源 Run 关联与 Deliverable-Verified 标记。
+ *
+ * 版本用 (logical_id, version) 表达而不是原地更新：内容变化形成**新版本**，
+ * 旧版本仍然可读 —— 「上一版交付物长什么样」是事后复盘最常问的问题之一。
+ * 删除写 Tombstone 而不是 DELETE，理由同构：一次误删之后，
+ * 「它曾经存在过」这条事实比「它现在没了」更重要。
+ */
+const M003: Migration = {
+  version: 3,
+  name: "stage3_blobs_and_artifacts",
+  sql: `
+    -- ── Blob：大结果外置（§11.4）────────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS blobs (
+      content_hash TEXT PRIMARY KEY,
+      size_bytes   INTEGER NOT NULL,
+      content      TEXT    NOT NULL,
+      created_at   INTEGER NOT NULL
+    );
+
+    -- ref → hash 的映射。ref 是模型看得见的句柄（read_blob 的入参），
+    -- hash 是内容的身份。分开是因为同一份内容可以有多个 ref
+    -- （两次调用碰巧结果相同），而模型引用的是「那一次调用的结果」。
+    CREATE TABLE IF NOT EXISTS blob_refs (
+      ref          TEXT PRIMARY KEY,
+      content_hash TEXT    NOT NULL,
+      run_id       TEXT,
+      tool_name    TEXT,
+      created_at   INTEGER NOT NULL,
+      FOREIGN KEY (content_hash) REFERENCES blobs (content_hash)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_blob_refs_run ON blob_refs (run_id);
+
+    -- ── Artifact：交付物登记（§17）──────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS artifacts (
+      artifact_id   TEXT PRIMARY KEY,
+      -- 版本链的锚。同一个逻辑产物的多个版本共享它。
+      logical_id    TEXT    NOT NULL,
+      version       INTEGER NOT NULL,
+      -- 【定】关联来源 Run。没有它，事后无法回答「这份东西是哪次跑出来的」。
+      run_id        TEXT    NOT NULL,
+      role          TEXT    NOT NULL,   -- DELIVERABLE / INTERMEDIATE / RESULT
+      kind          TEXT    NOT NULL,   -- json / zip / text / …
+      path          TEXT,
+      content_hash  TEXT    NOT NULL,
+      size_bytes    INTEGER NOT NULL,
+      -- lineage：这份产物是从哪些 artifact 派生出来的（JSON 数组）。
+      derived_from  TEXT    NOT NULL DEFAULT '[]',
+      -- 【定】Tombstone 而不是 DELETE。
+      tombstoned_at INTEGER,
+      -- Artifact 级 Verification 的结果。NULL = 还没验过。
+      verified      INTEGER,
+      verify_detail TEXT,
+      created_at    INTEGER NOT NULL,
+      UNIQUE (logical_id, version)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_artifacts_run ON artifacts (run_id);
+  `,
+};
+
+export const MIGRATIONS: Migration[] = [M001, M002, M003];

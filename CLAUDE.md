@@ -16,19 +16,46 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 当前状态
 
-**阶段 2（持久化与 Resume）已收口，可以进阶段 3。** 依据 [阶段 2 实施方案 V20260826-03](sxw_aicoding/实施方案设计/阶段2实施方案_V20260826.md) 四批 18 步，
-再加 2026-08-27 的收口批次（两轮代码评审后修 8 项，见[存量清单 §0.5](sxw_aicoding/存量BUG/阶段1存量问题清单_V20260824.md)）。
+**阶段 3（通用能力面）开发完成（2026-08-28）。** 依据
+[阶段 3 实施方案 V20260828-02](sxw_aicoding/实施方案设计/阶段3实施方案_V20260828-02.md) 四批 S1…S14。
 
-- **八条验收脚本 51 条判据全绿**，`tsc --noEmit` 干净，`eval:suite` pass^3 成立
-- **跨进程 resume 成立**：真 `kill -9` 之后另一个进程只凭 SQLite 接上并跑到终态
-- 15 个 Port（阶段 2 新增 `RunStorePort`）；SQLite 四张表；`node:sqlite` 零新增依赖
-- 五条边界 grep 全部守住（阶段 2 新增第 5 条：`node:sqlite` 只在 `packages/store-sqlite/`）
+> **范围在开工前被决 1 改写过**：原计划是「Case 01 网页归档」，改成**通用能力面**，
+> 网页归档移出本阶段（Case 是尺子，不是模具）。评测与 Eval 按决 4 统一推到开发完成之后。
 
-**阶段 2 关掉了哪些存量**：R-1 / R-2 / R-3 / R-5 / U-1 / U-2 / U-5 / U-6 / U-7 / U-9 / M-1…M-7 / M-9 前半 / D-1 / D-4 / 验收脚本五条缺口 / E-1…E-8。
-**明确不做**：R-7 与 U-8 的 kind 值域扩展（决 2）、U-3（阶段 3）、M-8、M-9 后半、P3-21（末块闭合，标【验】等反例端点）。
+- **12 条验收脚本 86 条判据全绿**，`tsc --noEmit` 干净
+- 新增 `tools/` 层，默认装配 **12 个工具**（8 场景 ＋ 2 机制 ＋ 2 测量）；固定开销起步价 ≈ 2160 token
+  （`fixedOverheadTokens()` = 工具数 × 180。此前各处文档写的「11 个 / 1980」是同一处算术错误：
+  8＋2＋2 = 12，收口批统一更正）
+- `BlobStorePort` ＋ 外置 ＋ `read_blob` 取回；`ArtifactStorePort` **重设计** ＋ Artifact 级 Verification
+- Progress Guard（只做「在原地打转」检测）；人工接管全链路（`WAITING_FOR_INTERACTION` 的持久化 / resume / 等待扣除）
+- **六条**边界 grep 全部守住（阶段 3 新增第 6 / 6b 条，且第 6b 条做过判别力实测）
 
-> ⚠️ **两条退出门槛仍开着，都要花钱**：跨进程 resume 的真实端点实跑、DeepSeek 对照端点实跑。
-> 见 [Roadmap §4](sxw_aicoding/阶段roadmap/WorkAgent阶段Roadmap_V20260823.md) 的门槛表。
+**阶段 3 关掉了哪些存量**：P1-1 / `interject` CLI 入口 / N-8 / P3-26 / U-3 / U-8 / R-2 派生缺口。
+**明确不做**：`CapabilityLeasePort`（决 5，见 [ADR-0005](sxw_aicoding/ADR/0005-PARKED-lease-不做的理由.md)）、
+`SecretResolverPort`、`cases/web-archive/`（决 1）、Eval 与 Replay（决 4）、
+Planner / Memory / Sub-agent（决 6）、通用 Completion Gate（论据被探针推翻）。
+
+> ⚠️ **两条退出门槛仍开着，都要花钱**（属评测范围，按决 4 不阻塞阶段 3）：
+> 跨进程 resume 的真实端点实跑、DeepSeek 对照端点实跑（当前 401，已核实是端点侧拒绝）。
+
+> ⚠️ **一条新登记的欠账**：`requiredCapabilities` **逐工具零消费** ——
+> 12 个工具全都声明了它，无人读。已在每个声明处留注释，走 bugfix 阶段。
+> 见[存量清单 §0.6](sxw_aicoding/存量BUG/阶段1存量问题清单_V20260824.md) 的 S3-1。
+
+### 收口修复批次（2026-08-28）
+
+三份独立评审（kimi / zocode / pi）逐条回源码复核后，**已确认成立的全部修完**，
+见[存量清单 §0.7](sxw_aicoding/存量BUG/阶段1存量问题清单_V20260824.md)。它关掉的两类：
+
+1. **4 条判据自身没有判别力** —— Artifact 的 hash 检查是**内存自比**（恒真）、
+   `verify:artifact` C 段、`verify:progress` D 段、`verify:scenarios` 总判定。
+   后三条的共同形态是**抬头换了、verdict 没换**：段标题写着新判据，断言还是旧的那个。
+2. **7 条声明与实现不符** —— `write_file` 的 `isIdempotent: false` 是为测量而标的
+   （`types/tool.ts` 自己拿它当反面教材，见下）、`read_file`/`search` 的 HEARTBEAT 死声明、
+   Guard「还活着」半边只写不读、`MAX_REDIRECTS` 死常量、README 停在阶段 1 口径等。
+
+**三条判别力实测在实施时真跑过并翻红**：把 hash 检查改回内存自比、删掉 `search` 的
+`onProgress`、删掉 `StdinChannel` abort 时清 waiter 那一行 —— 各自对应的判据当场变红。
 
 ### 改验收脚本前必读
 
@@ -44,9 +71,14 @@ D-25 决定不写单测，这些脚本就是本项目唯一的测量仪器；**�
 `lastSequence` 和 `resumeBranchCounts` 都在这里栽过。加字段时必须同时改它。
 
 > ⚠️ **`.env` 的 `dashscope_model` 与端点声明不一致会在启动时被挡下**（M-5）。
-> 当前 `.env` 写的是 `deepseek-v4-flash`，而百炼声明是 `qwen3.7-plus` ——
 > 这个值在阶段 1 一直被静默忽略（实际用的是声明里的），阶段 2 把它变成了显式错误。
-> 二选一：把 `.env` 改回 `qwen3.7-plus`，或为 `deepseek-v4-flash` 补一份端点能力声明。
+> 二选一：把 `.env` 改成声明里的 modelId，或为你想用的模型补一份端点能力声明。
+>
+> **同族的第三条，阶段 3 撞到的**：E-3 的自动放行规则要求 `REVERSIBLE`，
+> 而 `write_file` 声明 `PARTIALLY_REVERSIBLE` —— **那条规则从来没覆盖过它唯一为之而写的工具**。
+> 真实端点实跑才撞出来：模型正确做完了全部工作，两次写入被「无人应答」挡掉，
+> 结算 `USER_REJECTED`，而全程没有任何人拒绝过任何东西。
+> **一条闸门排在另一条后面，等于没有闸门** —— 新增校验都要有能单独触发它的判据。
 
 GUI 在阶段 4，阶段 1–3 全部 headless。
 
@@ -59,9 +91,19 @@ npm run dev -- --task "看看根目录里有什么，然后写一份 summary.txt
 npm run dev -- --list-runs         # 库里有哪些 Run
 npm run dev -- --resume <runId>    # 接上一个没跑完的 Run
 npm run dev -- --resume <runId> --recovery-decision CONTINUE --recovery-note "已人工确认"
+npm run dev -- --endpoint deepseek --task "..."   # 换对照端点（受枚举约束，拼错立刻失败）
 ```
 
-`--yes` **只自动批准「workspace 内的可逆写」**（E-3），其余仍逐次问；要旧的「批准一切」得显式写 `--yes-all`。
+**审批档位（阶段 3 决 3 改过默认值）**：默认**自动放行 workspace 内、非 IRREVERSIBLE 的写**；
+`append_log` 这类不可逆操作与 EXECUTE 仍逐次问；**越界写由 Policy 直接拒绝，不给审批机会**。
+`--confirm` 恢复「每一步都问」；`--yes-all` 是显式的「批准一切」。
+> `--yes` 保留为默认档位的显式写法（不破坏既有命令行）。
+> 【定】改这段前先读 `main.ts` 里 `autoGrant` 的注释 —— 那条规则曾经因为
+> `REVERSIBLE` vs `PARTIALLY_REVERSIBLE` 的一字之差，从来没覆盖过 `write_file`。
+
+**运行期交互**：TTY 下 stdin 是**单一通道**，按「谁在等」分派三种语义 ——
+RUNNING 敲一句话回车 = 插话；等审批时回车 = 应答；等接管时回车 = 完成信号。
+非 TTY 优雅降级（审批按**拒绝**处置，接管按「没有人」处置，都不挂起）。
 `--workspace <path>` 指定工作目录（默认 `.workagent-workspace`）；`--db <path>` 指定 SQLite 库（默认 `.workagent-state/runs.db`）；
 `--trace <file>` 指定事件流落盘位置（默认按 runId 定名 `.workagent-runs/<runId>.jsonl`，**resume 续写同一文件**），`--no-trace` 关闭。
 
@@ -74,8 +116,14 @@ npm run verify:persistence         # 跨进程恢复：真 kill -9 之后能不�
 npm run verify:budget              # 预算八轴逐条撞墙 ＋ 墙钟拆分 ＋ 时间事实段级冻结
 npm run verify:crash               # 三个崩溃窗口 × 三条恢复分支（决 6 的判别力在这里）
 npm run verify:drift               # 端点漂移检测 ＋ 对照端点装配 ＋ resume 端点一致性闸门（U-1 / U-6 / P1-1）
-npm run verify:all
+npm run verify:tools               # 批 1：六条边界 grep ＋ 两类声明 ＋ 分页非截断 ＋ 组合器三方法路由 ＋ 读黑名单
+npm run verify:artifact            # 批 2：外置与逐字取回 ＋ URL 护栏 ＋ 产物登记与第二层验证 ＋ role 分流
+npm run verify:progress            # 批 3：进展 ＋ 无进展 ＋ 真实慢工具取消 ＋ 人工接管三条状态闭合
+npm run verify:scenarios           # S13：三场景 smoke（决 7 的判据）＋ 三条护栏在场性总校验
+npm run verify:all                 # 12 条脚本 / 86 条判据
 ```
+
+`verify:scenarios -- --live` 用真实端点跑同样三个任务（**花钱，不在 verify:all 里**）。
 
 Eval 层（不复用生产结算路径，§24.1【定】）：
 
@@ -138,8 +186,14 @@ while (true) {
 5. **循环不读取端点能力声明**（本文件出现 `profile.` 即违规）。
 
 阶段 2 在第 ① 步之前多了一次 `checkBudgets()`（八条轴一次判完，R-1），
-在第 ② 步之后多了一次漂移观测（U-1）——两者都收在纯函数/独立类里，
-循环只消费判定结果，纪律五条不变。
+在第 ② 步之后多了一次漂移观测（U-1）；阶段 3 在第 ④ 步之后多了一次
+Progress Guard 判定（U-3，无进展 → 具名 Terminal `NO_PROGRESS`），
+并在批事件流上多了两个消费点（`ToolProgress` → Guard；
+`InteractionRequested/Completed` → 等待时间扣除）。
+
+**三次扩展都收在纯函数/独立类里，循环只消费判定结果，纪律五条一条没动。**
+【定】允许动的是「新增等待分支 / 新增事件消费点 / 新增等待扣除的事件对」，
+每一处都必须由 `nextState()` 构造完整 `LoopState`、带具名 reason、在 verify 段里有判据。
 
 `Terminal` ≠ Run 终结：`RECOVERY_REQUIRED` 是明确的**非终态**，不结算 outcome，`StartResult.outcome` 为 `undefined`。
 
@@ -153,14 +207,27 @@ while (true) {
 
 `LoopState` 因此**不需要可序列化**（可以放 Promise / AbortController / 完整 Message[]）——这是删掉纯 Kernel 后剩下的唯一自由度。代价：崩溃时正在执行的工具会重跑，「工具跑没跑」在 transcript 上不可区分。**这把「Tool 是否幂等」从可选属性变成了恢复正确性的前提。**
 
-三条分支与三个 Micro Case 工具一一对应（`cases/micro-cases/`）：
+三条分支与工具形态的对应（阶段 3 后）：
 
-| 工具 | 性质 | 分支 |
-|---|---|---|
-| `list_dir` | 只读、快、幂等（结构化 JSON ＋ cursor 分页） | 一：真的重新执行 |
-| `write_note` | 可控慢（`delay_ms`）、可验证、非幂等 | 二：观察「绝对」目标状态 |
-| `append_log` | 非幂等、执行后不可验、**相对**操作 | 二或三：**取决于有没有拍到执行前指纹** |
-| `now` | 只读、幂等（阶段 2 新增，时间事实的**补充**） | 一 |
+| 工具 | 包 | 性质 | 分支 |
+|---|---|---|---|
+| `list_dir` / `stat` / `read_file` / `search` / `now` / `fetch_url` / `read_blob` | tools/common | 只读、幂等 | 一：真的重新执行 |
+| `write_file` | tools/common | **幂等**（覆盖写同样内容两次 == 一次） | 一 |
+| **`edit_file`** | tools/common | **真的非幂等** ＋ 相对操作（`requiresPreFingerprint: true`） | 二：**唯一天然落在分支二的场景工具** |
+| `request_handoff` | tools/common | 只读、幂等；`waitsForHumanInteraction` | 一 |
+| `append_log` | cases/micro-cases | 非幂等、执行后不可验、**相对**操作 | 二或三：**取决于有没有拍到执行前指纹** |
+| `slow_write` | cases/micro-cases | 可控慢的**写**（`delay_ms`） | 一（幂等，与 `write_file` 同理） |
+
+> **收口批改过 `write_file` 那一行。** 它此前声明 `isIdempotent: false` 落分支二，
+> 而注释自己承认那是「为了让分支二有**通用工具**可测」—— 与把 `delay_ms` 赶出这个工具
+> 是同一条纪律（能力面不得被测量需求反向定义），只是藏在一个布尔字段里。
+> 后果不是纸面的：`facade` 的分支判定里 `isIdempotent` 是**第一个**判别项，
+> 于是最常用的写工具会把 §18.2 的分支分布系统性带偏。
+> `verify:crash` / `verify:resume` 的分支二载体同批换成 `edit_file`。
+
+`edit_file` 让 §2.4 的组合器路由第一次被**真正需要**：`CompositeVerifier` 漏路由
+`observePre`，它会静默从分支二退化到分支三，**盘上看不出来、没有任何报错**。
+`verify:tools` E 段对这条做判别力实测（改坏路由必须翻红）。
 
 **【定】阶段 2 起，分支判据是 Action 级事实，不是工具的静态声明（决 6）。**
 阶段 1 用 `verification.mode !== "NONE"` 回答「崩溃后能不能观察」，而那个字段说的是
@@ -189,17 +256,28 @@ isBlockClosed     形状提供事件          端点提供有无
 
 主力端点是**百炼 Anthropic 形状 `qwen3.7-plus`**（D-16）。选它而不是评分更高的 DeepSeek，因为它**零协议兜底**（缺 tool_result、错 tool_call_id 一律 200 放行）且服务端无状态——用一个什么都不校验的端点开发，能逼出自持逻辑的全部漏洞。`compose.ts` 是全仓唯一写死端点名的地方。
 
-### 五条边界（有机械判据，改动后 grep 复核）
+### 六条边界（有机械判据，改动后 grep 复核）
 
 ```bash
-grep -rn "@anthropic-ai/sdk" packages apps cases     # 1. Provider SDK 只在形状适配器里
-grep -rn "dashscope" packages/harness-runtime/src    # 2. 端点名不进 Runtime 代码
-grep -n "profile\." packages/harness-runtime/src/loop/run-loop.ts  # 3. 主循环不读端点声明（仅注释命中）
-grep -rn "micro-cases" packages/harness-runtime/src  # 4. Runtime Core 不 import Case Package
-grep -rn "node:sqlite" packages apps cases adapters  # 5. 只允许 packages/store-sqlite/ 命中
+grep -rn "@anthropic-ai/sdk" packages apps cases tools      # 1. Provider SDK 只在形状适配器里
+grep -rn "dashscope" packages/harness-runtime/src            # 2. 端点名不进 Runtime 代码
+grep -n "profile\." packages/harness-runtime/src/loop/run-loop.ts   # 3. 主循环不读端点声明（仅注释命中）
+grep -rnE "micro-cases|tools-common" packages/harness-runtime/src   # 4. Runtime Core 不 import 任何工具实现
+grep -rn "node:sqlite" packages apps cases adapters tools    # 5. 只允许 packages/store-sqlite/ 命中
+grep -rnE "@workagent/tools-|tools/common" packages adapters # 6. ★阶段 3：Runtime 与适配器不得依赖工具包
+grep -rnE "@workagent/micro-cases|cases/" tools/             # 6b. ★阶段 3：通用工具不得依赖任何 Case 包
 ```
 
+**`verify:tools` A 段机械跑这六条**，不要手工 grep 了事 —— 它还会过滤注释行
+（这些文件里到处在引用边界规则本身），并在 A2 段做**判别力实测**：
+往 `tools/common` 注入一行对 Case 包的 import，第 6b 条必须当场翻红并指出行号。
+
 第 5 条是阶段 2 新增：`node:sqlite` 是 Node 22.5 才引入的年轻 API，调用面收在一个包里，将来 API 变了只改一处。
+
+第 4 条阶段 3 从「不 import Case Package」推广为「**不 import 任何工具实现**」。
+第 6b 是「通用」这个词的机械含义：**通用工具一旦依赖某个 Case，它就不通用了**，
+而这件事从代码上看不出来。注意它的模式**不是**方案里写的 `"cases/"` ——
+那个抓不到 `import … from "@workagent/micro-cases"`，而包名 import 恰恰是最典型的违规形态。
 
 前两条是研究问题「端点差异能否被完全挡在主循环之外」的机械判据。判据要区分**注释、类型定义与真实依赖**——`ApiShape` 这类类型定义命中不算违规。
 
@@ -225,21 +303,40 @@ packages/harness-runtime/    Layer 3 全部
   src/action/                Effect 解析、Policy、批结算
   src/verification/          Verifier 与 outcome 结算
   src/model/capability/      端点能力声明的加载、冻结与漂移检测
-  src/ports/                 14 个 Port 接口（★ 标记的 10 个已实现）
+  src/ports/                 15 个 Port ＋ 阶段 3 新增的 ArtifactCheckerPort
+                             （阶段 3 后只剩 CapabilityLease / SecretResolver 未实现，各有理由）
+  src/loop/progress-guard.ts ★阶段 3。只回答「在原地打转吗」；「还活着吗」那半边
+                             收口批删了（进展是批结算时才排空的，时间戳判不了存活）
   src/facade/                HarnessRuntime：start / resume / cancel / interject / inspect
 packages/store-sqlite/       ★阶段 2。唯一允许 import node:sqlite 的地方
   src/migrations/            单一 runner，固定顺序（§26.3【定】）
   src/transcript-store.ts    TranscriptStorePort 的 SQLite 实现（接口一字未改）
   src/run-repository.ts      RunStorePort：RunSpec / AgentSpecSnapshot / status
+  src/blob-store.ts          ★阶段 3。内容寻址；get 按行**且按字符**分页（见下）
+  src/artifact-store.ts      ★阶段 3。版本链 / Tombstone / lineage / role
 packages/testkit/            fake-endpoint-profile、fake-clock、crash-harness（真 kill -9）等
 eval/                        ★阶段 2。graders / suite / fixtures
                              【定】只经 Facade，不依赖 Runtime 私有类，不读 RunOutcome 判成败
 adapters/shape-anthropic-messages/   唯一允许 import Provider SDK 的地方
 adapters/endpoint-profiles/  端点行为的**数据**形态，不是代码
-cases/micro-cases/           三个工具（见上表）
-apps/cli/                    Composition Root（compose.ts）＋ 入口 ＋ 四条验收脚本 ＋ 一次性探针
+tools/common/                ★阶段 3。Case 无关的通用能力面（@workagent/tools-common）
+  src/fs/                    list_dir stat read_file search write_file edit_file
+  src/fs/fs-common.ts        **唯一一份**边界判定与 fs 错误分类（cases/ 反过来 import 它）
+  src/fs/read-guard.ts       读黑名单（决 3 护栏 1，**必须同时覆盖 read_file 与 search**）
+  src/net/                   fetch_url ＋ url-guard（私网拒绝，DNS 解析后判 ＋ 重定向终点再判）
+  src/mech/                  read_blob / request_handoff —— 机制工具，声明义务不同
+  src/artifact-checks/       JSON / ZIP / 编码 / hash 四项。**不做「Markdown 可解析」**（恒绿）
+cases/micro-cases/           只剩 append_log 与 slow_write —— **测量工具**，不是能力
+apps/cli/                    Composition Root（compose.ts）＋ 入口 ＋ 12 条验收脚本 ＋ 一次性探针
+  src/composite.ts           ★阶段 3。工具包组合器。【定】必须路由 Verifier 的**三个**方法
+  src/stdin-channel.ts       ★阶段 3。**单一** readline，按「谁在等」分派三种语义
   src/trace/file-sink.ts     事件流落 JSONL（header / event / footer 三种行）
 ```
+
+**`read_blob` 为什么要按字符分页**：被外置的是**工具结果**，而工具结果几乎都是
+**一行 JSON** —— 一个 64KB 的 `read_file` 结果 `totalLines` 就是 1。只按行分页的话，
+模型请求 100 行会拿回整整 64KB，**刚外置掉的东西原样搬回上下文，外置等于白做**。
+所以还有一层字符预算，超长单行按字符切片并给 `nextLineOffset`。这仍然是分页，不是截断。
 
 单向依赖（`tsconfig.json` 的 paths 是它的编译期表达）：`apps → packages/adapters/cases`，`Runtime → Ports → Adapters`。禁止反向，禁止 Runtime → Case Package、主循环 → Provider SDK、Context 模块 → Provider SDK、形状适配器 → 端点特定常量。
 
@@ -252,15 +349,18 @@ apps/cli/                    Composition Root（compose.ts）＋ 入口 ＋ 四�
 | [架构设计 V05](sxw_aicoding/架构设计/WorkAgent架构设计_V20260823_05.md) | **当前实现依据**。代码注释里的 `V05 §x.y` 都指向它 |
 | [上位基线 v0.4](sxw_aicoding/方案讨论/WorkAgent目标定位与技术架构三次对焦讨论进展.md) | 项目目标与上位原则，**与架构设计冲突时以它为准** |
 | [阶段 Roadmap](sxw_aicoding/阶段roadmap/WorkAgent阶段Roadmap_V20260823.md) | 各阶段研究问题与退出门槛 |
-| [阶段 1 存量问题清单](sxw_aicoding/存量BUG/阶段1存量问题清单_V20260824.md) | 剩余 29 项，阶段 2 设计输入。§0.2 记录 2026-08-25 修掉的 9 项，§0.2 追补是评审后补的三项，§0.3 是同批新发现 |
+| [存量问题清单](sxw_aicoding/存量BUG/阶段1存量问题清单_V20260824.md) | **按阶段追加，不是只管阶段 1**。§0.4 阶段 2、**§0.5 阶段 2.5 收口、§0.6 阶段 3**（关 7 项、不做 4 项、新登记 S3-1…S3-5） |
 | [Atlas 阶段 1 Agent 评测报告](评测/Atlas阶段1_Agent评测报告_20260824.md) | 真实端点单任务评测（84/100）。它暴露的四项已于 2026-08-25 修完 |
 | [阶段 1 Bugfix 批次评审](sxw_aicoding/代码评审/2026-08-25/阶段1Bugfix批次评审-zcode.md) | 对上述修复批次的评审。逐条复核结论见存量清单 §0.2 追补 |
 | [阶段 1 实施方案](sxw_aicoding/实施方案设计/阶段1实施方案_V20260823.md) | 分步计划与不得绕过清单 |
 | [**阶段 2 实施方案 V20260826-03**](sxw_aicoding/实施方案设计/阶段2实施方案_V20260826.md) | **阶段 2 的实现依据**。§0 七个决定、§0.3 十七条修订记录、§7 的 36 项处置映射 |
 | [阶段 2 方案评审](sxw_aicoding/方案评审/2026-08-26/阶段2实施方案评审-zcode.md) | 逐条核源码的评审，P1 四条已吸收进方案 §0.3 |
+| [**阶段 3 实施方案 V20260828-02**](sxw_aicoding/实施方案设计/阶段3实施方案_V20260828-02.md) | **阶段 3 的实现依据**。§0 七个决定（决 2 / 决 3 有修订）、§4 十四条不得绕过、§5 结构性退出门槛 |
+| [阶段 3 方案评审](sxw_aicoding/方案评审/2026-08-28/) | 两份（zcode / pi）。含一条**被驳回**的：pi 维度 6 说 R-1 / R-2 未修是事实错误，但它指向的后果成立，已并入 S10 |
+| [探针记录](sxw_aicoding/WorkAgent调研/探针记录/) | 花钱探针的**原始输出**。`probe-requirement-extraction` 推翻了回归评测 §5.1 的归因 |
 | `WorkAgent调研/ProviderProtocolFacts_*.md` | Spike 0 三轮实测事实（75 份证据 / 4 个端点） |
 | `代码评审/` | 按日期分目录。`2026-08-24/` 两份阶段 1 评审；`2026-08-25/` 一份 Bugfix 批次评审 |
-| `ADR/` | 决策记录。阶段 2 的三份已写：[0001 outcome.kind](sxw_aicoding/ADR/0001-outcome-kind-不区分是谁没做成.md)、[0002 恢复可观测性](sxw_aicoding/ADR/0002-恢复可观测性改为-action-级事实.md)、[0003 时间事实粒度](sxw_aicoding/ADR/0003-受信时间事实冻结到执行段.md)；**阶段 1 的四份仍待补写** |
+| `ADR/` | 决策记录。阶段 2 三份（[0001](sxw_aicoding/ADR/0001-outcome-kind-不区分是谁没做成.md) / [0002](sxw_aicoding/ADR/0002-恢复可观测性改为-action-级事实.md) / [0003](sxw_aicoding/ADR/0003-受信时间事实冻结到执行段.md)）＋ 阶段 3 三份（[0004 工具归属](sxw_aicoding/ADR/0004-通用工具归属与两类分拣标准.md) / [0005 lease 不做](sxw_aicoding/ADR/0005-PARKED-lease-不做的理由.md) / [0006 读放开的护栏](sxw_aicoding/ADR/0006-读放开的护栏边界.md)）；**阶段 1 的四份欠了两个阶段了** |
 | `spikes/s0-provider-protocol/` | 一次性探针，已完成，不进主干依赖（`tsconfig.json` 已 exclude） |
 
 V04 及更早的架构设计、`V03_Spike0回填清单.md` **不再作为实现依据**，只作过程记录。

@@ -30,11 +30,12 @@ import { executeBatch, type BatchOutcome } from "../action/settle-batch.js";
 import { settleOutcome, settleWallOutcome } from "../verification/settle-outcome.js";
 import { ToolRegistry } from "../tool-runtime/index.js";
 import type { ApprovalDecider, VerificationResult } from "../types/tool.js";
-import type { RecoveryItem, ResumableRunFacts } from "../types/run.js";
+import type { ArtifactCheckFact, RecoveryItem, ResumableRunFacts } from "../types/run.js";
 import { makeActionFactEntry, makeRunFactsEntry } from "../transcript/index.js";
 import { checkBudgets, hardLimitIsTurns } from "../budget/index.js";
 import { DriftDetector, EndpointDriftError } from "../model/capability/drift-detector.js";
 import { RunInterrupts } from "./interrupt/index.js";
+import { ProgressGuard } from "./progress-guard.js";
 import { makeError } from "../types/error.js";
 
 export interface RunLoopDeps {
@@ -118,6 +119,9 @@ export async function* runLoop(
   //    否则上一段跑出来的 Verification 与未销账的 RecoveryItem 全部蒸发。
   const verifications: VerificationResult[] = [...(deps.resumeFrom?.verifications ?? [])];
   const recoveryItems: RecoveryItem[] = [...(deps.resumeFrom?.recoveryItems ?? [])];
+  // 阶段 3 S8：第二层 Verification 的事实。与 verifications 分开累计，
+  // 理由见 ResumableRunFacts.artifactChecks 的注释（结算映射按 role 分流）。
+  const artifactChecks: ArtifactCheckFact[] = [...(deps.resumeFrom?.artifactChecks ?? [])];
 
   /**
    * 模型最后说的那段话，用来填 `RunOutcome.summary`（存量清单 R-7）。
@@ -175,6 +179,21 @@ export async function* runLoop(
    * （本文件不得出现 `profile.`）因此仍然成立。
    */
   const drift = new DriftDetector(ports.protocol.profile);
+
+  /**
+   * ── U-3：Progress Guard（阶段 3 S9）────────────────────────────────────
+   *
+   * 【定】它是「新增事件消费点」，属于不得绕过 #11 里**允许动**的那一类：
+   * 循环纪律五条一条没变 —— 它的终止仍然走 `finish()` 的具名 Terminal，
+   * 它不读端点声明，它不把进展塞进 LoopState。
+   *
+   * 【定】它只回答**一个**问题：在原地打转吗（同工具同输入同 digest 连续 N 次）。
+   * §16.2 的另一半「还活着吗」本阶段不做 —— `ToolProgress` 是批结算时才被
+   * 排空的，时间戳不是进展发生的时刻，拿它判存活会得到自信的错误答案。
+   * 阶段 3 收口批把那半边（一个只写不读的 `lastProgressAt`）删掉了，
+   * 理由与替代方案见 progress-guard.ts 的文件头。
+   */
+  const progress = new ProgressGuard();
   /**
    * 每个字段只报一次。
    *
@@ -225,6 +244,7 @@ export async function* runLoop(
       budgetUsage: state.budgetUsage,
       verifications,
       recoveryItems,
+      artifactChecks,
       // D-2：事件不落 transcript，高水位只能显式存。见 ResumableRunFacts 的说明。
       lastSequence,
       /**
@@ -281,7 +301,7 @@ export async function* runLoop(
    * 在可观测侧的落点，不是可选的装饰。
    */
   async function* finish(terminal: Terminal): AsyncGenerator<RunEvent, RunLoopResult> {
-    const settleInput = { verifications, recoveryItems, summary: lastAssistantText };
+    const settleInput = { verifications, recoveryItems, artifactChecks, summary: lastAssistantText };
     const outcome =
       terminal.reason === "COMPLETED" || terminal.reason === "COMPLETED_WITH_LIMITS"
         ? settleOutcome(settleInput)
@@ -492,6 +512,12 @@ export async function* runLoop(
       totalTokens: compiled.totalTokens,
       fixedOverheadTokens: compiled.fixedOverheadTokens,
       compacted: compiled.compactionApplied.length > 0,
+      // 【定】不可信内容流入是**审计事实**，必须落在 Trace 上（见事件类型的注释）。
+      // 这里只是把 compile 已经算好的摘要转述出去 —— 循环不做任何 trust 判定。
+      trust: {
+        hasExternalUntrusted: frame.trustSummary.hasExternalUntrusted,
+        untrustedItems: frame.trustSummary.counts.EXTERNAL_UNTRUSTED,
+      },
     });
 
     // ── ② 调模型
@@ -683,7 +709,7 @@ export async function* runLoop(
         budgetUsage: { ...budget, turns: state.turnCount + 1 },
         turnCount: state.turnCount + 1,
       };
-      const r = settleOutcome({ verifications, recoveryItems });
+      const r = settleOutcome({ verifications, recoveryItems, artifactChecks });
       // 走 finish() 而不是直接构造返回值 —— 否则这条最常见的出口
       // 会绕过事实落盘，resume 读到的预算永远停在上一轮。
       return yield* finish(
@@ -717,6 +743,13 @@ export async function* runLoop(
         signal: interrupts.signal,
         workspaceRoot: deps.workspaceRoot,
         hasUntrustedContext: frame.trustSummary.hasExternalUntrusted,
+        // §11.4：大结果外置。阈值来自**上下文预算**，不是端点协议上限 ——
+        // 循环只是把它透传下去，不读端点声明（纪律第 5 条不变）。
+        blobs: ports.blobs,
+        inlineResultLimitTokens: spec.agentSpec.contextPolicy.inlineToolResultLimitTokens,
+        // §17 / §10.4：Artifact 登记与第二层 Verification。
+        artifacts: ports.artifacts,
+        artifactChecks: ports.artifactChecks,
       },
     );
 
@@ -737,6 +770,31 @@ export async function* runLoop(
           waitedMs += now() - waitingSince;
           waitingSince = undefined;
         }
+        /**
+         * ── S10 ③：人工接管的等待同样不计入 active ─────────────────────
+         *
+         * 【定】`waitingSince` 此前**只在 Approval 那一对上设置**。
+         * 于是接管的等待会全额计入 active：用户去外部系统操作 10 分钟回来，
+         * 下一轮可能直接 BUDGET_EXHAUSTED —— 而那 10 分钟里 Agent 什么都没干。
+         * 这是评审 pi 维度 6 指出的**后果**（它的成因判断有误，但后果成立）。
+         *
+         * 形态与 Approval 完全一致，不是巧合：两者都是「循环阻塞在一个
+         * 等人的 await 上」，而 §16.1【定】说的就是 WAITING_* 不累计。
+         */
+        else if (bev.type === "InteractionRequested") waitingSince = now();
+        else if (bev.type === "InteractionCompleted" && waitingSince !== undefined) {
+          waitedMs += now() - waitingSince;
+          waitingSince = undefined;
+        }
+        /**
+         * `ToolProgress` 在这里**没有消费者**，这是刻意的（阶段 3 收口批）。
+         *
+         * 它照常取号、进 Trace、yield 给上层 —— 那是给人看的可观测信号。
+         * 但 Guard 不再消费它：进展事件是工具**执行完之后**才被排空的
+         * （见 settle-batch 的注释），时间戳是批结算时刻而不是进展发生的
+         * 时刻，拿它做「还活着吗」的判定会得到一个自信的错误答案。
+         * 见 progress-guard.ts 的文件头。
+         */
         // executeBatch 产出的事件带的是占位号 0 —— 它没有 store 也不该有。
         // 取号在这里统一做，与 emit() 走同一个分配器（D-2）。
         lastSequence = await ports.transcript.nextSequence(runId, lastSequence);
@@ -750,6 +808,22 @@ export async function* runLoop(
 
     verifications.push(...batchOutcome.verifications);
     recoveryItems.push(...batchOutcome.recoveryItems);
+    artifactChecks.push(...batchOutcome.artifactChecks);
+
+    /**
+     * U-3 的第二个问题：**在原地打转吗**。
+     *
+     * 指纹取自已 PREPARED 的 Action —— `inputDigest` 是规范化之后的，
+     * `resolvedEffect.digest` 是解析之后的。用模型给的原始文本去比会漏：
+     * 同一个调用换个键序、换个等价路径写法就「看起来不一样了」。
+     */
+    const noProgress = progress.observeBatch(
+      batchOutcome.batch.actions.map((a) => ({
+        toolName: a.toolName,
+        inputDigest: a.inputDigest,
+        effectDigest: a.resolvedEffect.digest,
+      })),
+    );
 
     // 【定】不变量 8 的落盘点：results 恰好 calls.length 条。
     messages = await appendAndPush(messages, {
@@ -761,6 +835,31 @@ export async function* runLoop(
     if (batchOutcome.aborted) {
       state = { ...state, messages, budgetUsage: budget };
       return yield* finish({ reason: "ABORTED_TOOLS" });
+    }
+
+    /**
+     * 【定】无进展是**具名终止**，不是静默继续（循环纪律第 2 条）。
+     *
+     * 排在 aborted 之后、构造下一轮之前：这一轮的 result 已经落盘（配对完整），
+     * 该记的事实也都记了 —— 停在这里不会留下一个失真的世界。
+     *
+     * 为什么必须停：模型第三次发起**完全相同**的调用，说明它没有在读工具
+     * 返回的诊断。让它接着转下去，每一轮都在烧 token 且不会好转，
+     * 而预算轴要到很晚才撞得到。
+     */
+    if (noProgress) {
+      yield await emit("NoProgressDetected", {
+        toolName: noProgress.toolName,
+        repeats: noProgress.repeats,
+        inputDigest: noProgress.inputDigest,
+      });
+      state = {
+        ...state,
+        messages,
+        budgetUsage: { ...budget, turns: state.turnCount + 1 },
+        turnCount: state.turnCount + 1,
+      };
+      return yield* finish({ reason: "NO_PROGRESS", toolName: noProgress.toolName, repeats: noProgress.repeats });
     }
 
     const anyFailed = batchOutcome.attempts.some((a) => a.status === "FAILED");
@@ -828,6 +927,15 @@ function wallKind(
     case "ABORTED_STREAMING":
     case "ABORTED_TOOLS":
       return "CANCELLED";
+    /**
+     * 【定】无进展归 BUDGET_EXHAUSTED，不归 FAILED。
+     *
+     * 「模型在原地打转，我们把它停了」是一次**主动的资源保护**，
+     * 与「工具挂了 / 端点报错」不是同一类事。判成 FAILED 会让
+     * 用户以为出了故障去排查，而实际上该做的是换个说法重来。
+     */
+    case "NO_PROGRESS":
+      return "BUDGET_EXHAUSTED";
     default:
       return "FAILED";
   }

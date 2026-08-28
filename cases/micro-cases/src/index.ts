@@ -4,8 +4,22 @@
  * 【定】Runtime Core 不 import Case Package，由 Composition Root 注册（V05 §27.3）。
  * 所以这里导出的是「可被注册的东西」，不是「会自动生效的东西」。
  *
- * D-23：阶段 1 不固定具体业务任务，只固定工具的形态约束
- * —— 一个只读快工具 ＋ 一个可控慢的可验证写工具。
+ * ══════════════════════════════════════════════════════════════════════
+ * 阶段 3 之后这个包只剩**两个测量工具**（方案 §2.1 的工具账）
+ *
+ *   append_log —— 非幂等、执行后验不了 → 让 §18.2 第三条分支**可达**
+ *   slow_write —— 可控慢的写           → 让「执行中被 cancel」这条中断路径可注入
+ *
+ * 原来的 `list_dir` / `write_note` / `now` 已迁进 `@workagent/tools-common`
+ * （`write_note` 改名 `write_file` 并去掉 `delay_ms`）。
+ *
+ * 【定】留在这里的判据只有一条：**它服务的是对机制的测量，不是能力本身。**
+ * 这两个都过不了决 2 的两类标准 —— 既非三场景常用，也不服务某条 Harness
+ * 机制。把它们塞进 `tools/common` 会让「通用」这个词失去含义。
+ *
+ * 反过来也成立：`tools/common` 里的工具不得为了测量方便而长出参数。
+ * `delay_ms` 就是被这条规则赶出来的。
+ * ══════════════════════════════════════════════════════════════════════
  */
 
 import { createHash } from "node:crypto";
@@ -23,65 +37,34 @@ import type {
 } from "@workagent/harness-runtime";
 import { makeError } from "@workagent/harness-runtime";
 import { appendLogSnapshot, executeAppendLog } from "./tools/append-log.js";
-import { executeListDir, listDirSnapshot } from "./tools/list-dir.js";
-import { executeNow, nowSnapshot } from "./tools/now.js";
-import { executeWriteNote, verifyWriteNote, writeNoteSnapshot } from "./tools/write-note.js";
+import { executeSlowWrite, slowWriteSnapshot } from "./tools/slow-write.js";
 
 export { appendLogDefinition, appendLogSnapshot } from "./tools/append-log.js";
-export { listDirDefinition, listDirSnapshot } from "./tools/list-dir.js";
-export { nowDefinition, nowSnapshot } from "./tools/now.js";
-// E-3 的有限 auto-grant 与工具内部用的是**同一道**边界判定 —— 两处若各写一份，
-// 会出现「授权时判在里面、执行时判在外面」这种最难查的不一致。
-export { isInsideWorkspace } from "./tools/fs-common.js";
-export { writeNoteDefinition, writeNoteSnapshot } from "./tools/write-note.js";
+export { slowWriteDefinition, slowWriteSnapshot } from "./tools/slow-write.js";
 
 /**
- * D-23 的形态约束（阶段 1 修订后）：
- *   list_dir    只读、快、幂等          → §18.2 分支一
- *   write_note  可控慢、可验证、非幂等   → §18.2 分支二
- *   append_log  非幂等且不可观察         → §18.2 分支三
- *
- * 第三个不是「多一个工具」，是让第三条分支从不可达变成可达 ——
- * 没有它，RECOVERY_REQUIRED 的正确性在阶段 1 拿不到任何证据。
+ * 两个测量工具的形态约束：
+ *   append_log  非幂等 ＋ 相对操作（能不能观察取决于有没有前置指纹）→ 分支二或三
+ *   slow_write  可控慢的写 ＋ 可观察                                  → 分支二
  */
-export const microCaseTools: ToolSnapshot[] = [
-  listDirSnapshot,
-  writeNoteSnapshot,
-  appendLogSnapshot,
-  // 阶段 2 新增。只读 ＋ 幂等 → §18.2 分支一，不扰动分支分布统计。
-  // 【定】它是注入时间事实的**补充**，不是替代 —— 见 tools/now.ts 的文件头。
-  nowSnapshot,
-];
+export const microCaseTools: ToolSnapshot[] = [appendLogSnapshot, slowWriteSnapshot];
 
 export class MicroCaseToolHandler implements ToolHandlerPort {
-  async execute(
-    action: PreparedAction,
-    ctx: ToolExecutionContext,
-  ): Promise<ToolExecutionOutcome> {
+  async execute(action: PreparedAction, ctx: ToolExecutionContext): Promise<ToolExecutionOutcome> {
     const input = action.normalizedInput as Record<string, unknown>;
     switch (action.toolName) {
-      case "list_dir":
-        return executeListDir(
-          {
-            path: String(input["path"] ?? "."),
-            ...(input["cursor"] === undefined ? {} : { cursor: Number(input["cursor"]) }),
-          },
-          ctx,
-        );
-      case "write_note":
-        return executeWriteNote(
-          {
-            path: String(input["path"] ?? ""),
-            content: String(input["content"] ?? ""),
-            delay_ms: input["delay_ms"] === undefined ? undefined : Number(input["delay_ms"]),
-          },
-          ctx,
-        );
-      case "now":
-        return executeNow({}, ctx);
       case "append_log":
         return executeAppendLog(
           { path: String(input["path"] ?? ""), line: String(input["line"] ?? "") },
+          ctx,
+        );
+      case "slow_write":
+        return executeSlowWrite(
+          {
+            path: String(input["path"] ?? ""),
+            content: String(input["content"] ?? ""),
+            ...(input["delay_ms"] === undefined ? {} : { delay_ms: Number(input["delay_ms"]) }),
+          },
           ctx,
         );
       default:
@@ -95,10 +78,15 @@ export class MicroCaseToolHandler implements ToolHandlerPort {
             category: "NOT_FOUND",
             retryability: "AFTER_MODEL_CORRECTION",
             sideEffectState: "NOT_STARTED",
-            safeMessage: `没有名为 "${action.toolName}" 的工具`,
+            safeMessage: `@workagent/micro-cases 里没有名为 "${action.toolName}" 的工具`,
           }),
         };
     }
+  }
+
+  /** 组合器按它决定要不要把这次调用交给本 Handler。 */
+  handles(toolName: string): boolean {
+    return microCaseTools.some((t) => t.definition.name === toolName);
   }
 }
 
@@ -106,14 +94,13 @@ export class MicroCaseToolHandler implements ToolHandlerPort {
  * Verifier 注册。
  *
  * 【定】Tool Handler 的 "success" 不能替代独立 Verification（V05 §15.1）。
- * write_note 报告成功之后，这里会真的把文件读回来比对。
+ * slow_write 报告成功之后，这里会真的把文件读回来比对。
  */
 export interface MicroCaseVerifierOptions {
   /**
-   * 允不允许拍执行前指纹（决 6 的旋钮）。
+   * 允不允许拍执行前指纹（阶段 2 决 6 的旋钮）。
    *
    * 【定】这个开关在 **Runtime 侧**，不在工具身上 —— 这正是决 6 的要点。
-   * 阶段 2 的研究问题是「有多少次 resume 落进第三条分支」，
    * 分流依据若长在被测对象身上，测的就是它自己。
    *
    * 故障注入把它关掉，同一个 `append_log` 就从分支二掉到分支三，
@@ -129,7 +116,7 @@ export class MicroCaseVerifier implements VerificationPort {
    * 执行前拍指纹（决 6）。
    *
    * 拍什么由工具的 `recoveryObservation.kind` 决定：
-   *   TARGET_APPEND_TAIL —— 追加是相对操作，要记住起始时的字节数与尾部 hash；
+   *   TARGET_APPEND_TAIL  —— 追加是相对操作，要记住起始时的字节数与尾部 hash；
    *   TARGET_CONTENT_HASH —— 覆盖写是绝对操作，其实不需要前置状态，
    *                          但记一份也无妨（能顺带回答「本来就有没有」）。
    *
@@ -161,8 +148,6 @@ export class MicroCaseVerifier implements VerificationPort {
        * 而那是一句**假的确信**。整条决 6 机制存在的意义就是把窗口 A/B 的
        * 「不知道」变成「知道」——在读不了外部世界的时候硬给一个结论，
        * 恰恰是在最需要判别力的地方失去判别力。
-       *
-       * 返回 undefined = 这次观察不了 → 老老实实降级到第三条分支，交人决定。
        */
       return undefined;
     }
@@ -200,8 +185,7 @@ export class MicroCaseVerifier implements VerificationPort {
     /**
      * 没有前置指纹时的**绝对**判据。
      *
-     * 只对覆盖写这类「目标状态与起始状态无关」的操作成立 ——
-     * 文件内容等于计划内容，就说明那次写发生过。
+     * 只对覆盖写这类「目标状态与起始状态无关」的操作成立。
      * 追加操作走不到这里：它声明了 requiresPreFingerprint: true，
      * 没有指纹时 Runtime 根本不会把它归进分支二。
      */
@@ -236,13 +220,9 @@ export class MicroCaseVerifier implements VerificationPort {
     outcome: ToolExecutionOutcome,
     ctx: ToolExecutionContext,
   ): Promise<VerificationResult> {
-    const base = {
-      id: `ver_${action.id}`,
-      actionId: action.id,
-      at: Date.now(),
-    };
+    const base = { id: `ver_${action.id}`, actionId: action.id, at: Date.now() };
 
-    if (action.toolName !== "write_note") {
+    if (action.toolName !== "slow_write") {
       return { ...base, mode: "NONE", required: false, status: "SKIPPED", detail: "该工具无需验证" };
     }
 
@@ -252,11 +232,11 @@ export class MicroCaseVerifier implements VerificationPort {
      * 【定】副作用状态明确没发生（NOT_STARTED / NO_EFFECT）时，
      * 「目标状态未达成」是一个不需要观察就成立的事实 —— 结论是 FAILED，不是 SKIPPED。
      * 记成 SKIPPED 会让 Run 结算时查不到失败项，把一次明确的失败判成 SUCCESS。
-     *
-     * 副作用状态未知（UNKNOWN / PARTIALLY_APPLIED）才是 REOBSERVE 存在的理由：
-     * 恰恰在这里必须真的去读外部世界，而不是跳过。§18.2 分支二复用的也是这条路径。
      */
-    if (!outcome.ok && (outcome.sideEffectState === "NOT_STARTED" || outcome.sideEffectState === "NO_EFFECT")) {
+    if (
+      !outcome.ok &&
+      (outcome.sideEffectState === "NOT_STARTED" || outcome.sideEffectState === "NO_EFFECT")
+    ) {
       return {
         ...base,
         mode: "REOBSERVE",
@@ -267,18 +247,34 @@ export class MicroCaseVerifier implements VerificationPort {
     }
 
     const input = action.normalizedInput as Record<string, unknown>;
-    const r = await verifyWriteNote(
-      { path: String(input["path"] ?? ""), content: String(input["content"] ?? "") },
-      ctx,
-    );
+    const expected = String(input["content"] ?? "");
+    const target = resolve(ctx.workspaceRoot, String(input["path"] ?? ""));
+    try {
+      const actual = await readFile(target, "utf8");
+      return {
+        ...base,
+        mode: "REOBSERVE",
+        required: true,
+        status: actual === expected ? "PASSED" : "FAILED",
+        detail:
+          actual === expected
+            ? `重新读取 ${input["path"]}，内容与预期一致（${actual.length} 字符）`
+            : `重新读取 ${input["path"]}，内容与预期不一致：期望 ${expected.length} 字符，实际 ${actual.length} 字符`,
+      };
+    } catch (err) {
+      return {
+        ...base,
+        mode: "REOBSERVE",
+        required: true,
+        status: "FAILED",
+        detail: `重新读取 ${input["path"]} 失败：${String((err as Error).message).slice(0, 120)}`,
+      };
+    }
+  }
 
-    return {
-      ...base,
-      mode: "REOBSERVE",
-      required: true,
-      status: r.ok ? "PASSED" : "FAILED",
-      detail: r.detail,
-    };
+  /** 组合器按它决定要不要把这次观察交给本 Verifier。 */
+  handles(toolName: string): boolean {
+    return microCaseTools.some((t) => t.definition.name === toolName);
   }
 }
 

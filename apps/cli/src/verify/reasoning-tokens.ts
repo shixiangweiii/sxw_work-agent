@@ -39,8 +39,13 @@
 import { resolve } from "node:path";
 import { loadProfileFromFile, type ModelRequest } from "@workagent/harness-runtime";
 import { createAnthropicModelPort } from "@workagent/shape-anthropic-messages";
-import { microCaseTools } from "@workagent/micro-cases";
-import { DEFAULT_SYSTEM_PROMPT, REPO_ROOT, loadEnv, readEndpointConfig } from "../compose.js";
+import {
+  DEFAULT_SYSTEM_PROMPT,
+  DEFAULT_TOOLS,
+  REPO_ROOT,
+  loadEnv,
+  readEndpointConfig,
+} from "../compose.js";
 import { banner, fact, section, verdict } from "./harness.js";
 
 /**
@@ -213,7 +218,7 @@ function buildBody(modelId: string, withThinking: boolean): Record<string, unkno
     max_tokens: 256,
     system: DEFAULT_SYSTEM_PROMPT,
     stream: true,
-    tools: microCaseTools.map((t) => ({
+    tools: DEFAULT_TOOLS.map((t) => ({
       name: t.definition.name,
       description: t.definition.description,
       input_schema: t.definition.inputSchema,

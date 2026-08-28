@@ -27,9 +27,8 @@ import {
   mergeUsage,
   readUsagePartial,
 } from "@workagent/shape-anthropic-messages";
-import { microCaseTools } from "@workagent/micro-cases";
 import { strictFakeProfile } from "@workagent/testkit";
-import { compose, REPO_ROOT } from "../compose.js";
+import { DEFAULT_TOOLS, compose, REPO_ROOT } from "../compose.js";
 import { ScriptedModelPort, banner, fact, runVerify, section, tempWorkspace, verdict } from "./harness.js";
 
 const LOOP_FILES = [
@@ -77,7 +76,7 @@ async function main(): Promise<void> {
   const mk = (p: typeof real) =>
     createAnthropicProtocol({
       profile: p,
-      tools: microCaseTools,
+      tools: DEFAULT_TOOLS,
       systemPrompt: "test",
       maxOutputTokens: 1024,
     });

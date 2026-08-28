@@ -61,6 +61,14 @@ export type Terminal =
   | { reason: "QUOTA_EXHAUSTED" }
   | { reason: "MODEL_ERROR"; error: RuntimeErrorRecord }
   | { reason: "MAX_TURNS"; turnCount: number }
+  /**
+   * Progress Guard 判定「在原地打转」（阶段 3 S9，§16.2）。
+   *
+   * 【定】它与 MAX_TURNS 是两回事：后者说「跑够久了」，前者说
+   * 「跑了但没往前」。合成一个 kind 会让「模型第三次发同一个调用」
+   * 和「任务本来就需要 20 轮」在 Trace 上不可区分。
+   */
+  | { reason: "NO_PROGRESS"; toolName: string; repeats: number }
   | { reason: "RECOVERY_REQUIRED"; recoveryItems: RecoveryItem[] };
 
 export type StepKind =

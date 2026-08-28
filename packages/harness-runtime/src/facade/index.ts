@@ -9,6 +9,7 @@ import { createHash } from "node:crypto";
 import type { RunEvent } from "../types/event.js";
 import type { Terminal } from "../types/loop.js";
 import type {
+  ArtifactCheckFact,
   RecoveryItem,
   ResumableRunFacts,
   RunOutcome,
@@ -133,6 +134,7 @@ export class HarnessRuntime {
 
       let r = await gen.next();
       while (!r.done) {
+        await this.trackWaitStatus(runId, r.value);
         yield r.value;
         r = await gen.next();
       }
@@ -140,6 +142,41 @@ export class HarnessRuntime {
       return r.value;
     } finally {
       this.running.delete(String(runId));
+    }
+  }
+
+  /**
+   * 把「循环正在等谁」如实反映到 `runs.status` 上（阶段 3 S10）。
+   *
+   * ── 为什么这件事必须做 ────────────────────────────────────────────────
+   *
+   * `WAITING_FOR_INTERACTION` 从阶段 1 起就在 `RunStatus` 的值域里，
+   * 而**全仓只出现在类型定义中** —— 没有任何代码写入过它。
+   * 于是「进程崩在等人的那一刻」在盘上表现为 `RUNNING`，
+   * 与「崩在调模型的那一刻」完全不可区分，resume 也就无从做不同的处置。
+   *
+   * 【定】状态在这里写，不在 runLoop 里写：`runs` 是 Facade 的职责边界
+   * （`runLoop` 拿到的是 ports，但生命周期语义归 Facade —— `start` /
+   * `resume` 的终态映射也都在这一层）。
+   *
+   * 【定】写失败不得打断 Run。状态是**投影**，不是恢复来源（恢复走
+   * transcript）—— 为了一次投影写入失败而中止一个正在等人的 Run，
+   * 代价与收益完全不成比例。
+   */
+  private async trackWaitStatus(runId: RunId, e: RunEvent): Promise<void> {
+    const next: RunStatus | undefined =
+      e.type === "InteractionRequested"
+        ? "WAITING_FOR_INTERACTION"
+        : e.type === "ApprovalRequested"
+          ? "WAITING_FOR_APPROVAL"
+          : e.type === "InteractionCompleted" || e.type === "ApprovalDecided"
+            ? "RUNNING"
+            : undefined;
+    if (!next) return;
+    try {
+      await this.setStatus(runId, next);
+    } catch {
+      /* 投影写失败不打断 Run，见上 */
     }
   }
 
@@ -238,6 +275,8 @@ export class HarnessRuntime {
       const priorFacts = readRunFacts(entries);
       const verifications: VerificationResult[] = [...(priorFacts?.verifications ?? [])];
       const recoveryItems: RecoveryItem[] = [...(priorFacts?.recoveryItems ?? [])];
+      // 阶段 3 S8：第二层事实同样要接着累计，否则上一段验过的产物在结算时蒸发。
+      const artifactChecks: ArtifactCheckFact[] = [...(priorFacts?.artifactChecks ?? [])];
 
       /**
        * D-2：取号走 store 的分配器，与 runLoop 同一条序列。
@@ -281,6 +320,29 @@ export class HarnessRuntime {
         rebuiltMessages: messages.length,
       });
 
+      /**
+       * ── S10 ③：上次崩在「等人」那一刻 ──────────────────────────────────
+       *
+       * 【定】`WAITING_FOR_INTERACTION` 不得成为一个**未定义的崩溃窗口**。
+       *
+       * 阶段 2 已经把 RunStatus 落库，但 resume 对这个状态**没有任何处理分支**
+       * —— 它会一路走到主循环，然后**直接调模型**。那意味着：
+       * 人被请求去做的那件事没有做，而模型收到的上下文里
+       * 那次 `request_handoff` 是一个没有结果的调用，它只能瞎猜。
+       *
+       * 正确的处置是重新发起接管：`request_handoff` 声明了只读＋幂等，
+       * 所以下面 §18.2 的**分支一**会真的把它重新执行一遍 ——
+       * 而「重新执行 request_handoff」的语义恰恰就是「重新打印引导、重新等」。
+       *
+       * 也就是说这里不需要一条特殊路径，只需要**让它可见**：
+       * 发一条事件，让 Trace 上能读出「这次 resume 是从等人的状态回来的」。
+       */
+      if (current === "WAITING_FOR_INTERACTION") {
+        yield await emit("InteractionResumed", {
+          pendingToolUses: findUnpairedToolUses(messages).map((u) => u.toolName),
+        });
+      }
+
       // ── 处理上一次停在 RECOVERY_REQUIRED 时用户给出的决策
       if (current === "RECOVERY_REQUIRED" && opts.recoveryDecision) {
         yield await emit("RecoveryResolved", {
@@ -294,6 +356,7 @@ export class HarnessRuntime {
           const outcome = settleWallOutcome("CANCELLED", {
             verifications,
             recoveryItems,
+            artifactChecks,
             // R-7：outcome 必须能读出发生了什么。这条路径上「发生了什么」
             // 不是模型说的话，而是用户的恢复决策本身 —— 如实写它。
             summary:
@@ -323,6 +386,7 @@ export class HarnessRuntime {
                 budgetUsage: priorFacts?.budgetUsage ?? emptyBudget(ports.clock.now()),
                 verifications,
                 recoveryItems,
+                artifactChecks,
                 lastSequence,
                 resumeBranchCounts: priorFacts?.resumeBranchCounts ?? {},
               },
@@ -420,6 +484,13 @@ export class HarnessRuntime {
             signal: interrupts.signal,
             workspaceRoot: this.deps.workspaceRoot,
             hasUntrustedContext: hasUntrusted,
+            // 【定】恢复路径也要外置。少了这两行，分支一重跑一个
+            // `read_file` 会把几百 KB 原样灌进恢复后的第一帧 ——
+            // 而恢复恰恰是上下文最紧张的时候（历史全都还在）。
+            blobs: ports.blobs,
+            inlineResultLimitTokens: spec.agentSpec.contextPolicy.inlineToolResultLimitTokens,
+            artifacts: ports.artifacts,
+            artifactChecks: ports.artifactChecks,
           });
           let br = await batchGen.next();
           while (!br.done) {
@@ -427,11 +498,15 @@ export class HarnessRuntime {
             lastSequence = await ports.transcript.nextSequence(runId, lastSequence);
             const withSeq = { ...br.value, sequence: lastSequence } as RunEvent;
             ports.trace.emit(withSeq);
+            // 分支一重跑 request_handoff 时又会进入等待 —— 状态要跟着走，
+            // 否则「resume 之后再崩一次」会退回到那个未定义的窗口。
+            await this.trackWaitStatus(runId, withSeq);
             yield withSeq;
             br = await batchGen.next();
           }
           verifications.push(...br.value.verifications);
           recoveryItems.push(...br.value.recoveryItems);
+          artifactChecks.push(...br.value.artifactChecks);
           // executeBatch 保证 results 恰好一条，且 toolCallId 与请求一致（不变量 8）。
           await appendAndPush(br.value.results, turn);
           continue;
@@ -504,6 +579,7 @@ export class HarnessRuntime {
         budgetUsage: priorFacts?.budgetUsage ?? emptyBudget(ports.clock.now()),
         verifications,
         recoveryItems,
+        artifactChecks,
         // 交给 runLoop 接着用的高水位。少了它，runLoop 里的 emit 会从
         // resumeFrom.lastSequence ?? 0 起算，恢复段的事件号又回到 1（D-2）。
         lastSequence,
@@ -548,6 +624,7 @@ export class HarnessRuntime {
 
       let r = await gen.next();
       while (!r.done) {
+        await this.trackWaitStatus(runId, r.value);
         yield r.value;
         r = await gen.next();
       }

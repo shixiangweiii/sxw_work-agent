@@ -29,6 +29,26 @@ export interface RunSegmentOptions {
   scriptOffset?: number;
   /** 关掉执行前指纹（决 6 的旋钮）。同一个工具会因此掉进第三条分支。 */
   disableObservation?: boolean;
+  /**
+   * 把 `CompositeVerifier` 的路由改成**只路由 `verify`**（阶段 3 §2.4 的判别力旋钮）。
+   *
+   * 它模拟的是一个具体的、写组合器时极容易犯的错：只想着「验证要按工具名分派」，
+   * 忘了 `observePre` / `observePost` 也要。后果不是「少一个观察」，而是
+   * **§18.2 分支二的工具全部静默退化成分支三** —— 没有报错，盘上也看不出来。
+   *
+   * 【定】与 `disableObservation` 不是同一件事：那个关的是 Verifier 内部的
+   * 拍摄开关（决 6 的旋钮，测的是「拍不到指纹会怎样」），
+   * 这个断的是**组合器到 Verifier 的那条线**（测的是「线没接会不会被发现」）。
+   */
+  breakVerifierRouting?: boolean;
+  /**
+   * 脚本化接管通道的形态（阶段 3 S10）：
+   *   `"answer"`（默认）立刻应答 / `"hang"` 永不应答 / `"none"` 不注入通道。
+   *
+   * `"hang"` 是「正在等人时进程被打死」这个崩溃窗口的唯一造法 ——
+   * 而那正是 `WAITING_FOR_INTERACTION` 此前作为**未定义崩溃窗口**存在的地方。
+   */
+  handoffMode?: "answer" | "hang" | "none";
   timeoutMs?: number;
 }
 
@@ -71,6 +91,8 @@ export function runSegment(opts: RunSegmentOptions): SegmentResult {
   if (opts.recoveryDecision) args.push("--recovery-decision", opts.recoveryDecision);
   if (opts.scriptOffset !== undefined) args.push("--script-offset", String(opts.scriptOffset));
   if (opts.disableObservation) args.push("--disable-observation");
+  if (opts.breakVerifierRouting) args.push("--break-verifier-routing");
+  if (opts.handoffMode) args.push("--handoff-mode", opts.handoffMode);
 
   const proc = spawnSync("npx", ["tsx", ...args], {
     encoding: "utf8",

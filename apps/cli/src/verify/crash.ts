@@ -55,7 +55,24 @@ interface Case {
 
 const W = (id: string, path: string, content: string) => ({
   text: `写 ${path}`,
-  toolCalls: [{ toolCallId: id, name: "write_note", input: { path, content } }],
+  toolCalls: [{ toolCallId: id, name: "write_file", input: { path, content } }],
+});
+/**
+ * 分支二的载体（阶段 3 收口批换成它）。
+ *
+ * 【定】以前这里用的是 `write_file` —— 但覆盖写**本来就是幂等的**，
+ * 它当年被标成非幂等就是为了给分支二凑一个通用工具（见 write-file.ts 的注释）。
+ * 那等于拿被测对象身上的一个假声明去测分支分布。
+ *
+ * `edit_file` 是天然的：替换是**相对**操作，重跑一次结果不同，
+ * 而且它声明了 `requiresPreFingerprint: true` —— 崩溃后能不能观察，
+ * 真的取决于执行前那条 ACTION_FACT 拍到没有（决 6 要的形状）。
+ */
+const E = (id: string, path: string, oldStr: string, newStr: string) => ({
+  text: `改 ${path}`,
+  toolCalls: [
+    { toolCallId: id, name: "edit_file", input: { path, old_string: oldStr, new_string: newStr } },
+  ],
 });
 const A = (id: string, path: string, line: string) => ({
   text: `追加到 ${path}`,
@@ -76,18 +93,28 @@ const CASES: Case[] = [
     resumeOffset: 1,
   },
   {
-    name: "窗口 A ＋ 分支二：覆盖写执行前崩溃 → 观察到「没发生」",
+    // 阶段 3 收口批新增：覆盖写现在诚实地声明幂等，它该落分支一。
+    name: "窗口 A ＋ 分支一：覆盖写执行前崩溃 → 直接重跑（幂等）",
     killAt: "AttemptStarted#1",
-    expectBranch: "OBSERVE_FIRST",
-    script: [W("c1", "a.txt", "内容"), W("c2", "a.txt", "内容"), END],
+    expectBranch: "IDEMPOTENT_RETRY",
+    script: [W("c1", "w.txt", "内容"), END],
     resumeOffset: 1,
   },
   {
-    name: "窗口 B ＋ 分支二：覆盖写**执行后**崩溃 → 观察到「已发生」",
+    name: "窗口 A ＋ 分支二：替换执行前崩溃 → 观察到「没发生」",
+    killAt: "AttemptStarted#1",
+    expectBranch: "OBSERVE_FIRST",
+    script: [E("c1", "a.txt", "旧的那一段", "新的那一段"), END],
+    resumeOffset: 1,
+    seed: [["a.txt", "第一行\n旧的那一段\n第三行\n"]],
+  },
+  {
+    name: "窗口 B ＋ 分支二：替换**执行后**崩溃 → 观察到「已发生」",
     killAt: "AttemptCompleted#1",
     expectBranch: "OBSERVE_FIRST",
-    script: [W("c1", "b.txt", "已经写进去了"), END],
+    script: [E("c1", "b.txt", "改我", "已经改过了"), END],
     resumeOffset: 1,
+    seed: [["b.txt", "开头\n改我\n结尾\n"]],
   },
   {
     name: "窗口 A ＋ 分支三：追加且拍不到前置指纹 → 停在 RECOVERY_REQUIRED",

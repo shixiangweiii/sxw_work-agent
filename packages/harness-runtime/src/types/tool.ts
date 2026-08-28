@@ -92,6 +92,28 @@ export interface CancellationDescriptor {
   cooperative: boolean;
 }
 
+/**
+ * 这个工具执行期间回不回报进展（`ctx.onProgress`）。
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ * 【定】三种 mode 的语义（阶段 3 收口批补 —— 在此之前一个字都没定义）：
+ *
+ *   NONE               不回报。**允许**实现里偶尔报一两次（少做多不算错），
+ *                      但不承诺任何节奏。
+ *   HEARTBEAT          执行期间**周期性**回报「我还活着」，
+ *                      `intervalMs` 是两次之间的间隔上界。
+ *   MONOTONIC_PROGRESS 回报**单调递增**的进度量（已处理 N / 共 M）。
+ *
+ * ── 为什么这三行值得写下来 ────────────────────────────────────────────
+ *
+ * 没有它们的时候，`read_file` 与 `search` 都声明了 `HEARTBEAT 30s`，
+ * 而两个文件里**一次 `ctx.onProgress` 都没有** —— 声明与实现的距离
+ * 没有任何判据量得出来，读代码的人会以为大文件读取是被监控的。
+ *
+ * 【定】所以还有一条机械判据：`mode !== "NONE"` 的工具，源码里必须存在
+ * `ctx.onProgress(` 调用点（`verify:tools` B 段扫描，缺一即红）。
+ * ══════════════════════════════════════════════════════════════════════
+ */
 export interface ProgressReportingDescriptor {
   mode: "NONE" | "HEARTBEAT" | "MONOTONIC_PROGRESS";
   intervalMs?: number;
@@ -153,14 +175,54 @@ export interface ToolDefinition {
    *
    * 更要紧的是：阶段 2 的研究问题正是「有多少次 resume 落进第三条分支」，
    * 而分流依据就是这个字段 —— 测量仪器和被测对象是同一个旋钮。
-   * `write_note` 的 idempotency 注释自己承认过这件事：
-   * 「覆盖写严格说是幂等的，标成非幂等是为了让分支二有工具可测」。
+   *
+   * 那个旋钮真的被拧过：`write_note`（今天的 `write_file`）的 idempotency
+   * 注释曾经自己承认「覆盖写严格说是幂等的，标成非幂等是为了让分支二有
+   * 工具可测」。**阶段 3 收口批把它改回了诚实值**，分支二改由天然非幂等的
+   * `edit_file` 承载。这段历史留在这里，因为它说明了这类偏移的形状：
+   * 它藏在一个布尔字段里，不会报错，只会让研究问题的数据悄悄失真。
+   *
+   * 注意决 6 只把「分支二 vs 分支三」挪到了 Action 级事实 ——
+   * 「分支一 vs 其余」至今仍由 `idempotency.isIdempotent` 这个**静态声明**
+   * 决定。所以那个字段必须是事实，不能是为了测量而写的。
    *
    * 【定】声明它**不等于**崩溃后一定观察得了。真正的判据是 Action 级事实
    * （transcript 里那条 `ACTION_FACT`），不是这里。这个字段只说明
    * 「这个工具**原则上**可以这么观察」。
+   *
+   * ── 阶段 3：去掉 `?`，由类型强制而不是靠纪律（§2.2）─────────────────
+   *
+   * 阶段 2 它是可选的，靠 verify 扫描兜底。而 §2.2 把它列为
+   * `ToolDefinition` 三个必填项之一 —— 一个「必填但类型上可选」的字段，
+   * 在新增 10 个工具的这一批里必然会被漏掉一两个，而漏掉的后果是
+   * **那个工具永远落进 §18.2 第三条分支**（`canObserve` 的第一个合取项
+   * 就是 `!!def?.recoveryObservation`），且盘上看不出来。
+   *
+   * 让编译器管这件事，比让 verify 事后发现便宜得多。
    */
-  recoveryObservation?: RecoveryObservationDescriptor;
+  recoveryObservation: RecoveryObservationDescriptor;
+  /**
+   * 这个工具在执行期间**等人**（阶段 3 S10，§20 人工接管）。
+   *
+   * Runtime 据此做两件事：
+   *   ① 把 Run 切到 `WAITING_FOR_INTERACTION`；
+   *   ② 把这段等待从 `activeWallClockMs` 里扣掉。
+   *
+   * ── 【定】它是**声明**，不是工具名判定 ──────────────────────────────
+   *
+   * 最直接的写法是 `if (toolName === "request_handoff")`，而那会让 Runtime
+   * 认识一个具体工具 —— 边界 4 要守的正是这件事（`packages/harness-runtime/`
+   * 不得 import 任何工具实现；认识工具名是同一条线的另一种越界，
+   * 只是 grep 抓不到它）。用声明驱动的话，将来任何一个「要等人」的工具
+   * 都自动获得同样的处置，而 Runtime 一行都不用改。
+   *
+   * ── 为什么不复用 `progressReporting` 或 `timeoutPolicy` ──────────────
+   *
+   * 那两个说的是「它慢」。**慢与等人不是一回事**：一个 30 秒的下载不该让
+   * Run 进入 WAITING 状态，也不该把那 30 秒从预算里扣掉 —— 那 30 秒是
+   * Agent 在干活。只有「在等外部世界里的人」才该两者都做。
+   */
+  waitsForHumanInteraction?: boolean;
   concurrency?: ConcurrencyDescriptor;
 }
 

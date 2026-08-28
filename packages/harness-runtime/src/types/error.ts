@@ -143,6 +143,14 @@ export const ACTIVE_ERROR_CATEGORIES = [
   "NOT_FOUND",
   "REDACTION",
   "UNAVAILABLE",
+  /**
+   * 阶段 3 新增，产生路径是 `edit_file` 的 old_string **多重匹配**。
+   *
+   * 它不是 VALIDATION（入参本身没毛病），也不是 NOT_FOUND（找到了，
+   * 而且不止一个）—— 「你要改的那处不唯一」是一类独立的冲突。
+   * （CAPACITY 早已登记，`read_file` 撞单次读取上限时复用它。）
+   */
+  "CONFLICT",
   // QUOTA / RATE_LIMIT **刻意不登记**：当前没有任何代码路径产生它们。
   // 登记一个没有用例覆盖的值，恰好破坏 D-22 裁剪声明的全部价值 ——
   // 那份记录的意义就在于「登记的都被用例覆盖过」。等 R-1 的配额路径

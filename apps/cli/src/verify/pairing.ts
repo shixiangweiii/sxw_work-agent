@@ -18,8 +18,18 @@
  *
  * §9.2 的三条中断路径现在**各有一条真注入**：
  *   流式中断      → ScriptedModelPort 的 interrupted 标志
- *   工具执行中断  → `write_note` 的 delay_ms ＋ 定时 cancel（阶段 2 补）
+ *   工具执行中断  → `slow_write` 的 delay_ms ＋ 定时 cancel（阶段 3 换载体）
  *   模型错误      → ScriptedModelPort 的 throwError
+ *
+ * ── 阶段 3：中断判据的载体从 `write_note` 换成 `slow_write` ────────────
+ *
+ * 阶段 2 这条判据挂在 `write_note` 的 `delay_ms` 上。阶段 3 把那个工具
+ * 迁进 `tools/common` 并改名 `write_file`，**同时去掉了 `delay_ms`** ——
+ * 一个通用工具的入参里不该有「请慢一点」这种只服务于测量的旋钮。
+ *
+ * 【定】替代品必须是**可控慢的写**，不是可控慢的空转。
+ * 纯延迟的 noop 测的是「延迟被取消」，永远 `NO_EFFECT`，
+ * `sideEffectState` 的诚实上报测不到 —— 而那恰恰是取消路径上要守的东西。
  *
  * 阶段 1 用「第二个 Action 被审批拒绝」代偿了第二条，脚本抬头当时写明了
  * 不覆盖。那个代偿测的是**审批闸门**，与**执行中取消**在 settle-batch 里
@@ -101,7 +111,7 @@ interface Scenario {
    * 脚本抬头也写明了不覆盖。那个代偿测的是**审批闸门**，不是**执行中取消** ——
    * 两者在 settle-batch 里走的是不同的出口。
    *
-   * 数值 = 等多少毫秒后 cancel。`write_note` 的 `delay_ms` 让工具可控地慢下来，
+   * 数值 = 等多少毫秒后 cancel。`slow_write` 的 `delay_ms` 让工具可控地慢下来，
    * 于是取消必然落在 execute() 执行期间。
    */
   cancelAfterMs?: number;
@@ -118,7 +128,7 @@ interface Scenario {
 
 const CALLS_3 = [
   { toolCallId: "tc_1", name: "list_dir", input: { path: "." } },
-  { toolCallId: "tc_2", name: "write_note", input: { path: "a.txt", content: "A" } },
+  { toolCallId: "tc_2", name: "write_file", input: { path: "a.txt", content: "A" } },
   { toolCallId: "tc_3", name: "list_dir", input: { path: "." } },
 ];
 
@@ -132,7 +142,7 @@ const scenarios: Scenario[] = [
           text: "三件事",
           toolCalls: [
             CALLS_3[0]!,
-            { toolCallId: "tc_2", name: "write_note", input: { path: "a.txt", content: "A", delay_ms: 800 } },
+            { toolCallId: "tc_2", name: "slow_write", input: { path: "a.txt", content: "A", delay_ms: 800 } },
             CALLS_3[2]!,
           ],
         },
@@ -165,13 +175,13 @@ const scenarios: Scenario[] = [
   },
   {
     name: "审批拒绝：必需操作未完成",
-    path: "第 2 个 call（requiredForSuccess 的 write_note）被用户拒绝，第 3 个仍需 result",
+    path: "第 2 个 call（requiredForSuccess 的 write_file）被用户拒绝，第 3 个仍需 result",
     build: () =>
       new ScriptedModelPort([
         { reasoning: "开始", toolCalls: CALLS_3 },
         { text: "有一个被拒了，我停下。", toolCalls: [] },
       ]),
-    // 第 2 个（write_note，index 0 的审批调用）被拒绝
+    // 第 2 个（write_file，index 0 的审批调用）被拒绝
     approvals: [0],
     // 配对合规、循环正常终止，但必需操作确实没做成 —— 不能判 SUCCESS。
     expectTerminal: "COMPLETED_WITH_LIMITS",
@@ -216,13 +226,13 @@ const scenarios: Scenario[] = [
         { text: "全都失败了。", toolCalls: [] },
       ]),
     portOverrides: throwingPorts.effects,
-    // write_note 是 requiredForSuccess，没走到 Verification → 补一条 FAILED。
+    // write_file 是 requiredForSuccess，没走到 Verification → 补一条 FAILED。
     expectTerminal: "COMPLETED_WITH_LIMITS",
     expectOutcome: "COMPLETED_WITH_LIMITS",
   },
   {
     name: "R-4 注入 B：ApprovalDecider 抛异常",
-    path: "write_note 触发审批，审批器炸掉 —— 没批准就等于没执行",
+    path: "write_file 触发审批，审批器炸掉 —— 没批准就等于没执行",
     build: () =>
       new ScriptedModelPort([
         { reasoning: "开始", toolCalls: CALLS_3 },
@@ -265,7 +275,7 @@ async function main(): Promise<void> {
   );
   console.log(
     "\n   覆盖说明：§9.2 的三条中断路径现在**各有一条真注入** ——\n" +
-      "   流式中断、**工具执行中被 cancel**（阶段 2 补，用 write_note 的 delay_ms）、模型错误；\n" +
+      "   流式中断、**工具执行中被 cancel**（用 slow_write 的 delay_ms）、模型错误；\n" +
       "   外加 R-4 的四条 Port 异常注入（Effect / Approval / Redaction / Verification），\n" +
       "   以及一条让 findOrphanResults() 返回非空的反向注入。\n" +
       "   阶段 1 用「第二个 Action 被审批拒绝」代偿第二条，那个场景保留为审批用例 ——\n" +

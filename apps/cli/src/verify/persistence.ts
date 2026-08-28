@@ -57,15 +57,15 @@ const WORKER = resolve(fileURLToPath(new URL(".", import.meta.url)), "workers/ru
 const SCRIPT = [
   { toolCalls: [{ toolCallId: "c1", name: "list_dir", input: { path: "." } }], text: "先看看目录" },
   {
-    toolCalls: [{ toolCallId: "c2", name: "write_note", input: { path: "a.txt", content: "第一份" } }],
+    toolCalls: [{ toolCallId: "c2", name: "write_file", input: { path: "a.txt", content: "第一份" } }],
     text: "写第一份",
   },
   {
-    toolCalls: [{ toolCallId: "c3", name: "write_note", input: { path: "a.txt", content: "第一份" } }],
+    toolCalls: [{ toolCallId: "c3", name: "write_file", input: { path: "a.txt", content: "第一份" } }],
     text: "观察说上次没写成，补写一次",
   },
   {
-    toolCalls: [{ toolCallId: "c4", name: "write_note", input: { path: "b.txt", content: "第二份" } }],
+    toolCalls: [{ toolCallId: "c4", name: "write_file", input: { path: "b.txt", content: "第二份" } }],
     text: "写第二份",
   },
   { toolCalls: [], text: "两份都写好了，任务完成。" },

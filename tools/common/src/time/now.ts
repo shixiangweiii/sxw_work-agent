@@ -1,7 +1,14 @@
 /**
- * now —— 取当前时刻。只读、幂等、零副作用。
+ * now —— 取当前日期与时间。【场景工具】
  *
- * ── 它是补充机制，不是主机制（决 3）────────────────────────────────────
+ * 三场景：
+ *   办公：给产出的文档写一个准确的时间戳
+ *   代码：给变更记录写日期
+ *   聊天：给纪要写「整理于 …」
+ *
+ * 形态：只读、幂等、零副作用 → §18.2 分支一。
+ *
+ * ── 它是补充机制，不是主机制（阶段 2 决 3）────────────────────────────
  *
  * `context/compile.ts` 里那条注入的受信时间事实才是主机制，理由写在那儿：
  * **工具要模型记得调，而它上次就没调，直接编了一个日期。**
@@ -11,10 +18,6 @@
  * 已经跑了多久」。绝大多数办公产物只要日期，这点偏差无所谓；但确实有
  * 需要精确到分钟的场景（写时间戳、算耗时），给模型一条能自己取准的路，
  * 比让它拿一个可能过时几十分钟的值去算要好。
- *
- * 它是阶段 2 唯一新增的工具，也是对「阶段 2 不加工具」的刻意例外。
- * 之所以可以破例：只读 ＋ 幂等，落在 §18.2 分支一，**不会扰动**
- * 阶段 2 要统计的那个三条分支分布。
  */
 
 import type {
@@ -27,7 +30,7 @@ import { asId } from "@workagent/harness-runtime";
 
 export const nowDefinition: ToolDefinition = {
   id: asId("tool_now"),
-  version: "1.0.0",
+  version: "1.1.0",
   name: "now",
   description:
     "取当前日期与时间。只读，不修改任何内容，无需参数。" +
@@ -35,6 +38,7 @@ export const nowDefinition: ToolDefinition = {
     "上下文里的「[系统事实] 当前时间」是本次执行开始时的时刻；" +
     "只有在需要精确到分钟、或本次运行已持续较久时才需要调用本工具。",
   inputSchema: { type: "object", properties: {}, required: [] },
+  // 【定】本字段当前零消费，授权层推到 bugfix 阶段（阶段 3 方案 S12）。
   requiredCapabilities: [],
   effectResolution: {
     kind: "DECLARATIVE",
@@ -56,16 +60,12 @@ export const nowDefinition: ToolDefinition = {
   },
   redaction: { profile: "NONE" },
   retryPolicy: { maxAttempts: 2, backoffMs: 100 },
-  // 只读 ＋ 幂等 → §18.2 分支一。这是它能破「不加工具」例的前提。
   idempotency: { isIdempotent: true, isReadOnly: true },
   timeoutPolicy: { timeoutMs: 5_000 },
   cancellation: { cooperative: true },
   progressReporting: { mode: "NONE" },
-  verification: {
-    mode: "NONE",
-    requiredForSuccess: false,
-    observationCost: "LOW",
-  },
+  verification: { mode: "NONE", requiredForSuccess: false, observationCost: "LOW" },
+  recoveryObservation: { kind: "TARGET_EXISTS", requiresPreFingerprint: false },
 };
 
 /**
@@ -77,7 +77,7 @@ export const nowDefinition: ToolDefinition = {
  */
 export async function executeNow(
   _input: Record<string, never>,
-  ctx: ToolExecutionContext & { timezone?: string },
+  ctx: ToolExecutionContext,
 ): Promise<ToolExecutionOutcome> {
   const tz = ctx.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
   const d = new Date();

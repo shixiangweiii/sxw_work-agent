@@ -34,11 +34,14 @@ import type {
 } from "../types/tool.js";
 import { DEFAULT_SETTLEMENT } from "../types/tool.js";
 import type { ModelContent } from "../types/context.js";
-import type { RecoveryItem } from "../types/run.js";
+import type { ArtifactCheckFact, RecoveryItem } from "../types/run.js";
 import type { RunEvent } from "../types/event.js";
 import { makeError, type RuntimeErrorRecord } from "../types/error.js";
 import { asId, type ActionBatchId, type ActionId, type AttemptId, type RunId } from "../types/ids.js";
 import type {
+  ArtifactCheckerPort,
+  ArtifactStorePort,
+  BlobStorePort,
   EffectResolverPort,
   IdGeneratorPort,
   RedactionPort,
@@ -76,6 +79,24 @@ export interface BatchDeps {
   workspaceRoot: string;
   hasUntrustedContext: boolean;
   settlement?: BatchSettlementPolicy;
+  /**
+   * 大结果外置（阶段 3 S6，§11.4）。
+   *
+   * 不传就退化成「一律 inline」—— 那正是批 1 结束时的状态，
+   * `verify:tools` H 段的那条已知红说的就是它。
+   */
+  blobs?: BlobStorePort;
+  /** Artifact 登记与第二层 Verification（阶段 3 S8，§17 / §10.4）。 */
+  artifacts?: ArtifactStorePort;
+  artifactChecks?: ArtifactCheckerPort;
+  /**
+   * 超过多少 token 就外置。来自 `ContextBudgetPolicy.inlineToolResultLimitTokens`。
+   *
+   * 【定】它**由上下文预算决定，不存在协议硬上限**。
+   * 【端点·百炼】200KB 的单个 tool_result 被接受、计 34576 token ——
+   * 也就是说端点不会替你把关，超限的代价是撞上下文墙，而不是一个 400。
+   */
+  inlineResultLimitTokens?: number;
 }
 
 export interface ToolCallRequest {
@@ -91,6 +112,8 @@ export interface BatchOutcome {
   verifications: VerificationResult[];
   attempts: ExecutionAttempt[];
   recoveryItems: RecoveryItem[];
+  /** 第二层 Verification 的事实（§10.4）。与 verifications 分开，见类型注释。 */
+  artifactChecks: ArtifactCheckFact[];
   /** 批被中断（cancel）。已结算的事实保留，未启动的合成 SKIPPED result。 */
   aborted: boolean;
 }
@@ -106,6 +129,7 @@ export async function* executeBatch(
   const verifications: VerificationResult[] = [];
   const attempts: ExecutionAttempt[] = [];
   const recoveryItems: RecoveryItem[] = [];
+  const artifactChecks: ArtifactCheckFact[] = [];
 
   /**
    * 结算台账。key 是 toolCallId，一个 call 只允许写一次。
@@ -376,7 +400,19 @@ export async function* executeBatch(
       action.stage = "EXECUTING";
       yield ev(deps, "AttemptStarted", { actionId, toolName: call.name });
 
+      /**
+       * ── U-3：`ToolProgress` 事件的**第一个生产点** ──────────────────────
+       *
+       * 在此之前 `ctx.onProgress` 只是把字符串塞进一个数组，
+       * 而那个数组从头到尾没有任何消费者 —— `ToolProgress` 事件类型有定义、
+       * **零发出点**，Progress Guard 因此没有任何输入可消费。
+       * 这是「未接线比不写更糟」的又一例：读代码的人会以为进展是被监控的。
+       *
+       * 【定】进展直接 yield，**不进 LoopState**（循环纪律第 4 条）。
+       * 它是可观测信号，不是状态。
+       */
       const progressNotes: string[] = [];
+      const progressQueue: string[] = [];
       /**
        * U-2：每一步都有自己的超时，但共享 Run 级取消。
        *
@@ -394,13 +430,61 @@ export async function* executeBatch(
       const ctx: ToolExecutionContext = {
         signal: stepSignal,
         workspaceRoot: deps.workspaceRoot,
-        onProgress: (n) => progressNotes.push(n),
+        onProgress: (n) => {
+          progressNotes.push(n);
+          progressQueue.push(n);
+        },
         timezone: deps.timezone,
       };
+
+      /**
+       * ── S10 ②：等人的那一段要被**事件对**夹出来 ────────────────────────
+       *
+       * 【定】形态照抄 `ApprovalRequested` / `ApprovalDecided`，理由也一样：
+       * 主循环拿得到完整的事件对，而 settle-batch 不认识「预算」这个概念。
+       * 让它去报时会把预算语义泄进批执行逻辑里。
+       *
+       * 【定】判据是**声明**（`waitsForHumanInteraction`），不是工具名 ——
+       * Runtime 不许认识任何具体工具，见那个字段的注释。
+       */
+      const waitsForHuman = snapshot.definition.waitsForHumanInteraction === true;
+      if (waitsForHuman) {
+        yield ev(deps, "InteractionRequested", {
+          actionId,
+          toolName: call.name,
+          // 入参已规范化、已过 schema —— 这里只是把它摊给 Trace 与 UI 看。
+          detail: JSON.stringify(validation.normalized).slice(0, 400),
+        });
+      }
 
       let outcome;
       try {
         outcome = await deps.tools.execute(action, ctx);
+        if (waitsForHuman) {
+          yield ev(deps, "InteractionCompleted", {
+            actionId,
+            toolName: call.name,
+            // 【定】`answered` 说的是「人应答了没有」，**不是**「任务成功了没有」。
+            // §20.3：完成信号不等于任务成功，必须重新 Observation。
+            answered: outcome.ok,
+          });
+        }
+        /**
+         * 【定】执行完之后**排空**进展队列。
+         *
+         * 理想形态是执行期间实时 yield，但 `tools.execute()` 是一个
+         * `await` —— generator 在它期间是挂起的，中途 yield 不出去。
+         * 真正的实时回报需要把工具执行改成 generator（波及每一个工具），
+         * 代价与收益不成比例：Guard 判「还活着」看的是**有没有回报过**，
+         * 而不是「回报得有多及时」。
+         *
+         * 所以这里如实排空，并在事件时间戳上用 `deps.now()` ——
+         * 时间戳因此是「批结算时刻」而不是「进展发生时刻」。
+         * 这个偏差要写下来，不要让下一个人以为它是实时的。
+         */
+        for (const note of progressQueue.splice(0)) {
+          yield ev(deps, "ToolProgress", { actionId, note });
+        }
         /**
          * 工具「正常返回」但 signal 已经因超时而 abort 的情况要单独认出来。
          *
@@ -426,6 +510,24 @@ export async function* executeBatch(
           };
         }
       } catch (err) {
+        // 抛异常之前回报过的进展同样要发出去 —— 它恰恰是排查「卡在哪」的线索。
+        for (const note of progressQueue.splice(0)) {
+          yield ev(deps, "ToolProgress", { actionId, note });
+        }
+        /**
+         * 【定】等待段必须**闭合**，哪怕它是以异常收尾的。
+         *
+         * 漏掉这一条，主循环的 `waitingSince` 就永远悬着 —— 从那一刻起
+         * `activeNow()` 会把**剩下的所有时间**都当成等待扣掉，
+         * 墙钟预算从此形同虚设，而且没有任何征兆。
+         */
+        if (waitsForHuman) {
+          yield ev(deps, "InteractionCompleted", {
+            actionId,
+            toolName: call.name,
+            answered: false,
+          });
+        }
         outcome = {
           ok: false,
           output: "",
@@ -535,12 +637,96 @@ export async function* executeBatch(
         detail: vr.detail,
       });
 
+      /**
+       * ── ⑦.5 Artifact 登记 ＋ 第二层 Verification（阶段 3 S8）────────────
+       *
+       * 【定】它排在 Action 级 Verification **之后**、结算之前。
+       *
+       * 顺序不是随意的：两层问的不是同一个问题，而第二层的触发点是
+       * `ArtifactRegistered`（§10.4）—— 产物得先存在、先登记，才谈得上
+       * 「这个产物本身完不完整合法」。
+       *
+       * 【定】工具**没声明** artifact 时这里一步都不做。
+       * 不扫 workspace、不从 output 里猜 —— 见 ProducedArtifact 的说明。
+       */
+      if (outcome.artifact && deps.artifacts) {
+        const a = outcome.artifact;
+        try {
+          const record = await deps.artifacts.register({
+            runId: deps.runId,
+            logicalId: a.logicalId,
+            role: a.role,
+            kind: a.kind,
+            ...(a.path === undefined ? {} : { path: a.path }),
+            content: a.content,
+            ...(a.derivedFrom === undefined ? {} : { derivedFrom: a.derivedFrom }),
+          });
+          yield ev(deps, "ArtifactRegistered", {
+            artifactId: record.artifactId,
+            logicalId: record.logicalId,
+            version: record.version,
+            role: record.role,
+            kind: record.kind,
+          });
+
+          if (deps.artifactChecks) {
+            const checked = await deps.artifactChecks.check(record, a.content);
+            await deps.artifacts.markVerified(record.artifactId, checked.ok, checked.detail);
+            artifactChecks.push({
+              artifactId: record.artifactId,
+              logicalId: record.logicalId,
+              role: record.role,
+              ok: checked.ok,
+              checksRun: checked.checksRun,
+              detail: checked.detail,
+              at: deps.now(),
+            });
+            yield ev(deps, "ArtifactVerified", {
+              artifactId: record.artifactId,
+              role: record.role,
+              ok: checked.ok,
+              checksRun: checked.checksRun,
+              detail: checked.detail,
+            });
+          }
+        } catch (err) {
+          /**
+           * 【定】登记失败**不改写**工具的执行结果。
+           *
+           * 文件已经写到盘上了，副作用已经发生。因为「登记这一步挂了」
+           * 就把整次调用报成失败，会让模型去重写一份已经存在的产物。
+           * 但它必须留下一条**失败的**检查事实 —— 否则「产物没被验过」
+           * 会在结算时表现成「产物没问题」。
+           */
+          artifactChecks.push({
+            artifactId: `art_unregistered_${call.toolCallId}`,
+            logicalId: a.logicalId,
+            role: a.role,
+            ok: false,
+            checksRun: [],
+            detail: `Artifact 登记或检查失败：${String((err as Error)?.message ?? err).slice(0, 160)}`,
+            at: deps.now(),
+          });
+        }
+      }
+
       // ── ⑧ 结算
       action.stage = "SETTLED";
       if (outcome.ok) {
         const note =
           vr.status === "FAILED" ? `\n\n[验证未通过] ${vr.detail}` : "";
-        settle(call.toolCallId, red.text + note, vr.status === "FAILED");
+        // §11.4：超阈值的结果在这里外置，帧里只留结构合法的 stub。
+        const materialized = await materialize(red.text, call.name, deps);
+        if (materialized.externalized) {
+          yield ev(deps, "ToolResultExternalized", {
+            actionId,
+            toolName: call.name,
+            ref: materialized.ref!,
+            sizeBytes: materialized.sizeBytes,
+            approxTokens: materialized.approxTokens,
+          });
+        }
+        settle(call.toolCallId, materialized.text + note, vr.status === "FAILED");
       } else {
         settle(call.toolCallId, renderError(outcome.error!), true);
         if (settlement.onActionFailure === "SKIP_REMAINING") skipRemaining = true;
@@ -570,8 +756,90 @@ export async function* executeBatch(
     verifications,
     attempts,
     recoveryItems,
+    artifactChecks,
     aborted: deps.signal.aborted || aborted,
   };
+}
+
+/**
+ * ToolResult Materialization（§11.4）：小结果 inline，大结果外置 ＋ stub。
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ * 【定】外置必须保留**协议合法的结构化 stub**（§11.5 不变量 5）。
+ *
+ * 不是把 result 删掉，也不是塞一句「结果太大」—— 前者违反不变量 8
+ * （配对断了），后者让模型手里什么都没有。stub 必须同时说明三件事：
+ *   · 这次调用**成功了**（否则模型会以为工具挂了并重试）；
+ *   · 结果有多大、开头长什么样（preview 让它判断值不值得取回）；
+ *   · **怎么取回**（ref ＋ 明确的工具名）。
+ *
+ * ── 【定】没有取回通路就不要外置 ────────────────────────────────────────
+ *
+ * 只做 stub 不给 `read_blob`，是**比静默截断更糟的信息阻断**：
+ * 静默截断至少给了错误的完整感，阻断是明知有东西而拿不到。
+ * 所以 `deps.blobs` 不存在时这里原样返回 —— 宁可撞上下文墙，
+ * 也不给一个取不回来的 ref。批 1 结束时就是这个状态。
+ *
+ * ── 阈值为什么不是协议上限 ──────────────────────────────────────────────
+ *
+ * 【端点·百炼】200KB 的单个 tool_result 被接受、计 34576 token。
+ * 端点不会替你把关 —— 超限的代价是撞上下文墙，不是一个 400。
+ * 所以阈值来自 `ContextBudgetPolicy.inlineToolResultLimitTokens`，
+ * 是**上下文预算决定**的，换端点不改这个数。
+ * ══════════════════════════════════════════════════════════════════════
+ */
+async function materialize(
+  text: string,
+  toolName: string,
+  deps: BatchDeps,
+): Promise<{
+  text: string;
+  externalized: boolean;
+  ref?: string;
+  sizeBytes: number;
+  approxTokens: number;
+}> {
+  const sizeBytes = Buffer.byteLength(text, "utf8");
+  // 本地估算，与 Context 层的 `estimatedTokens` 同一个系数。精确值要发一次
+  // count_tokens，而这里每个 tool_result 都要判一次 —— 不值得。
+  const approxTokens = Math.ceil(text.length / 2.5);
+  const limit = deps.inlineResultLimitTokens ?? 0;
+
+  if (!deps.blobs || limit <= 0 || approxTokens <= limit) {
+    return { text, externalized: false, sizeBytes, approxTokens };
+  }
+
+  try {
+    const { ref } = await deps.blobs.put({
+      content: text,
+      runId: deps.runId,
+      toolName,
+    });
+    const lines = text.split("\n");
+    const stub = {
+      status: "EXTERNALIZED",
+      reason:
+        `这次调用**成功了**，但结果有 ${approxTokens} tokens，超过单条结果的 inline 上限 ${limit}，` +
+        `已外置存放，没有丢失任何内容。`,
+      ref,
+      sizeBytes,
+      approxTokens,
+      totalLines: lines.length,
+      // preview 让模型判断值不值得取回，而不是盲取。
+      preview: lines.slice(0, 20).join("\n").slice(0, 1_200),
+      retrieval: `调用 read_blob({ ref: "${ref}", start_line, limit }) 按行取回，分页语义与 read_file 一致`,
+    };
+    return { text: JSON.stringify(stub), externalized: true, ref, sizeBytes, approxTokens };
+  } catch {
+    /**
+     * 【定】外置失败就 inline，不要把这次调用变成失败。
+     *
+     * 工具已经成功执行了，副作用也已经发生。因为「存不下大结果」而把它
+     * 报成失败，会让模型去重做一件已经做完的事 —— 对非幂等工具就是双写。
+     * 撞上下文墙是可见的、可恢复的；双写不是。
+     */
+    return { text, externalized: false, sizeBytes, approxTokens };
+  }
 }
 
 /**
