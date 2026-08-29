@@ -1,0 +1,50 @@
+{
+  "root": "/Users/shixiangweii/WebstormProjects/sxw_work-agent/考卷/V1/考试结果/20260828_191021/formal/task2/trial3/workspace",
+  "at": "2026-08-28T12:17:13.563Z",
+  "files": [
+    {
+      "path": "勘误说明.md",
+      "bytes": 2371,
+      "sha256": "d4686ed8bebae4f26455e3f358e5ecb2d42856d6e970c3c8a46c89c07309fb8d",
+      "contentBase64": "IyDli5jor6/or7TmmI4KCioq5pel5pyfKirvvJoyMDI2LTA4LTI4ICAKKirljp/lm6AqKu+8muWvueWkluiBlOezu+S6uuWPmOabtO+8jOeUseOAjOmZiOahiSAvIGNoZW5hbkB5dWFuc2hhbi5leGFtcGxl44CN5pu05o2i5Li644CM5ZGo5Y+ZIC8gemhvdXh1QHl1YW5zaGFuLmV4YW1wbGXjgI3jgIIgIAoqKuiMg+WbtCoq77yaYOWvueWkluadkOaWmS9gIOebruW9leS4i+WFqOmDqCA1IOS4quaWh+S7tu+8jOWFsSA4IOWkhOOAgmDlvZLmoaMvYCDnm67lvZXmnKrlgZrkv67mlLnjgIIKCi0tLQoKIyMg5L+u5pS55riF5Y2VCgojIyMgMS4g5Lqn5ZOB5oql5Lu35Y2VLm1k77yIMiDlpITvvIkKCnwg6KGM5Y+3IHwg5pS55YmNIHwg5pS55ZCOIHwKfC0tLS0tLXwtLS0tLS18LS0tLS0tfAp8IOesrCA1IOihjCB8IGDlr7nlpJbogZTns7vkurrvvJrpmYjmoYkgLyBjaGVuYW5AeXVhbnNoYW4uZXhhbXBsZWAgfCBg5a+55aSW6IGU57O75Lq677ya5ZGo5Y+ZIC8gemhvdXh1QHl1YW5zaGFuLmV4YW1wbGVgIHwKfCDnrKwgMTYg6KGMIHwgYOWmgumcgOW8gOWFt+ato+W8j+WQiOWQjO+8jOivt+iBlOezuyDpmYjmoYkgLyBjaGVuYW5AeXVhbnNoYW4uZXhhbXBsZeOAgmAgfCBg5aaC6ZyA5byA5YW35q2j5byP5ZCI5ZCM77yM6K+36IGU57O7IOWRqOWPmSAvIHpob3V4dUB5dWFuc2hhbi5leGFtcGxl44CCYCB8CgojIyMgMi4g5YaF6YOo6K+E5a6h6K6w5b2VLm1k77yIMSDlpITvvIkKCnwg6KGM5Y+3IHwg5pS55YmNIHwg5pS55ZCOIHwKfC0tLS0tLXwtLS0tLS18LS0tLS0tfAp8IOesrCA2IOihjCB8IGDmnZDmlpnkuK3nmoTllYbliqHogZTns7vkurrnu5/kuIDkuLog6ZmI5qGJIC8gY2hlbmFuQHl1YW5zaGFuLmV4YW1wbGXjgIJgIHwgYOadkOaWmeS4reeahOWVhuWKoeiBlOezu+S6uue7n+S4gOS4uiDlkajlj5kgLyB6aG91eHVAeXVhbnNoYW4uZXhhbXBsZeOAgmAgfAoKIyMjIDMuIOWQiOS9nOaEj+WQkeS5pi5tZO+8iDEg5aSE77yJCgp8IOihjOWPtyB8IOaUueWJjSB8IOaUueWQjiB8CnwtLS0tLS18LS0tLS0tfC0tLS0tLXwKfCDnrKwgNSDooYwgfCBg5ZCO57ut5a+55o6l5LqL5a6c55SxIOmZiOahiSAvIGNoZW5hbkB5dWFuc2hhbi5leGFtcGxlIOi0n+i0o+i3n+i/m+OAgmAgfCBg5ZCO57ut5a+55o6l5LqL5a6c55SxIOWRqOWPmSAvIHpob3V4dUB5dWFuc2hhbi5leGFtcGxlIOi0n+i0o+i3n+i/m+OAgmAgfAoKIyMjIDQuIOWuouaIt+etlOeWkeaJi+WGjC5tZO+8iDMg5aSE77yJCgp8IOihjOWPtyB8IOaUueWJjSB8IOaUueWQjiB8CnwtLS0tLS18LS0tLS0tfC0tLS0tLXwKfCDnrKwgNiDooYwgfCBg6K+35bCG5L+u5pS55oSP6KeB5Y+R57uZIOmZiOahiSAvIGNoZW5hbkB5dWFuc2hhbi5leGFtcGxl77yM5oiR5Lus5Lya5Zyo5Lik5Liq5bel5L2c5pel5YaF5Zue5aSN44CCYCB8IGDor7flsIbkv67mlLnmhI/op4Hlj5Hnu5kg5ZGo5Y+ZIC8gemhvdXh1QHl1YW5zaGFuLmV4YW1wbGXvvIzmiJHku6zkvJrlnKjkuKTkuKrlt6XkvZzml6XlhoXlm57lpI3jgIJgIHwKfCDnrKwgMTEg6KGMIHwgYOivt+aKiuWOn+WPkeelqOS/oeaBr+WSjOato+ehruS/oeaBr+S4gOW5tuWPkee7mSDpmYjmoYkgLyBjaGVuYW5AeXVhbnNoYW4uZXhhbXBsZeOAgmAgfCBg6K+35oqK5Y6f5Y+R56Wo5L+h5oGv5ZKM5q2j56Gu5L+h5oGv5LiA5bm25Y+R57uZIOWRqOWPmSAvIHpob3V4dUB5dWFuc2hhbi5leGFtcGxl44CCYCB8Cnwg56ysIDE2IOihjCB8IGDlu7rorq7mj5DliY0gMzAg5aSp6IGU57O7IOmZiOahiSAvIGNoZW5hbkB5dWFuc2hhbi5leGFtcGxlIOWuieaOkue7ree6puS6i+WunOOAgmAgfCBg5bu66K6u5o+Q5YmNIDMwIOWkqeiBlOezuyDlkajlj5kgLyB6aG91eHVAeXVhbnNoYW4uZXhhbXBsZSDlronmjpLnu63nuqbkuovlrpzjgIJgIHwKCiMjIyA1LiDmnI3liqHljY/orq7mqKHmnb8ubWTvvIgxIOWkhO+8iQoKfCDooYzlj7cgfCDmlLnliY0gfCDmlLnlkI4gfAp8LS0tLS0tfC0tLS0tLXwtLS0tLS18Cnwg56ysIDgg6KGMIHwgYOS5meaWueaMh+WumuiBlOezu+S6uuS4uiDpmYjmoYkgLyBjaGVuYW5AeXVhbnNoYW4uZXhhbXBsZe+8jOeUsuaWueeahOS5pumdoumAmuefpemAgei+vuivpeiBlOezu+S6uuWNs+inhuS4uumAgei+vuS5meaWueOAgmAgfCBg5LmZ5pa55oyH5a6a6IGU57O75Lq65Li6IOWRqOWPmSAvIHpob3V4dUB5dWFuc2hhbi5leGFtcGxl77yM55Sy5pa555qE5Lmm6Z2i6YCa55+l6YCB6L6+6K+l6IGU57O75Lq65Y2z6KeG5Li66YCB6L6+5LmZ5pa544CCYCB8CgotLS0KCiMjIOacquS/ruaUueeahOaWh+S7tgoKLSBg5b2S5qGjL+S6p+WTgeaKpeS7t+WNlV8yMDI154mILm1kYCDigJQg5bGe5LqO5Y6G5Y+y5b2S5qGj54mI5pys77yM5LiN5YGa5L+u5pS544CCCg=="
+    },
+    {
+      "path": "对外材料/产品报价单.md",
+      "bytes": 384,
+      "sha256": "1a187a126524ebfb846f10446a7ffe293bab32da31341d6d56fabf1244a3540e",
+      "contentBase64": "IyDov5zlsbHnp5HmioAgMjAyNiDlubTluqbkuqflk4HmiqXku7fljZUKCiMjIOWVhuWKoeiBlOezuwoK5a+55aSW6IGU57O75Lq677ya5ZGo5Y+ZIC8gemhvdXh1QHl1YW5zaGFuLmV4YW1wbGUKCiMjIOaKpeS7t+aYjue7hgoKfCDpobnnm64gfCDop4TmoLwgfCDljZXku7fvvIjlhYPvvIkgfAp8LS0tfC0tLXwtLS18Cnwg5qCH5YeG54mI5o6I5p2DIHwg5Y2V56uZ54K5IC8g5bm0IHwgNDgsMDAwIHwKfCDlop7lgLzmnI3liqHljIUgfCDmr48gMTAwIOW3peaXtiB8IDM2LDAwMCB8CgojIyDlpIfms6gKCuaKpeS7t+acieaViOacnyAzMCDlpKnjgILlpoLpnIDlvIDlhbfmraPlvI/lkIjlkIzvvIzor7fogZTns7sg5ZGo5Y+ZIC8gemhvdXh1QHl1YW5zaGFuLmV4YW1wbGXjgIIK"
+    },
+    {
+      "path": "对外材料/内部评审记录.md",
+      "bytes": 222,
+      "sha256": "909e7b867cde16cc6b8d7909b91a440c93d1582aa84704035f4b73defd3bac7f",
+      "contentBase64": "IyDlr7nlpJbmnZDmlpnor4TlrqHorrDlvZUKCuivhOWuoeaXtumXtO+8mjIwMjYtMDctMTQK6K+E5a6h6IyD5Zu077ya5pys55uu5b2V5LiL5YWo6YOo5a+55aSW5Y+R5biD5p2Q5paZCgrnu5PorrrvvJrlhoXlrrnml6Dor6/vvIzlj6/lr7nlpJblj5HluIPjgILmnZDmlpnkuK3nmoTllYbliqHogZTns7vkurrnu5/kuIDkuLog5ZGo5Y+ZIC8gemhvdXh1QHl1YW5zaGFuLmV4YW1wbGXjgIIK"
+    },
+    {
+      "path": "对外材料/合作意向书.md",
+      "bytes": 167,
+      "sha256": "98dd71922d5ae504462e9d9a771b282b3465fb7fccf77cec486b895b166e4d7c",
+      "contentBase64": "IyDlkIjkvZzmhI/lkJHkuaYKCui/nOWxseenkeaKgOaciemZkOWFrOWPuOS4jui0teWPuOWwsemVv+acn+S+m+i0p+S6i+WunOi+vuaIkOWIneatpeaEj+WQkeOAggoK5ZCO57ut5a+55o6l5LqL5a6c55SxIOWRqOWPmSAvIHpob3V4dUB5dWFuc2hhbi5leGFtcGxlIOi0n+i0o+i3n+i/m+OAggo="
+    },
+    {
+      "path": "对外材料/客户答疑手册.md",
+      "bytes": 515,
+      "sha256": "4df7808342af2fa927d00d778ab3a56707ae0081c24fc2e99de3618c3b26d848",
+      "contentBase64": "IyDlrqLmiLfluLjop4Hpl67popjnrZTnlpHmiYvlhowKCiMjIOS4gOOAgeWQiOWQjOebuOWFswoKUe+8muWQiOWQjOadoeasvumcgOimgeiwg+aVtOaAjuS5iOWKnu+8nwpB77ya6K+35bCG5L+u5pS55oSP6KeB5Y+R57uZIOWRqOWPmSAvIHpob3V4dUB5dWFuc2hhbi5leGFtcGxl77yM5oiR5Lus5Lya5Zyo5Lik5Liq5bel5L2c5pel5YaF5Zue5aSN44CCCgojIyDkuozjgIHlj5Hnpajnm7jlhbMKClHvvJrlj5Hnpajkv6Hmga/loavplJnkuoblj6/ku6Xph43lvIDlkJfvvJ8KQe+8muWPr+S7peOAguivt+aKiuWOn+WPkeelqOS/oeaBr+WSjOato+ehruS/oeaBr+S4gOW5tuWPkee7mSDlkajlj5kgLyB6aG91eHVAeXVhbnNoYW4uZXhhbXBsZeOAggoKIyMg5LiJ44CB57ut57qm55u45YWzCgpR77ya57ut57qm6ZyA6KaB5o+Q5YmN5aSa5LmF5o+Q5Ye677yfCkHvvJrlu7rorq7mj5DliY0gMzAg5aSp6IGU57O7IOWRqOWPmSAvIHpob3V4dUB5dWFuc2hhbi5leGFtcGxlIOWuieaOkue7ree6puS6i+WunOOAggo="
+    },
+    {
+      "path": "对外材料/服务协议模板.md",
+      "bytes": 236,
+      "sha256": "0891d8111d3ba53349fd41c606940c561df4932f9707d21f6cbb8b9c5671a782",
+      "contentBase64": "IyDmnI3liqHljY/orq7vvIjmqKHmnb/vvIkKCueUsuaWue+8ml9fX19fX19fX18K5LmZ5pa577ya6L+c5bGx56eR5oqA5pyJ6ZmQ5YWs5Y+4CgrnrKzkupTmnaHjgIDpgJrnn6XkuI7pgIHovr4KCuS5meaWueaMh+WumuiBlOezu+S6uuS4uiDlkajlj5kgLyB6aG91eHVAeXVhbnNoYW4uZXhhbXBsZe+8jOeUsuaWueeahOS5pumdoumAmuefpemAgei+vuivpeiBlOezu+S6uuWNs+inhuS4uumAgei+vuS5meaWueOAggo="
+    },
+    {
+      "path": "归档/产品报价单_2025版.md",
+      "bytes": 437,
+      "sha256": "5010566964fa6cdedde1f79c7669340cba18ba7cc53c1b51be70eb97909b6b46",
+      "contentBase64": "IyDov5zlsbHnp5HmioAgMjAyNSDlubTluqbkuqflk4HmiqXku7fljZXvvIjlt7Llj5Hlh7rlrZjmoaPvvIkKCiMjIOWVhuWKoeiBlOezuwoK5a+55aSW6IGU57O75Lq677ya6ZmI5qGJIC8gY2hlbmFuQHl1YW5zaGFuLmV4YW1wbGUKCiMjIOaKpeS7t+aYjue7hgoKfCDpobnnm64gfCDop4TmoLwgfCDljZXku7fvvIjlhYPvvIkgfAp8LS0tfC0tLXwtLS18Cnwg5qCH5YeG54mI5o6I5p2DIHwg5Y2V56uZ54K5IC8g5bm0IHwgNDUsMDAwIHwKfCDlop7lgLzmnI3liqHljIUgfCDmr48gMTAwIOW3peaXtiB8IDMzLDAwMCB8CgojIyDlpIfms6gKCuacrOeJiOacrOW3suS6jiAyMDI1LTExLTIwIOWPkeWHuue7meWuouaIt++8jOS9nOS4uuWOhuWPsueJiOacrOWtmOaho+OAguWmguacieeWkemXruivt+iBlOezuyDpmYjmoYkgLyBjaGVuYW5AeXVhbnNoYW4uZXhhbXBsZeOAggo="
+    }
+  ],
+  "emptyDirs": [],
+  "otherEntries": []
+}

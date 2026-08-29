@@ -827,7 +827,24 @@ async function materialize(
       totalLines: lines.length,
       // preview 让模型判断值不值得取回，而不是盲取。
       preview: lines.slice(0, 20).join("\n").slice(0, 1_200),
-      retrieval: `调用 read_blob({ ref: "${ref}", start_line, limit }) 按行取回，分页语义与 read_file 一致`,
+      /**
+       * 【定】这条提示必须说清楚**这一份**该怎么翻，不能只讲按行分页。
+       *
+       * 它此前固定写「按行取回，分页语义与 read_file 一致」，而同一个 stub
+       * 报的是 `totalLines: 1` —— 被外置的东西几乎都是一整行 JSON，
+       * 「按行翻」在它上面只有一页。照这条提示做的模型会翻一次就以为到头了，
+       * 或者反复用 start_line 试探。2026-08-28 摸底考试的轨迹里两种都出现过。
+       *
+       * 它与 `CommonToolHandler` 的 `line_offset` 透传是同一个 bug 的两半：
+       * 只修透传不修提示，模型仍然不知道该传什么；只修提示不修透传，
+       * 模型传了也没用。**两处必须一起改。**
+       */
+      retrieval:
+        lines.length === 1
+          ? `这份结果是**一整行**，按行分页只有一页。用 read_blob({ ref: "${ref}", line_offset }) ` +
+            `按字符续页：把返回里的 nextLineOffset 原样传回来，直到 truncated 为 false。`
+          : `调用 read_blob({ ref: "${ref}", start_line, limit }) 按行取回，分页语义与 read_file 一致；` +
+            `返回里带 nextStartLine / nextLineOffset 时把这两个值原样传回来接着取。`,
     };
     return { text: JSON.stringify(stub), externalized: true, ref, sizeBytes, approxTokens };
   } catch {

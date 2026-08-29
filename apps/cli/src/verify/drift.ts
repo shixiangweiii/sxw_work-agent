@@ -26,7 +26,16 @@ import {
 } from "@workagent/harness-runtime";
 import { fakeProfile, strictFakeProfile } from "@workagent/testkit";
 import { compose, REPO_ROOT, readEndpointConfig, loadEnv } from "../compose.js";
-import { ScriptedModelPort, banner, fact, runVerify, section, tempWorkspace, verdict } from "./harness.js";
+import {
+  ScriptedModelPort,
+  banner,
+  fact,
+  makeUsage,
+  runVerify,
+  section,
+  tempWorkspace,
+  verdict,
+} from "./harness.js";
 
 async function main(): Promise<void> {
   banner(
@@ -65,12 +74,45 @@ async function main(): Promise<void> {
   const r3 = d3.observeTokenAccuracy(1000, 1500);
   fact("声明 token 精确 ＋ 偏差 33%", r3 ? `报漂移（${r3.disposition}）` : "未报");
 
+  /**
+   * ── 规则 1：这一段此前**根本不存在** ──────────────────────────────────
+   *
+   * 段标题写着「三条规则各自的判别力」，而断言只覆盖规则 2 与规则 3 ——
+   * `observeToolCallCount` 一次都没被调用过。抬头三条、断言两条，
+   * 于是这条规则整整一个阶段没有任何覆盖：2026-08-28 把它的方向
+   * 整个翻过来，`verify:all` 依然 86/86 全绿。
+   *
+   * 【定】规则 1 只报**可证伪**的那一侧：我们真的发了开关（声明有效才发，
+   * 见形状适配器的 buildRequest），却仍然收到多条。
+   * 反方向「声明无效 ＋ 收到单条 → 开关看起来生效了」不可证伪 ——
+   * 模型那一轮只有一件事要做时也是单条，而那才是常态。
+   * 实测里它就是这么自我推翻的：turn 1 记下「看起来生效了」，turn 3 收到 8 条。
+   */
+  const honors = {
+    ...lenient,
+    protocol: { ...lenient.protocol, honorsDisableParallelToolCalls: true },
+  };
+  const dHonors = new DriftDetector(honors);
+  const r1multi = dHonors.observeToolCallCount(8, true);
+  const r1single = dHonors.observeToolCallCount(1, true);
+  const r1notSent = new DriftDetector(lenient).observeToolCallCount(1, true);
+  fact("声明开关有效 ＋ 收到 8 条", r1multi ? `报漂移（${r1multi.disposition}）` : "未报");
+  fact("声明开关有效 ＋ 收到 1 条", r1single ? "报漂移" : "未报（正确：单条没有信息量）");
+  fact("声明开关无效 ＋ 收到 1 条", r1notSent ? "报漂移" : "未报（正确：开关根本没发出去）");
+
   const aOk =
-    r2 !== null && r2.disposition === "FAIL_FAST" && r2none === null && r3 !== null;
+    r2 !== null &&
+    r2.disposition === "FAIL_FAST" &&
+    r2none === null &&
+    r3 !== null &&
+    r1multi !== null &&
+    r1single === null &&
+    r1notSent === null;
   verdict(
     aOk,
     aOk
-      ? "三条规则在「声明与实际不符」时报、在「一致」时不报 —— 有判别力，不是只会亮绿灯"
+      ? "三条规则都在「声明与实际不符」时报、在「一致」或「无信息量」时不报 —— " +
+        "规则 1 这次是真的被断言了（此前抬头三条、断言两条）"
       : "规则的判别力不成立",
   );
   results.push({ name: "A", ok: aOk });
@@ -101,6 +143,103 @@ async function main(): Promise<void> {
       : "补估与端点漂移没有被区分开",
   );
   results.push({ name: "B", ok: bOk });
+
+  // ────────────────────────────────────────────────────────── B2
+  section("B2. 【定】观测点读的是 billedInputTokens，不是 inputTokens");
+  console.log(
+    "   A / B 段测的是**纯函数**，它一直是对的。出问题的是**调用方传了哪个数**：\n" +
+      "   主循环此前传 `usage.inputTokens`，而那是「未命中缓存的增量」，\n" +
+      "   不是这一帧的输入总量。profile 里就写着该比哪个：\n" +
+      "   `billedInputFormula: INPUT_PLUS_CACHE`。\n\n" +
+      "   它为什么能绿一个阶段：`makeUsage()` 原先无条件写\n" +
+      "   `cacheRead = 0` ＋ `billed = inputTokens` —— **夹具里这两个数恒等**，\n" +
+      "   传错哪个都测不出来。所以这一段的关键不是断言，是**让两者不等**。\n\n" +
+      "   真实代价：2026-08-28 摸底考试 14/14 个 run 打出红色假漂移\n" +
+      "   （预估 3640 vs 实际 230，偏差 1482%；对 billed 比是 0.14%）。\n" +
+      "   而 `countTokensExcludesReasoning: false` 的 profile 走 FAIL_FAST 分支 ——\n" +
+      "   那是一颗雷，不只是噪声。\n",
+  );
+
+  const tokenProfile = {
+    ...lenient,
+    tokens: {
+      ...lenient.tokens,
+      countTokensAccuracy: "EXACT" as const,
+      countTokensExcludesReasoning: true,
+    },
+  };
+
+  /** 跑一个脚本化 Run，回收 token 口径漂移事件与第一帧的声明 token 数。 */
+  const runWithUsage = async (
+    inputTokens: number,
+    cacheRead: number,
+  ): Promise<{ drift: RunEvent[]; frameTokens: number }> => {
+    const w = tempWorkspace();
+    try {
+      const trace = new CollectingTraceSink();
+      const composed = compose({
+        dbPath: ":memory:",
+        workspaceRoot: w.root,
+        approvalDecider: async () => ({ approved: true }),
+        trace,
+        profileOverride: tokenProfile,
+        modelPortOverride: new ScriptedModelPort(
+          [
+            { text: "先看看", toolCalls: [{ toolCallId: "t1", name: "list_dir", input: { path: "." } }] },
+            { text: "好了", toolCalls: [] },
+          ],
+          undefined,
+          0,
+          makeUsage(inputTokens, 20, cacheRead),
+        ),
+      });
+      const gen = composed.runtime.start(composed.makeRunSpec("token 口径"));
+      let r = await gen.next();
+      while (!r.done) r = await gen.next();
+      composed.db.close();
+
+      const frames = trace.events.filter((e: RunEvent) => e.type === "ContextFrameCompiled");
+      return {
+        drift: trace.events.filter(
+          (e: RunEvent) =>
+            e.type === "EndpointBehaviorDrift" &&
+            (e.payload as { field?: string }).field === "tokens.countTokensAccuracy",
+        ),
+        frameTokens: Number((frames[0]?.payload as { totalTokens?: number })?.totalTokens ?? 0),
+      };
+    } finally {
+      w.cleanup();
+    }
+  };
+
+  // ① 让两个口径差到离谱，看事件里的「实际」报的是哪个数。
+  const far = await runWithUsage(7, 90_000);
+  const farObserved = String((far.drift[0]?.payload as { observed?: string })?.observed ?? "");
+  fact("帧声明 token", far.frameTokens);
+  fact("usage：input / cacheRead / billed", `7 / 90000 / 90007`);
+  fact("漂移事件的「实际」", farObserved || "（没有事件）");
+
+  // ② 让 billed 与帧**精确相等**（input 仍然远不等）——正确实现下不该有任何事件。
+  const aligned = await runWithUsage(7, Math.max(0, far.frameTokens - 7));
+  fact("对齐后 usage：input / billed", `7 / ${far.frameTokens}`);
+  fact("对齐后的漂移事件数", aligned.drift.length);
+
+  /**
+   * 【定】两半缺一不可：
+   *   · ① 钉住「报的时候报的是 billed」——传错字段时这里会是「实际 7」；
+   *   · ② 钉住「用对字段就不该报」——传错字段时这里会冒出一条 1328% 的假漂移。
+   * 只留 ② 也能抓到这个 bug，但 ① 让失败信息直接说出「它读的是哪个数」。
+   */
+  const b2Ok = farObserved.includes("实际 90007") && aligned.drift.length === 0;
+  verdict(
+    b2Ok,
+    b2Ok
+      ? "观测点比的是 billedInputTokens：口径差 90000 时报的是「实际 90007」，" +
+        "而 billed 与帧对齐后一条事件都不发 —— 缓存命中不再被误报成端点漂移"
+      : `观测点读错了 token 口径：报的是「${farObserved}」，` +
+        `对齐后仍有 ${aligned.drift.length} 条事件`,
+  );
+  results.push({ name: "B2", ok: b2Ok });
 
   // ────────────────────────────────────────────────────────── C
   section("C. 端到端：FAIL_FAST 真的终止，且事件真的发出");

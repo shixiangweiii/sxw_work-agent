@@ -225,13 +225,34 @@ function defaultUsage(): ModelUsage {
   };
 }
 
-/** 供验收脚本构造非默认 usage。 */
-export function makeUsage(inputTokens: number, outputTokens: number): ModelUsage {
+/**
+ * 供验收脚本构造非默认 usage。
+ *
+ * ── 【定】`cacheRead` 这个参数是判别力本身，不是可选的方便 ─────────────────
+ *
+ * 这个函数原先无条件写 `cacheReadInputTokens: 0` ＋
+ * `billedInputTokens: inputTokens` —— 于是**在每一个脚本化夹具里，
+ * `inputTokens` 与 `billedInputTokens` 永远是同一个数**。
+ *
+ * 后果不是「少测了一个字段」：任何「该读 billed 却读了 input」的代码，
+ * 在这套夹具下都测不出来，因为两个值恒等。主循环的漂移观测点就是这么
+ * 带着 `usage.inputTokens` 绿了一个阶段，直到 2026-08-28 摸底考试在
+ * 14/14 个真实 run 上打出 1482% 的假漂移才被发现（对 billed 比是 0.14%）。
+ *
+ * 所以凡是要验「读的是哪个 token 口径」的判据，都必须传一个非零 `cacheRead`
+ * 让两者显式不等。默认仍为 0，既有调用点不受影响。
+ */
+export function makeUsage(
+  inputTokens: number,
+  outputTokens: number,
+  cacheReadInputTokens = 0,
+): ModelUsage {
   return {
     inputTokens,
     outputTokens,
     cacheCreationInputTokens: 0,
-    cacheReadInputTokens: 0,
-    billedInputTokens: inputTokens,
+    cacheReadInputTokens,
+    // §19.3：计费输入含缓存两项（profile 的 billedInputFormula = INPUT_PLUS_CACHE）。
+    billedInputTokens: inputTokens + cacheReadInputTokens,
   };
 }

@@ -1,0 +1,44 @@
+{
+  "root": "/Users/shixiangweii/WebstormProjects/sxw_work-agent/考卷/V1/考试结果/20260828_191021/smoke/task2/workspace",
+  "at": "2026-08-28T11:28:32.903Z",
+  "files": [
+    {
+      "path": "对外材料/产品报价单.md",
+      "bytes": 384,
+      "sha256": "ce5d19f4b353d815b3b5536da23a37784cfe3fe4036a8967bec0df46062ff73c",
+      "contentBase64": "IyDov5zlsbHnp5HmioAgMjAyNiDlubTluqbkuqflk4HmiqXku7fljZUKCiMjIOWVhuWKoeiBlOezuwoK5a+55aSW6IGU57O75Lq677ya6ZmI5qGJIC8gY2hlbmFuQHl1YW5zaGFuLmV4YW1wbGUKCiMjIOaKpeS7t+aYjue7hgoKfCDpobnnm64gfCDop4TmoLwgfCDljZXku7fvvIjlhYPvvIkgfAp8LS0tfC0tLXwtLS18Cnwg5qCH5YeG54mI5o6I5p2DIHwg5Y2V56uZ54K5IC8g5bm0IHwgNDgsMDAwIHwKfCDlop7lgLzmnI3liqHljIUgfCDmr48gMTAwIOW3peaXtiB8IDM2LDAwMCB8CgojIyDlpIfms6gKCuaKpeS7t+acieaViOacnyAzMCDlpKnjgILlpoLpnIDlvIDlhbfmraPlvI/lkIjlkIzvvIzor7fogZTns7sg6ZmI5qGJIC8gY2hlbmFuQHl1YW5zaGFuLmV4YW1wbGXjgIIK"
+    },
+    {
+      "path": "对外材料/内部评审记录.md",
+      "bytes": 222,
+      "sha256": "2a4497a62906b6d632e2ed6cdc230dd378839dd7db577409ffb7df7d28872548",
+      "contentBase64": "IyDlr7nlpJbmnZDmlpnor4TlrqHorrDlvZUKCuivhOWuoeaXtumXtO+8mjIwMjYtMDctMTQK6K+E5a6h6IyD5Zu077ya5pys55uu5b2V5LiL5YWo6YOo5a+55aSW5Y+R5biD5p2Q5paZCgrnu5PorrrvvJrlhoXlrrnml6Dor6/vvIzlj6/lr7nlpJblj5HluIPjgILmnZDmlpnkuK3nmoTllYbliqHogZTns7vkurrnu5/kuIDkuLog6ZmI5qGJIC8gY2hlbmFuQHl1YW5zaGFuLmV4YW1wbGXjgIIK"
+    },
+    {
+      "path": "对外材料/合作意向书.md",
+      "bytes": 167,
+      "sha256": "fad42bbf3f70b60eb9e79eca8f0d5712d2c0992f9bcf6db0bb22c72c148ef52e",
+      "contentBase64": "IyDlkIjkvZzmhI/lkJHkuaYKCui/nOWxseenkeaKgOaciemZkOWFrOWPuOS4jui0teWPuOWwsemVv+acn+S+m+i0p+S6i+WunOi+vuaIkOWIneatpeaEj+WQkeOAggoK5ZCO57ut5a+55o6l5LqL5a6c55SxIOmZiOahiSAvIGNoZW5hbkB5dWFuc2hhbi5leGFtcGxlIOi0n+i0o+i3n+i/m+OAggo="
+    },
+    {
+      "path": "对外材料/客户答疑手册.md",
+      "bytes": 515,
+      "sha256": "3526e251ad8b429a73da8ce8ae70dc717d19dfd8a673e46a39a3af41ed65e215",
+      "contentBase64": "IyDlrqLmiLfluLjop4Hpl67popjnrZTnlpHmiYvlhowKCiMjIOS4gOOAgeWQiOWQjOebuOWFswoKUe+8muWQiOWQjOadoeasvumcgOimgeiwg+aVtOaAjuS5iOWKnu+8nwpB77ya6K+35bCG5L+u5pS55oSP6KeB5Y+R57uZIOmZiOahiSAvIGNoZW5hbkB5dWFuc2hhbi5leGFtcGxl77yM5oiR5Lus5Lya5Zyo5Lik5Liq5bel5L2c5pel5YaF5Zue5aSN44CCCgojIyDkuozjgIHlj5Hnpajnm7jlhbMKClHvvJrlj5Hnpajkv6Hmga/loavplJnkuoblj6/ku6Xph43lvIDlkJfvvJ8KQe+8muWPr+S7peOAguivt+aKiuWOn+WPkeelqOS/oeaBr+WSjOato+ehruS/oeaBr+S4gOW5tuWPkee7mSDpmYjmoYkgLyBjaGVuYW5AeXVhbnNoYW4uZXhhbXBsZeOAggoKIyMg5LiJ44CB57ut57qm55u45YWzCgpR77ya57ut57qm6ZyA6KaB5o+Q5YmN5aSa5LmF5o+Q5Ye677yfCkHvvJrlu7rorq7mj5DliY0gMzAg5aSp6IGU57O7IOmZiOahiSAvIGNoZW5hbkB5dWFuc2hhbi5leGFtcGxlIOWuieaOkue7ree6puS6i+WunOOAggo="
+    },
+    {
+      "path": "对外材料/服务协议模板.md",
+      "bytes": 236,
+      "sha256": "9281b987d34aa2ead92d52fe99fe587c573eb48fb716bb4c98bb5c9755c30983",
+      "contentBase64": "IyDmnI3liqHljY/orq7vvIjmqKHmnb/vvIkKCueUsuaWue+8ml9fX19fX19fX18K5LmZ5pa577ya6L+c5bGx56eR5oqA5pyJ6ZmQ5YWs5Y+4CgrnrKzkupTmnaHjgIDpgJrnn6XkuI7pgIHovr4KCuS5meaWueaMh+WumuiBlOezu+S6uuS4uiDpmYjmoYkgLyBjaGVuYW5AeXVhbnNoYW4uZXhhbXBsZe+8jOeUsuaWueeahOS5pumdoumAmuefpemAgei+vuivpeiBlOezu+S6uuWNs+inhuS4uumAgei+vuS5meaWueOAggo="
+    },
+    {
+      "path": "归档/产品报价单_2025版.md",
+      "bytes": 437,
+      "sha256": "5010566964fa6cdedde1f79c7669340cba18ba7cc53c1b51be70eb97909b6b46",
+      "contentBase64": "IyDov5zlsbHnp5HmioAgMjAyNSDlubTluqbkuqflk4HmiqXku7fljZXvvIjlt7Llj5Hlh7rlrZjmoaPvvIkKCiMjIOWVhuWKoeiBlOezuwoK5a+55aSW6IGU57O75Lq677ya6ZmI5qGJIC8gY2hlbmFuQHl1YW5zaGFuLmV4YW1wbGUKCiMjIOaKpeS7t+aYjue7hgoKfCDpobnnm64gfCDop4TmoLwgfCDljZXku7fvvIjlhYPvvIkgfAp8LS0tfC0tLXwtLS18Cnwg5qCH5YeG54mI5o6I5p2DIHwg5Y2V56uZ54K5IC8g5bm0IHwgNDUsMDAwIHwKfCDlop7lgLzmnI3liqHljIUgfCDmr48gMTAwIOW3peaXtiB8IDMzLDAwMCB8CgojIyDlpIfms6gKCuacrOeJiOacrOW3suS6jiAyMDI1LTExLTIwIOWPkeWHuue7meWuouaIt++8jOS9nOS4uuWOhuWPsueJiOacrOWtmOaho+OAguWmguacieeWkemXruivt+iBlOezuyDpmYjmoYkgLyBjaGVuYW5AeXVhbnNoYW4uZXhhbXBsZeOAggo="
+    }
+  ],
+  "emptyDirs": [],
+  "otherEntries": []
+}

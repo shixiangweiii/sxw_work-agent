@@ -22,7 +22,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > **范围在开工前被决 1 改写过**：原计划是「Case 01 网页归档」，改成**通用能力面**，
 > 网页归档移出本阶段（Case 是尺子，不是模具）。评测与 Eval 按决 4 统一推到开发完成之后。
 
-- **12 条验收脚本 86 条判据全绿**，`tsc --noEmit` 干净
+- **12 条验收脚本 91 条判据全绿**，`tsc --noEmit` 干净（摸底考试 bugfix 批后从 86 增至 91）
 - 新增 `tools/` 层，默认装配 **12 个工具**（8 场景 ＋ 2 机制 ＋ 2 测量）；固定开销起步价 ≈ 2160 token
   （`fixedOverheadTokens()` = 工具数 × 180。此前各处文档写的「11 个 / 1980」是同一处算术错误：
   8＋2＋2 = 12，收口批统一更正）
@@ -56,6 +56,39 @@ Planner / Memory / Sub-agent（决 6）、通用 Completion Gate（论据被探�
 
 **三条判别力实测在实施时真跑过并翻红**：把 hash 检查改回内存自比、删掉 `search` 的
 `onProgress`、删掉 `StdinChannel` abort 时清 waiter 那一行 —— 各自对应的判据当场变红。
+
+### 摸底考试 Bugfix 批次（2026-08-28，A / A′ / B / C 四组）
+
+[办公任务考卷 V1](考卷/V1/Atlas阶段3_办公任务考卷_V1_20260828.md) 实测 pass@1 = 4/9、NO-GO。
+逐条回源码核对后的结论：**挂掉的不是能力面，是接线和仪器。**
+题 2 三次全过说明工具面够用；题 1、题 3 各三次全灭，各由一条可定位的缺陷解释。
+详见[存量清单 §0.8](sxw_aicoding/存量BUG/阶段1存量问题清单_V20260824.md)。
+
+> ### 【定】为什么 86 条判据全绿而实测 4/9 —— 记住这一条就够了
+>
+> **每一处出事的地方，夹具都让「正确值」与「错误值」恰好相等。**
+>
+> - `read_blob` 的取回判据调的是 `ports.blobs.get()`，**从没经过工具那一跳** ——
+>   而 `line_offset` 正是在 handler 里被丢掉的（`tools/common/src/index.ts` 只转发了三个参数）；
+> - `makeUsage()` 把 `billedInputTokens` 直接赋成 `inputTokens`、cache 计数恒 0，
+>   于是主循环把漂移观测点传成 `inputTokens` 也测不出来（真实端点上是 1482% 假漂移）；
+> - `verify:budget` 给每条轴都注入 `Partial` 覆盖，证明的是**读取点**能用，
+>   而 `DEFAULT_BUDGETS` 里两条 token 轴根本没值 —— 生产里八条轴只有五条活着。
+>
+> **所以新增判据时先问：这条判据要区分的两个值，在夹具里相等吗？**
+> 相等就先去改夹具，再写断言。然后当场做一次「改坏 → 翻红」实测 ——
+> 本批 8 条新判据每条都做过，其中 `maxTotalWallClockMs` 那条两个方向都试了。
+
+四组修的东西：**A** 接线断（`read_blob` 参数透传、外置提示、漂移比错字段、
+并行开关规则方向、两条 token 轴默认值）；**A′** 前缀缓存断点前移到 messages 末尾
+（U-9 后半，原理由「messages 每轮都在变」在 `STRICT_PREFIX` 下不成立 —— transcript 是只追加的）；
+**B** `request_handoff` 的引导面措辞（题 3 的模型分析全对却零调用，
+被 system prompt 收尾那条更便宜的出口接走了）；**C** 在途模型调用挂预算 deadline
+＋ 软限进模型上下文。
+
+> ⚠️ **B 组在 `verify:all` 里拿不到判据**，这是边界不是遗漏：脚本化模型不会替你选工具。
+> 它只能靠 live 复跑验证（题 3 × 3，`InteractionRequested ≥ 1`）。
+> 不要为它硬造「description 里必须出现某个词」的机械判据。
 
 ### 改验收脚本前必读
 
@@ -120,7 +153,7 @@ npm run verify:tools               # 批 1：六条边界 grep ＋ 两类声明 
 npm run verify:artifact            # 批 2：外置与逐字取回 ＋ URL 护栏 ＋ 产物登记与第二层验证 ＋ role 分流
 npm run verify:progress            # 批 3：进展 ＋ 无进展 ＋ 真实慢工具取消 ＋ 人工接管三条状态闭合
 npm run verify:scenarios           # S13：三场景 smoke（决 7 的判据）＋ 三条护栏在场性总校验
-npm run verify:all                 # 12 条脚本 / 86 条判据
+npm run verify:all                 # 12 条脚本 / 91 条判据
 ```
 
 `verify:scenarios -- --live` 用真实端点跑同样三个任务（**花钱，不在 verify:all 里**）。

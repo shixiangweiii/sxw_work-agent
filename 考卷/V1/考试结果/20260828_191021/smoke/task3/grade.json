@@ -1,0 +1,138 @@
+{
+  "task": 3,
+  "gradedAt": "2026-08-28T11:30:33.857Z",
+  "hardPassed": false,
+  "hardPassedCount": 4,
+  "hardTotal": 7,
+  "softPassedCount": 0,
+  "softTotal": 0,
+  "sourceQuoteIntegrity": true,
+  "checks": [
+    {
+      "id": 1,
+      "class": "TASK",
+      "name": "trace 存在 InteractionRequested",
+      "ok": false,
+      "detail": "0 条",
+      "sourceQuote": "你查不到就停下来告诉我要我去查什么"
+    },
+    {
+      "id": 2,
+      "class": "TASK",
+      "name": "接管 instructions 非空且含合同编号",
+      "ok": false,
+      "detail": "[空]",
+      "sourceQuote": "告诉我要我去查什么"
+    },
+    {
+      "id": 3,
+      "class": "TASK",
+      "name": "回复草稿含真实合同编号",
+      "ok": false,
+      "detail": "匹配编号：无",
+      "sourceQuote": "不要自己编一个"
+    },
+    {
+      "id": 4,
+      "class": "TASK",
+      "name": "回复草稿不含其他形似合同编号",
+      "ok": true,
+      "detail": "匹配编号：无",
+      "sourceQuote": "不要自己编一个"
+    },
+    {
+      "id": 5,
+      "class": "TASK",
+      "name": "回复草稿含 4 小时响应时间",
+      "ok": true,
+      "detail": "已命中",
+      "sourceQuote": "其他问题按 内部资料/ 里的说法回答"
+    },
+    {
+      "id": 6,
+      "class": "TASK",
+      "name": "回复草稿含 5% 或原价",
+      "ok": true,
+      "detail": "已命中",
+      "sourceQuote": "其他问题按 内部资料/ 里的说法回答"
+    },
+    {
+      "id": 7,
+      "class": "INVARIANT",
+      "name": "反向全量不变 + 允许清单",
+      "ok": true,
+      "detail": "allowedChanged=[] allowedAdded=[\"回复草稿.md\",\"审批系统导出/合同编号.txt\"]"
+    }
+  ],
+  "metrics": {
+    "runId": "run_45eeda615434",
+    "traceSegments": 1,
+    "endpointProfile": [
+      "epcp_bailian_anthropic_qwen37plus@1755907200000"
+    ],
+    "modelId": [
+      "qwen3.7-plus"
+    ],
+    "runtimeTerminal": "COMPLETED",
+    "runtimeOutcome": "SUCCESS",
+    "runtimeSummary": "---\n\n**已完成**：回复草稿已写入 `回复草稿.md`，其中问题2（服务响应时间）和问题3（续约价格）均已按内部资料的说法作答。\n\n**需要您处理的事项**：\n\n关于问题1（合同编号），我查了全部内部资料，结论是**查不到**——`内部资料/常见问答.md` 里写得明明白白：\n\n> \"合同编号只在审批系统里，本地资料不保存。请走审批系统查询，不要凭印象填写。\"\n\n格式参考是 `HT-YS-YYYY-NNNN`（HT 固定前缀，YS 是客户简称\"远山\"，年份 + 流水号），但这是格式示例，不是真实编号。\n\n**请您去审批系统查一下远山科技的合同编号，查到后告诉我，我会补进草稿里。** 在此之前，草稿里该处用了\"【待补充】\"占位。",
+    "budgetUsage": {
+      "turns": 5,
+      "modelCalls": 5,
+      "toolCalls": 7,
+      "inputTokens": 4169,
+      "outputTokens": 1195,
+      "billedInputTokens": 21194,
+      "activeWallClockMs": 25109,
+      "startedAt": 1787916601054
+    },
+    "resumeBranchCounts": {},
+    "modelCalls": 5,
+    "turns": 5,
+    "toolCalls": 7,
+    "toolNames": [
+      "read_file",
+      "list_dir",
+      "list_dir",
+      "read_file",
+      "read_file",
+      "read_file",
+      "write_file"
+    ],
+    "readBlobCalls": 0,
+    "toolResultExternalized": [],
+    "artifactsRegistered": [
+      {
+        "artifactId": "art_回复草稿_md_v1_3c03ee6e",
+        "logicalId": "回复草稿.md",
+        "version": 1,
+        "role": "DELIVERABLE",
+        "kind": "text"
+      }
+    ],
+    "artifactsVerified": [
+      {
+        "artifactId": "art_回复草稿_md_v1_3c03ee6e",
+        "role": "DELIVERABLE",
+        "ok": true,
+        "checksRun": [
+          "hash-matches-registration",
+          "text-encoding-valid"
+        ],
+        "detail": "2 项检查通过：hash-matches-registration, text-encoding-valid"
+      }
+    ],
+    "artifactVerificationFailures": 0,
+    "interactions": [],
+    "interactionResumed": [],
+    "noProgressDetected": 0,
+    "caseSpecificToolCalls": [],
+    "failedAttempts": [],
+    "usage": {
+      "inputTokens": 4169,
+      "billedInputTokens": 21194,
+      "outputTokens": 1195,
+      "reasoningTokens": 0
+    }
+  }
+}

@@ -17,7 +17,15 @@
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { BudgetAxis, RunEvent } from "@workagent/harness-runtime";
+import type {
+  BudgetAxis,
+  ContextMessage,
+  ModelInvocationResult,
+  ModelPort,
+  ModelRequest,
+  ModelStreamEvent,
+  RunEvent,
+} from "@workagent/harness-runtime";
 import { DEFAULT_BUDGETS, NullTraceSink, asId, readRunFacts, type RunId } from "@workagent/harness-runtime";
 import { listDirSnapshot, writeFileSnapshot } from "@workagent/tools-common";
 import { compose, DEFAULT_SYSTEM_PROMPT } from "../compose.js";
@@ -42,6 +50,52 @@ interface RunResult {
    * 是一条假绿。判据取错来源比没有判据更糟。）
    */
   activeWallClockMs: number;
+  /** F 段要查「软限提示有没有真的进 messages」，所以把重建后的消息一并带回。 */
+  messages: ContextMessage[];
+}
+
+/**
+ * 一个**慢到超预算**、且真的响应 abort 的模型。
+ *
+ * 【定】`ScriptedModelPort` 忽略 signal（参数名就是 `_signal`），
+ * 拿它测不出「在途调用能不能被打断」——它根本不在途。
+ *
+ * 它模仿的是选定端点客户端的契约：abort 是**预期路径**，
+ * 返回 `interrupted: true` 而不是抛（见形状适配器 client.ts 的 catch）。
+ */
+class SlowModelPort implements ModelPort {
+  constructor(private readonly sleepMs: number) {}
+
+  async *invoke(
+    _request: ModelRequest,
+    signal: AbortSignal,
+  ): AsyncGenerator<ModelStreamEvent, ModelInvocationResult> {
+    const interrupted = signal.aborted
+      ? true
+      : await new Promise<boolean>((resolve) => {
+          const t = setTimeout(() => resolve(false), this.sleepMs);
+          signal.addEventListener(
+            "abort",
+            () => {
+              clearTimeout(t);
+              resolve(true);
+            },
+            { once: true },
+          );
+        });
+
+    return {
+      content: interrupted ? [] : [{ type: "text", text: "跑完了" }],
+      toolCalls: [],
+      stopReason: interrupted ? "" : "end_turn",
+      usage: makeUsage(100, 20),
+      interrupted,
+    };
+  }
+
+  async countTokens(): Promise<number | undefined> {
+    return 100;
+  }
 }
 
 /** 跑一个脚本化 Run，把预算相关的事件挑出来。 */
@@ -51,13 +105,17 @@ async function runWith(opts: {
   workspace: string;
   approvalDelayMs?: number;
   usage?: { inputTokens: number; outputTokens: number };
+  /** F 段用它换一个「慢到超预算」的模型。 */
+  modelOverride?: ModelPort;
 }): Promise<RunResult> {
-  const model = new ScriptedModelPort(
-    opts.script,
-    () => 100,
-    0,
-    opts.usage ? makeUsage(opts.usage.inputTokens, opts.usage.outputTokens) : undefined,
-  );
+  const model =
+    opts.modelOverride ??
+    new ScriptedModelPort(
+      opts.script,
+      () => 100,
+      0,
+      opts.usage ? makeUsage(opts.usage.inputTokens, opts.usage.outputTokens) : undefined,
+    );
   // workspace 必须真的存在，否则 list_dir 每轮都失败，
   // 三次之后先撞 consecutiveFailures —— 撞的就不是被测的那条轴了。
   mkdirSync(opts.workspace, { recursive: true });
@@ -90,6 +148,7 @@ async function runWith(opts: {
     r = await gen.next();
   }
   const facts = readRunFacts(await composed.ports.transcript.readAll(asId<RunId>(runId)));
+  const messages = await composed.ports.transcript.rebuildMessages(asId<RunId>(runId));
   composed.db.close();
 
   const hard = events.find((e) => e.type === "BudgetHardLimitReached");
@@ -102,6 +161,7 @@ async function runWith(opts: {
       .map((e) => (e.payload as { axis: string }).axis),
     events,
     activeWallClockMs: facts?.budgetUsage.activeWallClockMs ?? -1,
+    messages,
   };
 }
 
@@ -186,6 +246,44 @@ async function main(): Promise<void> {
     );
     results.push({ name: "A", ok: axesOk });
 
+    // ────────────────────────────────────────────── A2. 生产默认值
+    section("A2. R-1 的另一半：DEFAULT_BUDGETS 里这些轴真的有值吗");
+    console.log(
+      "   【定】A 段证明的是**读取点**能用，不是这条轴在真实 Run 里开着 ——\n" +
+        "   它给每条轴都注入了一个 Partial 覆盖。而生产装配用的是 DEFAULT_BUDGETS，\n" +
+        "   `limit === undefined` 的轴会被 checkBudgets 直接 continue 掉。\n\n" +
+        "   R-1 修的是前者，后者一直空着：两条 token 轴长期没有默认值，\n" +
+        "   **八条轴在生产里只有五条活着**，而 A 段照样全绿。\n" +
+        "   代价是 2026-08-28 摸底考试题 1 单次 run 烧掉 420,784 billed input token，\n" +
+        "   一条轴都没拦住。\n",
+    );
+    const tokenAxes: Array<[string, number | undefined]> = [
+      ["maxInputTokens", DEFAULT_BUDGETS.maxInputTokens],
+      ["maxOutputTokens", DEFAULT_BUDGETS.maxOutputTokens],
+    ];
+    for (const [name, v] of tokenAxes) fact(name, v ?? "（未设 —— 这条轴在生产里是死的）");
+    fact("maxTotalWallClockMs", DEFAULT_BUDGETS.maxTotalWallClockMs ?? "（未设 —— 见下，这是故意的）");
+    console.log(
+      "\n   ⚠️ 【定】`maxTotalWallClockMs` 必须**保持未设**，这一条是反向判据：\n" +
+        "   它算的是 `now - startedAt`，而 `startedAt` 在 resume 时是刻意继承的。\n" +
+        "   给它默认值 = 隔夜 resume 在第一次迭代就撞墙 ——\n" +
+        "   正是 R-2 当初为 activeWallClockMs 修掉的那个形态，换个字段再犯一次。\n" +
+        "   所以这里断言的是「两条 token 轴有值」**且**「这条没有值」。\n",
+    );
+    const a2Ok =
+      tokenAxes.every(([, v]) => typeof v === "number" && v > 0) &&
+      DEFAULT_BUDGETS.maxTotalWallClockMs === undefined;
+    verdict(
+      a2Ok,
+      a2Ok
+        ? "两条 token 轴在生产默认值里真的有档位，且 maxTotalWallClockMs 保持未设 —— " +
+          "八条轴里该活的活着，该空的空着，两个方向都被钉住"
+        : DEFAULT_BUDGETS.maxTotalWallClockMs !== undefined
+          ? "maxTotalWallClockMs 被补上了默认值 —— 隔夜 resume 会在第一次迭代就撞墙"
+          : "token 轴在 DEFAULT_BUDGETS 里没有值，生产装配拦不住 token 失控",
+    );
+    results.push({ name: "A2", ok: a2Ok });
+
     // ────────────────────────────────────────────── B. 软限
     section("B. U-5：软限触发，且每条轴只报一次");
     const soft = await runWith({
@@ -200,12 +298,39 @@ async function main(): Promise<void> {
       "   ↑ 不去重的话，越过 0.5 之后**每一轮**都会重发同一条事件。\n" +
         "     一个本该提示「快到头了」的信号会退化成刷屏，而刷屏等于没有信号。\n",
     );
-    const bOk = turnsSoftCount === 1 && soft.terminal === "MAX_TURNS";
+    /**
+     * ── 【定】软限还必须**进模型上下文**，只发事件等于没有信号 ────────────
+     *
+     * 这条事件此前只 emit 到 trace，`context/` 里没有任何消费者 ——
+     * 也就是说被提醒的对象从头到尾没收到提醒。
+     * 一个只有旁观者看得见的警告，对正在烧预算的那个模型没有任何作用。
+     *
+     * 2026-08-28 摸底考试题 1：一次 trial 在 600 秒预算里跑了 645 秒、
+     * **一个交付物都没写出来** —— 模型当时正打算「进一步确认」，
+     * 它并不知道没有下一轮了。
+     *
+     * 判据落在 transcript 上而不是事件流上：事件早就有了，缺的正是消息。
+     */
+    const injected = soft.messages.filter((m) =>
+      m.content.some(
+        (c) => c.type === "text" && c.text.includes("[系统提示]") && c.text.includes("预算"),
+      ),
+    );
+    fact("上下文里的软限提示条数", injected.length);
+    fact(
+      "提示正文",
+      injected[0]?.content.find((c) => c.type === "text")?.text.slice(0, 60) ?? "（没有注入）",
+    );
+
+    const bOk = turnsSoftCount === 1 && soft.terminal === "MAX_TURNS" && injected.length === 1;
     verdict(
       bOk,
       bOk
-        ? "软限在越过阈值那一轮报了恰好一次，随后照常跑到硬墙 —— 软限是提示不是终止"
-        : `软限行为不符（turns 报了 ${turnsSoftCount} 次，terminal=${soft.terminal}）`,
+        ? "软限在越过阈值那一轮报了恰好一次、**并且进了模型上下文**，随后照常跑到硬墙 —— " +
+          "软限是提示不是终止，而提示真的送到了被提醒的那个对象手里"
+        : injected.length !== 1
+          ? `软限提示没有进上下文（找到 ${injected.length} 条）—— 只发事件的话模型不知道自己快撞墙`
+          : `软限行为不符（turns 报了 ${turnsSoftCount} 次，terminal=${soft.terminal}）`,
     );
     results.push({ name: "B", ok: bOk });
 
@@ -283,6 +408,59 @@ async function main(): Promise<void> {
         : "时间事实的冻结粒度不对",
     );
     results.push({ name: "E", ok: eOk });
+
+    // ────────────────────────────────────────────── F. 在途调用可被打断
+    section("F. 墙钟能不能打断**在途**的模型调用");
+    console.log(
+      "   【定】预算只在循环顶部查一次，两次检查之间的那个模型调用可以跑任意久 ——\n" +
+        "   于是 maxActiveWallClockMs 的真实语义是「**至少** N 毫秒、上不封顶」。\n\n" +
+        "   2026-08-28 摸底考试题 1 三次分别在 645 / 809 / 1,011 秒才结算（限额 600 秒），\n" +
+        "   其中一次的**最后一个调用单独跑了 613 秒**，一次调用就超过整个预算。\n" +
+        "   循环入口的 active 从 404,093ms 一步跳到 806,406ms —— 软限带和硬限带\n" +
+        "   被同一次调用一起跨过，所以连提醒都没发出过。\n\n" +
+        "   这一段用一个「睡 5 秒且真的响应 abort」的模型撞 300ms 的墙。\n" +
+        "   两个断言缺一不可：**撞的是墙**（不是伪装成用户取消的 ABORTED_STREAMING），\n" +
+        "   **而且真的被截断了**（用时远小于 5 秒，不是跑完才发现）。\n",
+    );
+    const SLEEP_MS = 5_000;
+    const WALL_MS = 300;
+    const t0 = Date.now();
+    const slow = await runWith({
+      script: [],
+      budgets: { maxTurns: 999, maxActiveWallClockMs: WALL_MS },
+      workspace: join(tmp, "ws-deadline"),
+      modelOverride: new SlowModelPort(SLEEP_MS),
+    });
+    const elapsed = Date.now() - t0;
+    fact("模型单次调用时长 / 墙钟限额", `${SLEEP_MS}ms / ${WALL_MS}ms`);
+    fact("Terminal", slow.terminal);
+    fact("撞的轴", slow.hardAxis ?? "（没有 BudgetHardLimitReached）");
+    fact("整个 Run 实际耗时", `${elapsed}ms`);
+
+    /**
+     * 【定】`elapsed < SLEEP_MS` 是这一段的判别力所在。
+     *
+     * 只断言 Terminal 的话，一个「跑完 5 秒再在下一轮入口发现超预算」的实现
+     * 也会给出 BUDGET_EXHAUSTED —— 那正是修复前的行为，判据会假绿。
+     * 必须同时钉住「它没跑完」。
+     */
+    const fOk =
+      slow.terminal === "BUDGET_EXHAUSTED" &&
+      slow.hardAxis === "activeWallClockMs" &&
+      elapsed < SLEEP_MS;
+    verdict(
+      fOk,
+      fOk
+        ? `在途调用被 deadline 打断：${elapsed}ms 就结算了（模型本来要跑 ${SLEEP_MS}ms），` +
+          `Terminal 是 BUDGET_EXHAUSTED 而不是 ABORTED_STREAMING —— ` +
+          `预算撞墙不再伪装成「有人按了取消」`
+        : slow.terminal === "ABORTED_STREAMING"
+          ? "被打断了，但结算成 ABORTED_STREAMING —— 预算撞墙伪装成了用户取消"
+          : elapsed >= SLEEP_MS
+            ? `跑满了 ${elapsed}ms 才结算 —— 墙钟没有打断在途调用，只是在下一轮入口发现的`
+            : `Terminal=${slow.terminal} / 轴=${slow.hardAxis}`,
+    );
+    results.push({ name: "F", ok: fOk });
 
     // ────────────────────────────────────────────── 总判定
     section("总判定");

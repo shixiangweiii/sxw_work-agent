@@ -1,0 +1,14 @@
+{
+  "special": "Task 3 waiting-state SIGKILL then resume",
+  "status": "NOT_REACHED",
+  "reason": "真实模型没有调用 request_handoff；Run 未进入 WAITING_FOR_INTERACTION，因而没有可执行的等待态 SIGKILL/Resume 窗口。",
+  "runId": "run_08e0d76389fa",
+  "runtimeOutcome": "SUCCESS",
+  "graderPassed": false,
+  "hardPassedCount": 4,
+  "hardTotal": 7,
+  "interactionRequested": 0,
+  "interactionCompleted": 0,
+  "interactionResumed": 0,
+  "classification": "机制未到达，不判为 Resume 实现失败；同时作为 Task 3 任务终态失败证据。"
+}

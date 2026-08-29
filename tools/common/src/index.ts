@@ -198,6 +198,27 @@ export class CommonToolHandler implements ToolHandlerPort {
             ref: String(input["ref"] ?? ""),
             ...(input["start_line"] === undefined ? {} : { start_line: Number(input["start_line"]) }),
             ...(input["limit"] === undefined ? {} : { limit: Number(input["limit"]) }),
+            /**
+             * 【定】`line_offset` 必须透传。漏掉它 = `read_blob` 对**单行 blob**
+             * 完全失效，而单行正是被外置的主导形态（工具结果几乎都是一行 JSON，
+             * `totalLines: 1`，只能按字符续页）。
+             *
+             * 这一行不是补全，是修一个真实事故：2026-08-28 摸底考试题 1 三次全灭
+             * 就死在这里 —— 模型按 description 教的把 `nextLineOffset` 传回来，
+             * 每次都拿到**逐字节相同的第 1 页**，还被告知「还有下一页」。
+             * 53,000 字符的流水它永远只看得到前 12,000 个。
+             * 模型自己在轨迹里诊断出来了：「The blob read keeps returning the same
+             * first chunk regardless of the line_offset I pass.」
+             *
+             * 链路其余部分一直是对的（schema 声明了、description 教了、
+             * `executeReadBlob` 往下传、`SqliteBlobStore.get()` 正确切片）——
+             * 只有这一跳不通，而 `verify` 的取回判据打在 Port 上，跨不过这一跳。
+             * 判据补在 `verify:artifact` A 段（改走工具层）与 `verify:tools`
+             * 的「schema ↔ handler 参数逐个透传」段。
+             */
+            ...(input["line_offset"] === undefined
+              ? {}
+              : { line_offset: Number(input["line_offset"]) }),
           },
           ctx,
           this.deps.blobs,

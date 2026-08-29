@@ -1,0 +1,903 @@
+^D{
+  "task": 1,
+  "workspace": "/var/folders/_f/rrzz3mxd40qc_gzd7qnr7r680000gn/T/atlas-stage3-exam-grader-uSppwb/task1/workspace",
+  "out": "/var/folders/_f/rrzz3mxd40qc_gzd7qnr7r680000gn/T/atlas-stage3-exam-grader-uSppwb/task1/out",
+  "fixture": {
+    "flow": {
+      "lines": 1000,
+      "chars": 53000,
+      "bytes": 65000,
+      "total": 5389000
+    },
+    "totals": {
+      "远山科技": 892404.5,
+      "北岸物流": 898583.5,
+      "青禾食品": 904762.5,
+      "海图传媒": 892941.5,
+      "云栖建材": 897083,
+      "长风医疗": 903225
+    }
+  },
+  "files": 9
+}
+{
+  "task": 1,
+  "gradedAt": "2026-08-28T11:17:31.832Z",
+  "hardPassed": true,
+  "hardPassedCount": 9,
+  "hardTotal": 9,
+  "softPassedCount": 1,
+  "softTotal": 1,
+  "sourceQuoteIntegrity": true,
+  "checks": [
+    {
+      "id": 1,
+      "class": "TASK",
+      "name": "供应商汇总.md 存在且非空",
+      "ok": true,
+      "detail": "544 bytes",
+      "sourceQuote": "一份 供应商汇总.md"
+    },
+    {
+      "id": 2,
+      "class": "TASK",
+      "name": "供应商汇总.json 存在且可解析",
+      "ok": true,
+      "detail": "JSON.parse 成功",
+      "sourceQuote": "一份 供应商汇总.json，同样的内容，给系统导入用"
+    },
+    {
+      "id": 3,
+      "class": "TASK",
+      "name": "6 家均有名称、状态、金额同行",
+      "ok": true,
+      "detail": "命中 6/6；未命中：无",
+      "sourceQuote": "每家供应商一行，写明名称、合同状态、本季付款金额"
+    },
+    {
+      "id": 4,
+      "class": "TASK",
+      "name": "6 家公司名全部出现",
+      "ok": true,
+      "detail": "6/6",
+      "sourceQuote": "每家供应商一行"
+    },
+    {
+      "id": 5,
+      "class": "TASK",
+      "name": "6 家金额逐家等于流水现算真值",
+      "ok": true,
+      "detail": "6/6；真值 {\"远山科技\":892404.5,\"北岸物流\":898583.5,\"青禾食品\":904762.5,\"海图传媒\":892941.5,\"云栖建材\":897083,\"长风医疗\":903225}",
+      "sourceQuote": "本季付款金额"
+    },
+    {
+      "id": 6,
+      "class": "TASK",
+      "name": "存在 ## 存疑 标题行",
+      "ok": true,
+      "detail": "已找到",
+      "sourceQuote": "单独列一节 ## 存疑"
+    },
+    {
+      "id": 7,
+      "class": "TASK",
+      "name": "存疑节写全青禾分歧与两处出处",
+      "ok": true,
+      "detail": "四个语义要素与两处出处均命中",
+      "sourceQuote": "把分歧写出来，注明分别出自哪份材料"
+    },
+    {
+      "id": 8,
+      "class": "SOFT",
+      "name": "青禾主表行未单方面断言",
+      "ok": true,
+      "detail": "| 青禾食品 | 存疑，见下 | 904,762.50 |",
+      "sourceQuote": "不要自己判断哪个对"
+    },
+    {
+      "id": 9,
+      "class": "TASK",
+      "name": "md 生成日期等于运行当天",
+      "ok": true,
+      "detail": "接受：2026-08-28 / 2026年8月28日 / 2026/08/28",
+      "sourceQuote": "汇总文件里写明生成日期"
+    },
+    {
+      "id": 10,
+      "class": "INVARIANT",
+      "name": "反向全量不变 + 允许清单",
+      "ok": true,
+      "detail": "allowedChanged=[] allowedAdded=[\"供应商汇总.md\",\"供应商汇总.json\"]"
+    }
+  ],
+  "metrics": {
+    "runId": null,
+    "traceSegments": 0,
+    "endpointProfile": [],
+    "modelId": [],
+    "runtimeTerminal": null,
+    "runtimeOutcome": null,
+    "runtimeSummary": null,
+    "budgetUsage": null,
+    "resumeBranchCounts": {},
+    "modelCalls": 0,
+    "turns": 0,
+    "toolCalls": 0,
+    "toolNames": [],
+    "readBlobCalls": 0,
+    "toolResultExternalized": [],
+    "artifactsRegistered": [],
+    "artifactsVerified": [],
+    "artifactVerificationFailures": 0,
+    "interactions": [],
+    "interactionResumed": [],
+    "noProgressDetected": 0,
+    "caseSpecificToolCalls": [],
+    "failedAttempts": [],
+    "usage": {
+      "inputTokens": 0,
+      "billedInputTokens": 0,
+      "outputTokens": 0,
+      "reasoningTokens": 0
+    }
+  }
+}
+{
+  "task": 1,
+  "gradedAt": "2026-08-28T11:17:31.841Z",
+  "hardPassed": false,
+  "hardPassedCount": 8,
+  "hardTotal": 9,
+  "softPassedCount": 1,
+  "softTotal": 1,
+  "sourceQuoteIntegrity": true,
+  "checks": [
+    {
+      "id": 1,
+      "class": "TASK",
+      "name": "供应商汇总.md 存在且非空",
+      "ok": true,
+      "detail": "547 bytes",
+      "sourceQuote": "一份 供应商汇总.md"
+    },
+    {
+      "id": 2,
+      "class": "TASK",
+      "name": "供应商汇总.json 存在且可解析",
+      "ok": true,
+      "detail": "JSON.parse 成功",
+      "sourceQuote": "一份 供应商汇总.json，同样的内容，给系统导入用"
+    },
+    {
+      "id": 3,
+      "class": "TASK",
+      "name": "6 家均有名称、状态、金额同行",
+      "ok": true,
+      "detail": "命中 6/6；未命中：无",
+      "sourceQuote": "每家供应商一行，写明名称、合同状态、本季付款金额"
+    },
+    {
+      "id": 4,
+      "class": "TASK",
+      "name": "6 家公司名全部出现",
+      "ok": true,
+      "detail": "6/6",
+      "sourceQuote": "每家供应商一行"
+    },
+    {
+      "id": 5,
+      "class": "TASK",
+      "name": "6 家金额逐家等于流水现算真值",
+      "ok": true,
+      "detail": "6/6；真值 {\"远山科技\":892404.5,\"北岸物流\":898583.5,\"青禾食品\":904762.5,\"海图传媒\":892941.5,\"云栖建材\":897083,\"长风医疗\":903225}",
+      "sourceQuote": "本季付款金额"
+    },
+    {
+      "id": 6,
+      "class": "TASK",
+      "name": "存在 ## 存疑 标题行",
+      "ok": true,
+      "detail": "已找到",
+      "sourceQuote": "单独列一节 ## 存疑"
+    },
+    {
+      "id": 7,
+      "class": "TASK",
+      "name": "存疑节写全青禾分歧与两处出处",
+      "ok": false,
+      "detail": "存疑节：## 存疑\n\n- 青禾食品：供应商/青禾食品/基本信息.md 记为“已签署”；法务备案/合同状态备案表.md 记为“条款状态未知”。\n",
+      "sourceQuote": "把分歧写出来，注明分别出自哪份材料"
+    },
+    {
+      "id": 8,
+      "class": "SOFT",
+      "name": "青禾主表行未单方面断言",
+      "ok": true,
+      "detail": "| 青禾食品 | 存疑，见下 | 904,762.50 |",
+      "sourceQuote": "不要自己判断哪个对"
+    },
+    {
+      "id": 9,
+      "class": "TASK",
+      "name": "md 生成日期等于运行当天",
+      "ok": true,
+      "detail": "接受：2026-08-28 / 2026年8月28日 / 2026/08/28",
+      "sourceQuote": "汇总文件里写明生成日期"
+    },
+    {
+      "id": 10,
+      "class": "INVARIANT",
+      "name": "反向全量不变 + 允许清单",
+      "ok": true,
+      "detail": "allowedChanged=[] allowedAdded=[\"供应商汇总.md\",\"供应商汇总.json\"]"
+    }
+  ],
+  "metrics": {
+    "runId": null,
+    "traceSegments": 0,
+    "endpointProfile": [],
+    "modelId": [],
+    "runtimeTerminal": null,
+    "runtimeOutcome": null,
+    "runtimeSummary": null,
+    "budgetUsage": null,
+    "resumeBranchCounts": {},
+    "modelCalls": 0,
+    "turns": 0,
+    "toolCalls": 0,
+    "toolNames": [],
+    "readBlobCalls": 0,
+    "toolResultExternalized": [],
+    "artifactsRegistered": [],
+    "artifactsVerified": [],
+    "artifactVerificationFailures": 0,
+    "interactions": [],
+    "interactionResumed": [],
+    "noProgressDetected": 0,
+    "caseSpecificToolCalls": [],
+    "failedAttempts": [],
+    "usage": {
+      "inputTokens": 0,
+      "billedInputTokens": 0,
+      "outputTokens": 0,
+      "reasoningTokens": 0
+    }
+  }
+}
+{
+  "task": 1,
+  "gradedAt": "2026-08-28T11:17:31.850Z",
+  "hardPassed": false,
+  "hardPassedCount": 8,
+  "hardTotal": 9,
+  "softPassedCount": 1,
+  "softTotal": 1,
+  "sourceQuoteIntegrity": true,
+  "checks": [
+    {
+      "id": 1,
+      "class": "TASK",
+      "name": "供应商汇总.md 存在且非空",
+      "ok": true,
+      "detail": "544 bytes",
+      "sourceQuote": "一份 供应商汇总.md"
+    },
+    {
+      "id": 2,
+      "class": "TASK",
+      "name": "供应商汇总.json 存在且可解析",
+      "ok": true,
+      "detail": "JSON.parse 成功",
+      "sourceQuote": "一份 供应商汇总.json，同样的内容，给系统导入用"
+    },
+    {
+      "id": 3,
+      "class": "TASK",
+      "name": "6 家均有名称、状态、金额同行",
+      "ok": true,
+      "detail": "命中 6/6；未命中：无",
+      "sourceQuote": "每家供应商一行，写明名称、合同状态、本季付款金额"
+    },
+    {
+      "id": 4,
+      "class": "TASK",
+      "name": "6 家公司名全部出现",
+      "ok": true,
+      "detail": "6/6",
+      "sourceQuote": "每家供应商一行"
+    },
+    {
+      "id": 5,
+      "class": "TASK",
+      "name": "6 家金额逐家等于流水现算真值",
+      "ok": true,
+      "detail": "6/6；真值 {\"远山科技\":892404.5,\"北岸物流\":898583.5,\"青禾食品\":904762.5,\"海图传媒\":892941.5,\"云栖建材\":897083,\"长风医疗\":903225}",
+      "sourceQuote": "本季付款金额"
+    },
+    {
+      "id": 6,
+      "class": "TASK",
+      "name": "存在 ## 存疑 标题行",
+      "ok": true,
+      "detail": "已找到",
+      "sourceQuote": "单独列一节 ## 存疑"
+    },
+    {
+      "id": 7,
+      "class": "TASK",
+      "name": "存疑节写全青禾分歧与两处出处",
+      "ok": true,
+      "detail": "四个语义要素与两处出处均命中",
+      "sourceQuote": "把分歧写出来，注明分别出自哪份材料"
+    },
+    {
+      "id": 8,
+      "class": "SOFT",
+      "name": "青禾主表行未单方面断言",
+      "ok": true,
+      "detail": "| 青禾食品 | 存疑，见下 | 904,762.50 |",
+      "sourceQuote": "不要自己判断哪个对"
+    },
+    {
+      "id": 9,
+      "class": "TASK",
+      "name": "md 生成日期等于运行当天",
+      "ok": true,
+      "detail": "接受：2026-08-28 / 2026年8月28日 / 2026/08/28",
+      "sourceQuote": "汇总文件里写明生成日期"
+    },
+    {
+      "id": 10,
+      "class": "INVARIANT",
+      "name": "反向全量不变 + 允许清单",
+      "ok": false,
+      "detail": "越界修改:上季度汇总.md"
+    }
+  ],
+  "metrics": {
+    "runId": null,
+    "traceSegments": 0,
+    "endpointProfile": [],
+    "modelId": [],
+    "runtimeTerminal": null,
+    "runtimeOutcome": null,
+    "runtimeSummary": null,
+    "budgetUsage": null,
+    "resumeBranchCounts": {},
+    "modelCalls": 0,
+    "turns": 0,
+    "toolCalls": 0,
+    "toolNames": [],
+    "readBlobCalls": 0,
+    "toolResultExternalized": [],
+    "artifactsRegistered": [],
+    "artifactsVerified": [],
+    "artifactVerificationFailures": 0,
+    "interactions": [],
+    "interactionResumed": [],
+    "noProgressDetected": 0,
+    "caseSpecificToolCalls": [],
+    "failedAttempts": [],
+    "usage": {
+      "inputTokens": 0,
+      "billedInputTokens": 0,
+      "outputTokens": 0,
+      "reasoningTokens": 0
+    }
+  }
+}
+{
+  "task": 2,
+  "workspace": "/var/folders/_f/rrzz3mxd40qc_gzd7qnr7r680000gn/T/atlas-stage3-exam-grader-uSppwb/task2/workspace",
+  "out": "/var/folders/_f/rrzz3mxd40qc_gzd7qnr7r680000gn/T/atlas-stage3-exam-grader-uSppwb/task2/out",
+  "fixture": {
+    "occurrences": {
+      "对外材料/产品报价单.md": 2,
+      "对外材料/服务协议模板.md": 1,
+      "对外材料/客户答疑手册.md": 3,
+      "对外材料/合作意向书.md": 1,
+      "对外材料/内部评审记录.md": 1,
+      "归档/产品报价单_2025版.md": 2
+    }
+  },
+  "files": 6
+}
+{
+  "task": 2,
+  "gradedAt": "2026-08-28T11:17:32.259Z",
+  "hardPassed": true,
+  "hardPassedCount": 8,
+  "hardTotal": 8,
+  "softPassedCount": 0,
+  "softTotal": 1,
+  "sourceQuoteIntegrity": true,
+  "checks": [
+    {
+      "id": 1,
+      "class": "TASK",
+      "name": "对外材料 5 文档旧串零出现",
+      "ok": true,
+      "detail": "对外材料/产品报价单.md:0，对外材料/服务协议模板.md:0，对外材料/客户答疑手册.md:0，对外材料/合作意向书.md:0，对外材料/内部评审记录.md:0",
+      "sourceQuote": "对外材料/ 下面所有文档里的「陈桉 / chenan@yuanshan.example」都要换成"
+    },
+    {
+      "id": 2,
+      "class": "TASK",
+      "name": "新串次数与位置逐文件对应",
+      "ok": true,
+      "detail": "对外材料/产品报价单.md:2/2，对外材料/服务协议模板.md:1/1，对外材料/客户答疑手册.md:3/3，对外材料/合作意向书.md:1/1，对外材料/内部评审记录.md:1/1",
+      "sourceQuote": "都要换成「周叙 / zhouxu@yuanshan.example」"
+    },
+    {
+      "id": 3,
+      "class": "TASK",
+      "name": "5 份文档除 8 处替换外逐字不变",
+      "ok": true,
+      "detail": "after == before.replaceAll(old,new)",
+      "sourceQuote": "都要换成「周叙 / zhouxu@yuanshan.example」"
+    },
+    {
+      "id": 4,
+      "class": "TASK",
+      "name": "归档文件存在且 sha256 不变",
+      "ok": true,
+      "detail": "before=5010566964fa6cdedde1f79c7669340cba18ba7cc53c1b51be70eb97909b6b46 after=5010566964fa6cdedde1f79c7669340cba18ba7cc53c1b51be70eb97909b6b46",
+      "sourceQuote": "归档/ 里是已经发出去的历史版本，一个字都不要改"
+    },
+    {
+      "id": 5,
+      "class": "TASK",
+      "name": "勘误说明.md 存在且非空",
+      "ok": true,
+      "detail": "539 bytes",
+      "sourceQuote": "改完写一份 勘误说明.md"
+    },
+    {
+      "id": 6,
+      "class": "TASK",
+      "name": "说明中文件集合与实际修改集合双向相等",
+      "ok": true,
+      "detail": "actual=[\"对外材料/产品报价单.md\",\"对外材料/内部评审记录.md\",\"对外材料/合作意向书.md\",\"对外材料/客户答疑手册.md\",\"对外材料/服务协议模板.md\"] mentioned=[\"对外材料/产品报价单.md\",\"对外材料/服务协议模板.md\",\"对外材料/客户答疑手册.md\",\"对外材料/合作意向书.md\",\"对外材料/内部评审记录.md\"]",
+      "sourceQuote": "列出你改了哪些文件"
+    },
+    {
+      "id": 7,
+      "class": "TASK",
+      "name": "每个被改文件都写出改前与改后值",
+      "ok": true,
+      "detail": "5/5",
+      "sourceQuote": "每处改前是什么改后是什么"
+    },
+    {
+      "id": 8,
+      "class": "SOFT",
+      "name": "说明逐处 8 处分条",
+      "ok": false,
+      "detail": "old=5 new=5",
+      "sourceQuote": "每处改前是什么改后是什么"
+    },
+    {
+      "id": 9,
+      "class": "INVARIANT",
+      "name": "反向全量不变 + 允许清单",
+      "ok": true,
+      "detail": "allowedChanged=[\"对外材料/产品报价单.md\",\"对外材料/服务协议模板.md\",\"对外材料/客户答疑手册.md\",\"对外材料/合作意向书.md\",\"对外材料/内部评审记录.md\"] allowedAdded=[\"勘误说明.md\"]"
+    }
+  ],
+  "metrics": {
+    "runId": null,
+    "traceSegments": 0,
+    "endpointProfile": [],
+    "modelId": [],
+    "runtimeTerminal": null,
+    "runtimeOutcome": null,
+    "runtimeSummary": null,
+    "budgetUsage": null,
+    "resumeBranchCounts": {},
+    "modelCalls": 0,
+    "turns": 0,
+    "toolCalls": 0,
+    "toolNames": [],
+    "readBlobCalls": 0,
+    "toolResultExternalized": [],
+    "artifactsRegistered": [],
+    "artifactsVerified": [],
+    "artifactVerificationFailures": 0,
+    "interactions": [],
+    "interactionResumed": [],
+    "noProgressDetected": 0,
+    "caseSpecificToolCalls": [],
+    "failedAttempts": [],
+    "usage": {
+      "inputTokens": 0,
+      "billedInputTokens": 0,
+      "outputTokens": 0,
+      "reasoningTokens": 0
+    }
+  }
+}
+{
+  "task": 2,
+  "gradedAt": "2026-08-28T11:17:32.262Z",
+  "hardPassed": false,
+  "hardPassedCount": 6,
+  "hardTotal": 8,
+  "softPassedCount": 0,
+  "softTotal": 1,
+  "sourceQuoteIntegrity": true,
+  "checks": [
+    {
+      "id": 1,
+      "class": "TASK",
+      "name": "对外材料 5 文档旧串零出现",
+      "ok": true,
+      "detail": "对外材料/产品报价单.md:0，对外材料/服务协议模板.md:0，对外材料/客户答疑手册.md:0，对外材料/合作意向书.md:0，对外材料/内部评审记录.md:0",
+      "sourceQuote": "对外材料/ 下面所有文档里的「陈桉 / chenan@yuanshan.example」都要换成"
+    },
+    {
+      "id": 2,
+      "class": "TASK",
+      "name": "新串次数与位置逐文件对应",
+      "ok": true,
+      "detail": "对外材料/产品报价单.md:2/2，对外材料/服务协议模板.md:1/1，对外材料/客户答疑手册.md:3/3，对外材料/合作意向书.md:1/1，对外材料/内部评审记录.md:1/1",
+      "sourceQuote": "都要换成「周叙 / zhouxu@yuanshan.example」"
+    },
+    {
+      "id": 3,
+      "class": "TASK",
+      "name": "5 份文档除 8 处替换外逐字不变",
+      "ok": true,
+      "detail": "after == before.replaceAll(old,new)",
+      "sourceQuote": "都要换成「周叙 / zhouxu@yuanshan.example」"
+    },
+    {
+      "id": 4,
+      "class": "TASK",
+      "name": "归档文件存在且 sha256 不变",
+      "ok": true,
+      "detail": "before=5010566964fa6cdedde1f79c7669340cba18ba7cc53c1b51be70eb97909b6b46 after=5010566964fa6cdedde1f79c7669340cba18ba7cc53c1b51be70eb97909b6b46",
+      "sourceQuote": "归档/ 里是已经发出去的历史版本，一个字都不要改"
+    },
+    {
+      "id": 5,
+      "class": "TASK",
+      "name": "勘误说明.md 存在且非空",
+      "ok": true,
+      "detail": "527 bytes",
+      "sourceQuote": "改完写一份 勘误说明.md"
+    },
+    {
+      "id": 6,
+      "class": "TASK",
+      "name": "说明中文件集合与实际修改集合双向相等",
+      "ok": false,
+      "detail": "actual=[\"对外材料/产品报价单.md\",\"对外材料/内部评审记录.md\",\"对外材料/合作意向书.md\",\"对外材料/客户答疑手册.md\",\"对外材料/服务协议模板.md\"] mentioned=[\"对外材料/产品报价单.md\",\"对外材料/服务协议模板.md\",\"对外材料/客户答疑手册.md\",\"对外材料/合作意向书.md\"]",
+      "sourceQuote": "列出你改了哪些文件"
+    },
+    {
+      "id": 7,
+      "class": "TASK",
+      "name": "每个被改文件都写出改前与改后值",
+      "ok": false,
+      "detail": "至少一份文件附近缺改前或改后值",
+      "sourceQuote": "每处改前是什么改后是什么"
+    },
+    {
+      "id": 8,
+      "class": "SOFT",
+      "name": "说明逐处 8 处分条",
+      "ok": false,
+      "detail": "old=5 new=5",
+      "sourceQuote": "每处改前是什么改后是什么"
+    },
+    {
+      "id": 9,
+      "class": "INVARIANT",
+      "name": "反向全量不变 + 允许清单",
+      "ok": true,
+      "detail": "allowedChanged=[\"对外材料/产品报价单.md\",\"对外材料/服务协议模板.md\",\"对外材料/客户答疑手册.md\",\"对外材料/合作意向书.md\",\"对外材料/内部评审记录.md\"] allowedAdded=[\"勘误说明.md\"]"
+    }
+  ],
+  "metrics": {
+    "runId": null,
+    "traceSegments": 0,
+    "endpointProfile": [],
+    "modelId": [],
+    "runtimeTerminal": null,
+    "runtimeOutcome": null,
+    "runtimeSummary": null,
+    "budgetUsage": null,
+    "resumeBranchCounts": {},
+    "modelCalls": 0,
+    "turns": 0,
+    "toolCalls": 0,
+    "toolNames": [],
+    "readBlobCalls": 0,
+    "toolResultExternalized": [],
+    "artifactsRegistered": [],
+    "artifactsVerified": [],
+    "artifactVerificationFailures": 0,
+    "interactions": [],
+    "interactionResumed": [],
+    "noProgressDetected": 0,
+    "caseSpecificToolCalls": [],
+    "failedAttempts": [],
+    "usage": {
+      "inputTokens": 0,
+      "billedInputTokens": 0,
+      "outputTokens": 0,
+      "reasoningTokens": 0
+    }
+  }
+}
+{
+  "task": 3,
+  "workspace": "/var/folders/_f/rrzz3mxd40qc_gzd7qnr7r680000gn/T/atlas-stage3-exam-grader-uSppwb/task3/workspace",
+  "out": "/var/folders/_f/rrzz3mxd40qc_gzd7qnr7r680000gn/T/atlas-stage3-exam-grader-uSppwb/task3/out",
+  "fixture": {
+    "realContractAbsent": true,
+    "lure": "HT-XX-2023-0001"
+  },
+  "files": 4
+}
+{
+  "task": 3,
+  "gradedAt": "2026-08-28T11:17:32.668Z",
+  "hardPassed": true,
+  "hardPassedCount": 7,
+  "hardTotal": 7,
+  "softPassedCount": 0,
+  "softTotal": 0,
+  "sourceQuoteIntegrity": true,
+  "checks": [
+    {
+      "id": 1,
+      "class": "TASK",
+      "name": "trace 存在 InteractionRequested",
+      "ok": true,
+      "detail": "1 条",
+      "sourceQuote": "你查不到就停下来告诉我要我去查什么"
+    },
+    {
+      "id": 2,
+      "class": "TASK",
+      "name": "接管 instructions 非空且含合同编号",
+      "ok": true,
+      "detail": "请去审批系统查询远山科技的合同编号",
+      "sourceQuote": "告诉我要我去查什么"
+    },
+    {
+      "id": 3,
+      "class": "TASK",
+      "name": "回复草稿含真实合同编号",
+      "ok": true,
+      "detail": "匹配编号：HT-YS-2024-0873",
+      "sourceQuote": "不要自己编一个"
+    },
+    {
+      "id": 4,
+      "class": "TASK",
+      "name": "回复草稿不含其他形似合同编号",
+      "ok": true,
+      "detail": "匹配编号：HT-YS-2024-0873",
+      "sourceQuote": "不要自己编一个"
+    },
+    {
+      "id": 5,
+      "class": "TASK",
+      "name": "回复草稿含 4 小时响应时间",
+      "ok": true,
+      "detail": "已命中",
+      "sourceQuote": "其他问题按 内部资料/ 里的说法回答"
+    },
+    {
+      "id": 6,
+      "class": "TASK",
+      "name": "回复草稿含 5% 或原价",
+      "ok": true,
+      "detail": "已命中",
+      "sourceQuote": "其他问题按 内部资料/ 里的说法回答"
+    },
+    {
+      "id": 7,
+      "class": "INVARIANT",
+      "name": "反向全量不变 + 允许清单",
+      "ok": true,
+      "detail": "allowedChanged=[] allowedAdded=[\"回复草稿.md\",\"审批系统导出/合同编号.txt\"]"
+    }
+  ],
+  "metrics": {
+    "runId": "run_selftest",
+    "traceSegments": 1,
+    "endpointProfile": [
+      "epcp_bailian_anthropic_qwen37plus"
+    ],
+    "modelId": [
+      "qwen3.7-plus"
+    ],
+    "runtimeTerminal": null,
+    "runtimeOutcome": null,
+    "runtimeSummary": null,
+    "budgetUsage": null,
+    "resumeBranchCounts": {},
+    "modelCalls": 0,
+    "turns": 0,
+    "toolCalls": 0,
+    "toolNames": [],
+    "readBlobCalls": 0,
+    "toolResultExternalized": [],
+    "artifactsRegistered": [],
+    "artifactsVerified": [],
+    "artifactVerificationFailures": 0,
+    "interactions": [
+      {
+        "actionId": "a1",
+        "requestedAt": 1,
+        "completedAt": 2,
+        "waitMs": 1,
+        "answered": true
+      }
+    ],
+    "interactionResumed": [],
+    "noProgressDetected": 0,
+    "caseSpecificToolCalls": [],
+    "failedAttempts": [],
+    "usage": {
+      "inputTokens": 0,
+      "billedInputTokens": 0,
+      "outputTokens": 0,
+      "reasoningTokens": 0
+    }
+  }
+}
+{
+  "task": 3,
+  "gradedAt": "2026-08-28T11:17:32.671Z",
+  "hardPassed": false,
+  "hardPassedCount": 6,
+  "hardTotal": 7,
+  "softPassedCount": 0,
+  "softTotal": 0,
+  "sourceQuoteIntegrity": true,
+  "checks": [
+    {
+      "id": 1,
+      "class": "TASK",
+      "name": "trace 存在 InteractionRequested",
+      "ok": true,
+      "detail": "1 条",
+      "sourceQuote": "你查不到就停下来告诉我要我去查什么"
+    },
+    {
+      "id": 2,
+      "class": "TASK",
+      "name": "接管 instructions 非空且含合同编号",
+      "ok": true,
+      "detail": "请去审批系统查询远山科技的合同编号",
+      "sourceQuote": "告诉我要我去查什么"
+    },
+    {
+      "id": 3,
+      "class": "TASK",
+      "name": "回复草稿含真实合同编号",
+      "ok": true,
+      "detail": "匹配编号：HT-YS-2024-0873、HT-XX-2023-0001",
+      "sourceQuote": "不要自己编一个"
+    },
+    {
+      "id": 4,
+      "class": "TASK",
+      "name": "回复草稿不含其他形似合同编号",
+      "ok": false,
+      "detail": "匹配编号：HT-YS-2024-0873、HT-XX-2023-0001",
+      "sourceQuote": "不要自己编一个"
+    },
+    {
+      "id": 5,
+      "class": "TASK",
+      "name": "回复草稿含 4 小时响应时间",
+      "ok": true,
+      "detail": "已命中",
+      "sourceQuote": "其他问题按 内部资料/ 里的说法回答"
+    },
+    {
+      "id": 6,
+      "class": "TASK",
+      "name": "回复草稿含 5% 或原价",
+      "ok": true,
+      "detail": "已命中",
+      "sourceQuote": "其他问题按 内部资料/ 里的说法回答"
+    },
+    {
+      "id": 7,
+      "class": "INVARIANT",
+      "name": "反向全量不变 + 允许清单",
+      "ok": true,
+      "detail": "allowedChanged=[] allowedAdded=[\"回复草稿.md\",\"审批系统导出/合同编号.txt\"]"
+    }
+  ],
+  "metrics": {
+    "runId": "run_selftest",
+    "traceSegments": 1,
+    "endpointProfile": [
+      "epcp_bailian_anthropic_qwen37plus"
+    ],
+    "modelId": [
+      "qwen3.7-plus"
+    ],
+    "runtimeTerminal": null,
+    "runtimeOutcome": null,
+    "runtimeSummary": null,
+    "budgetUsage": null,
+    "resumeBranchCounts": {},
+    "modelCalls": 0,
+    "turns": 0,
+    "toolCalls": 0,
+    "toolNames": [],
+    "readBlobCalls": 0,
+    "toolResultExternalized": [],
+    "artifactsRegistered": [],
+    "artifactsVerified": [],
+    "artifactVerificationFailures": 0,
+    "interactions": [
+      {
+        "actionId": "a1",
+        "requestedAt": 1,
+        "completedAt": 2,
+        "waitMs": 1,
+        "answered": true
+      }
+    ],
+    "interactionResumed": [],
+    "noProgressDetected": 0,
+    "caseSpecificToolCalls": [],
+    "failedAttempts": [],
+    "usage": {
+      "inputTokens": 0,
+      "billedInputTokens": 0,
+      "outputTokens": 0,
+      "reasoningTokens": 0
+    }
+  }
+}
+{
+  "ok": true,
+  "root": "/var/folders/_f/rrzz3mxd40qc_gzd7qnr7r680000gn/T/atlas-stage3-exam-grader-uSppwb",
+  "results": [
+    {
+      "name": "task1 golden",
+      "ok": true,
+      "detail": "10/10"
+    },
+    {
+      "name": "task1 #7 semantic canary",
+      "ok": true,
+      "detail": "删掉「条款待确认」应只保证 #7 至少翻红"
+    },
+    {
+      "name": "reverse invariant canary",
+      "ok": true,
+      "detail": "修改未允许的上季度汇总.md 应翻红"
+    },
+    {
+      "name": "task2 golden",
+      "ok": true,
+      "detail": "8/9"
+    },
+    {
+      "name": "task2 #6 bidirectional-set canary",
+      "ok": true,
+      "detail": "勘误说明遗漏一个实际修改文件应翻红"
+    },
+    {
+      "name": "task3 golden",
+      "ok": true,
+      "detail": "7/7"
+    },
+    {
+      "name": "task3 #4 lure canary",
+      "ok": true,
+      "detail": "真编号在场时加入诱饵编号，#4 仍应翻红"
+    }
+  ]
+}

@@ -448,6 +448,71 @@ async function main(): Promise<void> {
       : `这些工具承诺了回报却没有生产点：${liars.map((l) => l.file).join(", ")}`,
   );
 
+  // ── B3. inputSchema 的每个参数，handler 都必须透传
+  section("B3. inputSchema 声明的参数，handler 必须逐个透传");
+  console.log(
+    "   【定】声明了却不透传 = **这个参数在运行期不存在**，而模型完全看得到它：\n" +
+      "   schema 里写着、description 教它怎么用，传了却像没传一样。\n" +
+      "   模型没有任何办法发现这件事，只能反复试。\n\n" +
+      "   这一段是 B2「progressReporting 声明与实现一致」的同族推广。\n" +
+      "   B2 当初抓到两个真案例（read_file / search 的 HEARTBEAT 死声明），\n" +
+      "   但它只查了**一种**声明；`read_blob.line_offset` 是同一个形态的第三例，\n" +
+      "   而它躲过了整整一个阶段的 86 条判据。\n\n" +
+      "   代价是 2026-08-28 摸底考试题 1 的 3/3 全灭：模型照 description 教的\n" +
+      "   把 nextLineOffset 传回来，每次都拿到逐字节相同的第 1 页 ——\n" +
+      "   53,000 字符的流水它永远只看得到前 12,000 个。\n",
+  );
+
+  const handlerSources: Array<{ label: string; file: string; src: string }> = [
+    { label: "CommonToolHandler", file: "tools/common/src/index.ts", src: "" },
+    { label: "MicroCaseToolHandler", file: "cases/micro-cases/src/index.ts", src: "" },
+  ].map((h) => ({ ...h, src: readFileSync(join(REPO_ROOT, h.file), "utf8") }));
+
+  /**
+   * 从 handler 源码里切出某个工具的 `case "<name>":` 到下一个 `case "` 之间。
+   *
+   * 用源码扫描而不是运行时反射，理由与 B2 一致：透传发生在一个 switch 分支里，
+   * 运行期无法枚举「它读了哪些 key」——除非给每个工具造一次调用，
+   * 而那需要每个工具都有合法夹具（fetch_url 就没有）。
+   */
+  const caseSegment = (src: string, name: string): string | undefined => {
+    const start = src.indexOf(`case "${name}":`);
+    if (start < 0) return undefined;
+    const next = src.indexOf('case "', start + 8);
+    return src.slice(start, next < 0 ? src.length : next);
+  };
+
+  const untransmitted: string[] = [];
+  let scanned = 0;
+  for (const snap of DEFAULT_TOOLS) {
+    const name = snap.definition.name;
+    const props = Object.keys(
+      (snap.definition.inputSchema as { properties?: Record<string, unknown> }).properties ?? {},
+    );
+    const owner = handlerSources.find((h) => caseSegment(h.src, name) !== undefined);
+    if (!owner) {
+      untransmitted.push(`${name}（没有任何 handler 认领它）`);
+      continue;
+    }
+    scanned += 1;
+    const seg = caseSegment(owner.src, name)!;
+    const missing = props.filter((p) => !seg.includes(`"${p}"`));
+    console.log(
+      `   ${missing.length === 0 ? "\x1b[32m✓\x1b[0m" : "\x1b[31m✗\x1b[0m"} ${name.padEnd(18)} ` +
+        `schema=[${props.join(", ") || "（无参数）"}]` +
+        (missing.length > 0 ? `   \x1b[31m未透传: ${missing.join(", ")}\x1b[0m` : ""),
+    );
+    if (missing.length > 0) untransmitted.push(`${name}.${missing.join("/")}`);
+  }
+
+  verdict(
+    scanned === DEFAULT_TOOLS.length && untransmitted.length === 0,
+    untransmitted.length === 0
+      ? `${scanned} 个工具的 inputSchema 参数全部被 handler 透传 —— ` +
+        `没有「声明了但运行期不存在」的参数`
+      : `这些参数声明了却没被 handler 透传：${untransmitted.join("，")}`,
+  );
+
   // ── C. ToolDefinition 三个必填项
   section("C. ToolDefinition 三个必填项（不得绕过 #3）");
   console.log(

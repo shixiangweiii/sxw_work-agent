@@ -1,0 +1,224 @@
+{
+  "task": 1,
+  "gradedAt": "2026-08-28T11:44:42.303Z",
+  "hardPassed": false,
+  "hardPassedCount": 6,
+  "hardTotal": 9,
+  "softPassedCount": 1,
+  "softTotal": 1,
+  "sourceQuoteIntegrity": true,
+  "checks": [
+    {
+      "id": 1,
+      "class": "TASK",
+      "name": "供应商汇总.md 存在且非空",
+      "ok": true,
+      "detail": "772 bytes",
+      "sourceQuote": "一份 供应商汇总.md"
+    },
+    {
+      "id": 2,
+      "class": "TASK",
+      "name": "供应商汇总.json 存在且可解析",
+      "ok": false,
+      "detail": "文件不存在",
+      "sourceQuote": "一份 供应商汇总.json，同样的内容，给系统导入用"
+    },
+    {
+      "id": 3,
+      "class": "TASK",
+      "name": "6 家均有名称、状态、金额同行",
+      "ok": true,
+      "detail": "命中 6/6；未命中：无",
+      "sourceQuote": "每家供应商一行，写明名称、合同状态、本季付款金额"
+    },
+    {
+      "id": 4,
+      "class": "TASK",
+      "name": "6 家公司名全部出现",
+      "ok": true,
+      "detail": "6/6",
+      "sourceQuote": "每家供应商一行"
+    },
+    {
+      "id": 5,
+      "class": "TASK",
+      "name": "6 家金额逐家等于流水现算真值",
+      "ok": false,
+      "detail": "1/6；真值 {\"远山科技\":892404.5,\"北岸物流\":898583.5,\"青禾食品\":904762.5,\"海图传媒\":892941.5,\"云栖建材\":897083,\"长风医疗\":903225}",
+      "sourceQuote": "本季付款金额"
+    },
+    {
+      "id": 6,
+      "class": "TASK",
+      "name": "存在 ## 存疑 标题行",
+      "ok": true,
+      "detail": "已找到",
+      "sourceQuote": "单独列一节 ## 存疑"
+    },
+    {
+      "id": 7,
+      "class": "TASK",
+      "name": "存疑节写全青禾分歧与两处出处",
+      "ok": true,
+      "detail": "四个语义要素与两处出处均命中",
+      "sourceQuote": "把分歧写出来，注明分别出自哪份材料"
+    },
+    {
+      "id": 8,
+      "class": "SOFT",
+      "name": "青禾主表行未单方面断言",
+      "ok": true,
+      "detail": "| 青禾食品 | 见「存疑」 | 885595.00 |",
+      "sourceQuote": "不要自己判断哪个对"
+    },
+    {
+      "id": 9,
+      "class": "TASK",
+      "name": "md 生成日期等于运行当天",
+      "ok": true,
+      "detail": "接受：2026-08-28 / 2026年8月28日 / 2026/08/28",
+      "sourceQuote": "汇总文件里写明生成日期"
+    },
+    {
+      "id": 10,
+      "class": "INVARIANT",
+      "name": "反向全量不变 + 允许清单",
+      "ok": false,
+      "detail": "越界新增:_计算脚本.txt"
+    }
+  ],
+  "metrics": {
+    "runId": "run_a52529675010",
+    "traceSegments": 1,
+    "endpointProfile": [
+      "epcp_bailian_anthropic_qwen37plus@1755907200000"
+    ],
+    "modelId": [
+      "qwen3.7-plus"
+    ],
+    "runtimeTerminal": "BUDGET_EXHAUSTED",
+    "runtimeOutcome": "BUDGET_EXHAUSTED",
+    "runtimeSummary": "Let me carefully compute each supplier's total from the raw data I already have in context. I'll do this by extracting the amounts for each supplier from the data I've read.",
+    "budgetUsage": {
+      "turns": 12,
+      "modelCalls": 12,
+      "toolCalls": 30,
+      "inputTokens": 379924,
+      "outputTokens": 46563,
+      "billedInputTokens": 420784,
+      "activeWallClockMs": 809775,
+      "startedAt": 1787916658768
+    },
+    "resumeBranchCounts": {},
+    "modelCalls": 12,
+    "turns": 12,
+    "toolCalls": 30,
+    "toolNames": [
+      "list_dir",
+      "list_dir",
+      "list_dir",
+      "list_dir",
+      "read_file",
+      "read_file",
+      "list_dir",
+      "list_dir",
+      "list_dir",
+      "list_dir",
+      "list_dir",
+      "list_dir",
+      "read_file",
+      "read_file",
+      "read_file",
+      "read_file",
+      "read_file",
+      "read_file",
+      "read_blob",
+      "read_blob",
+      "read_file",
+      "read_file",
+      "read_file",
+      "read_file",
+      "read_file",
+      "read_file",
+      "write_file",
+      "write_file",
+      "read_file",
+      "write_file"
+    ],
+    "readBlobCalls": 2,
+    "toolResultExternalized": [
+      {
+        "actionId": "act_70baae483ee5",
+        "toolName": "read_file",
+        "ref": "blob_320b4e60f3bd_0dysod",
+        "sizeBytes": 66124,
+        "approxTokens": 21647
+      },
+      {
+        "actionId": "act_5c23e637564b",
+        "toolName": "read_file",
+        "ref": "blob_320b4e60f3bd_wiaxiq",
+        "sizeBytes": 66124,
+        "approxTokens": 21647
+      },
+      {
+        "actionId": "act_61664566cd4c",
+        "toolName": "read_file",
+        "ref": "blob_320b4e60f3bd_5joe8x",
+        "sizeBytes": 66124,
+        "approxTokens": 21647
+      }
+    ],
+    "artifactsRegistered": [
+      {
+        "artifactId": "art_供应商汇总_md_v1_940896a8",
+        "logicalId": "供应商汇总.md",
+        "version": 1,
+        "role": "DELIVERABLE",
+        "kind": "text"
+      },
+      {
+        "artifactId": "art_供应商汇总_md_v2_9e809c9b",
+        "logicalId": "供应商汇总.md",
+        "version": 2,
+        "role": "DELIVERABLE",
+        "kind": "text"
+      }
+    ],
+    "artifactsVerified": [
+      {
+        "artifactId": "art_供应商汇总_md_v1_940896a8",
+        "role": "DELIVERABLE",
+        "ok": true,
+        "checksRun": [
+          "hash-matches-registration",
+          "text-encoding-valid"
+        ],
+        "detail": "2 项检查通过：hash-matches-registration, text-encoding-valid"
+      },
+      {
+        "artifactId": "art_供应商汇总_md_v2_9e809c9b",
+        "role": "DELIVERABLE",
+        "ok": true,
+        "checksRun": [
+          "hash-matches-registration",
+          "text-encoding-valid"
+        ],
+        "detail": "2 项检查通过：hash-matches-registration, text-encoding-valid"
+      }
+    ],
+    "artifactVerificationFailures": 0,
+    "interactions": [],
+    "interactionResumed": [],
+    "noProgressDetected": 0,
+    "caseSpecificToolCalls": [],
+    "failedAttempts": [],
+    "usage": {
+      "inputTokens": 379924,
+      "billedInputTokens": 420784,
+      "outputTokens": 46563,
+      "reasoningTokens": 0
+    }
+  }
+}

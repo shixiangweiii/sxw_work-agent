@@ -40,11 +40,52 @@ export const DEFAULT_CONTEXT_POLICY: ContextBudgetPolicy = {
   retrievalPageLimitTokens: 4_000,
 };
 
+/**
+ * ── R-1 只修了一半，这里补齐另一半 ────────────────────────────────────────
+ *
+ * R-1 当初的症状是「八条轴里五条有声明、无读取点」。读取点后来接上了
+ * （就是下面的 `checkBudgets`），但 `maxInputTokens` / `maxOutputTokens` /
+ * `maxTotalWallClockMs` 在 `RunBudgets` 里是**可选**的，这份默认值一个都没给
+ * —— `limit === undefined` 就 `continue`，于是**生产装配里八条轴只有五条活着**。
+ *
+ * 而 `verify:budget` 是逐轴注入 `Partial` 覆盖来撞墙的，它证明的是读取点能用，
+ * 不是这条轴在真实 Run 里开着。两件事被同一段绿字掩盖了一个阶段。
+ *
+ * 代价是实测的：2026-08-28 摸底考试题 1 单次 run 烧掉 420,784 billed input token
+ * 与 46,563 output token，八条轴一条都没拦，唯一的后备是那堵当时还拦不住
+ * 在途调用的墙钟。
+ */
 export const DEFAULT_BUDGETS: RunBudgets = {
   maxTurns: 20,
   maxActiveWallClockMs: 10 * 60_000,
   maxModelCalls: 40,
   maxToolCalls: 100,
+  /**
+   * 两条 token 轴的档位锚在实测上，不是拍脑袋：题 1 那次失控是
+   * billed 420,784 / output 46,563。取 3～4 倍留出正常长任务的余量，
+   * 同时保证「一个 Run 烧到离谱」会被拦住而不是靠墙钟兜。
+   *
+   * 【验】这两个数要在前缀缓存断点前移之后复测再定档 —— 缓存修好后
+   * billed 会大幅下降，届时可以收紧。
+   */
+  maxInputTokens: 1_500_000,
+  maxOutputTokens: 200_000,
+  /**
+   * ── 【定】`maxTotalWallClockMs` 故意留空，不要「顺手补全」它 ─────────────
+   *
+   * 这条轴算的是 `now - usage.startedAt`，而 `startedAt` 在 resume 时是
+   * **刻意继承**的（见 run-loop 里那条【定】：重置它等于把墙钟清零，
+   * 一次 crash + resume 就能白拿一整个预算周期）。
+   *
+   * 所以给它一个默认值 = **隔夜 resume 在第一次迭代就撞墙** ——
+   * 正是 R-2 当初为 `activeWallClockMs` 修掉的那个形态，换个字段再犯一次。
+   *
+   * 要给它默认值，得先有「跨段的停机时间不计入 total」的语义，
+   * 而那正是 active 与 total 分成两条轴的原因：total 的定义就是「含停机」。
+   * 它服务的是「这个 Run 挂了多久」这类运维问题，由调用方按场景显式传。
+   *
+   * `verify:budget` 有一条判据专门钉住这个「空」—— 补上默认值会翻红。
+   */
   maxConsecutiveFailures: 3,
   softLimitRatio: 0.8,
   handoffReserveTokens: 2_000,

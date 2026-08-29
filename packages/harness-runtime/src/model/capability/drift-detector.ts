@@ -26,19 +26,33 @@ export class DriftDetector {
   constructor(private readonly profile: EndpointCapabilityProfile) {}
 
   /**
-   * 规则 1：声明「强制单条开关无效」却收到单条 → 记录，不失败。
-   * 收到单条本身无害，只说明声明可能过时。
+   * 规则 1：声明「强制单条开关**有效**」却收到多条 → 记录，不失败。
+   *
+   * ── 【定】方向必须是这一侧，反过来不可证伪 ────────────────────────────
+   *
+   * 这条规则原先问的是反方向：声明「开关无效」却收到 `count <= 1`，
+   * 就断言「开关看起来生效了」。**收到一个调用不能证明开关生效** ——
+   * 它同样可以只是模型那一轮只有一件事要做，而后者才是常态。
+   *
+   * 2026-08-28 摸底考试把这件事演了一遍：trial1 在 turn 1（1 个 call）
+   * 记下「开关看起来生效了」，turn 3 就收到 **8 个并行 call**。
+   * 同一个 Run 里当场自我推翻，而调用侧按 field 去重后既不重发也不撤回 ——
+   * trace 上永久留着一条已经被推翻的结论。14/14 个 run 全中。
+   *
+   * 现在只报能证伪的那一侧：**我们真的发了开关（声明有效才发，见形状适配器
+   * 的 buildRequest），却仍然收到多条**。这条观察是硬的：它只有一种解释。
    */
   observeToolCallCount(count: number, disabledParallelRequested: boolean): DriftObservation | null {
     if (!disabledParallelRequested) return null;
-    if (this.profile.protocol.honorsDisableParallelToolCalls) return null;
-    if (count > 1) return null;
+    // 声明无效时形状适配器根本不发这个参数，没发出去的开关谈不上生效没生效。
+    if (!this.profile.protocol.honorsDisableParallelToolCalls) return null;
+    if (count <= 1) return null;
     return this.record({
       field: "protocol.honorsDisableParallelToolCalls",
-      declared: "false",
-      observed: `收到 ${count} 个 tool call，开关看起来生效了`,
+      declared: "true",
+      observed: `发了 disable_parallel_tool_use，仍收到 ${count} 个 tool call`,
       disposition: "RECORD",
-      note: "声明可能过期。串行仍由 Runtime 自持保证，此处不改变行为。",
+      note: "声明可能过期。串行仍由 Runtime 自持保证（D-01），此处不改变行为。",
     });
   }
 

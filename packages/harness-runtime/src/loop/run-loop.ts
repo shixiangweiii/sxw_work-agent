@@ -313,6 +313,32 @@ export async function* runLoop(
     return { terminal, outcome };
   }
 
+  /**
+   * 预算 deadline 打断**在途模型调用**时的统一出口（C1/C2）。
+   *
+   * 【定】必须与轮间撞墙走同一条路：同一个 `BudgetHardLimitReached` 事件、
+   * 同一个 `BUDGET_EXHAUSTED` Terminal。
+   *
+   * 不这么做的后果不是形式问题：在途调用被 abort 之后，
+   * `invocation.interrupted` 那条既有分支会一律结算成 `ABORTED_STREAMING`，
+   * 也就是「用户取消了」。于是一次**预算撞墙**会在 trace 与 outcome 上
+   * 伪装成一次**人为取消** —— 而这两件事在事后归因时的处置完全相反
+   * （一个说明任务太重或模型绕远路，另一个说明有人按了取消）。
+   *
+   * 这正是阶段 3 那条教训的同族：`USER_REJECTED` 结算出来了，
+   * 而全程没有任何人拒绝过任何东西。
+   */
+  async function* finishOnCallDeadline(): AsyncGenerator<RunEvent, RunLoopResult> {
+    const used = activeNow();
+    state = { ...state, budgetUsage: { ...state.budgetUsage, activeWallClockMs: used } };
+    yield await emit("BudgetHardLimitReached", {
+      axis: "activeWallClockMs",
+      used,
+      limit: spec.budgets.maxActiveWallClockMs,
+    });
+    return yield* finish({ reason: "BUDGET_EXHAUSTED" });
+  }
+
   // ════════════════════════════════════════════════════════ while(true)
 
   while (true) {
@@ -383,6 +409,41 @@ export async function* runLoop(
         limit: verdict.limit,
         ratio: verdict.ratio,
       });
+
+      /**
+       * ── C3：软限必须进模型上下文，只 emit 到 trace 等于没有信号 ────────────
+       *
+       * 【定】这条事件此前只发给 trace，`context/` 里没有任何消费者 ——
+       * 也就是说**模型从头到尾不知道自己快撞墙了**，自然无从「收一收」。
+       * 一个提醒只有被提醒的对象收到才叫提醒。
+       *
+       * 2026-08-28 摸底考试题 1：三次 trial 全部撞硬墙，
+       * 其中一次在 600 秒预算里跑了 645 秒**一个交付物都没写出来** ——
+       * 模型当时正打算「进一步确认」，它并不知道没有下一轮了。
+       *
+       * 【定】沿用上面那条 `softLimitAnnounced` 去重：每条轴只注入一次。
+       * 每轮都插一条会把提醒变成刷屏，而刷屏的信号等于没有信号（U-5 原话）。
+       *
+       * 【定】追加在**末尾**，不是插在中间 —— 前缀不变，
+       * 形状适配器打在 messages 末尾的缓存断点因此仍然有效。
+       */
+      state = {
+        ...state,
+        messages: await appendAndPush(state.messages, {
+          role: "user",
+          turn: state.turnCount,
+          content: [
+            {
+              type: "text",
+              text:
+                `[系统提示] 预算 ${verdict.axis} 已用 ${verdict.used}／${verdict.limit}，` +
+                `越过了 ${Math.round(verdict.ratio * 100)}% 提醒线。请开始收尾：` +
+                `先把现在就能交付的产物写出来，再用一段话说明还差什么。` +
+                `额度耗尽时本次运行会被直接中断，没落盘的东西不会保留。`,
+            },
+          ],
+        }),
+      };
     }
 
     yield await emit("TurnStarted", { turn: state.turnCount + 1 });
@@ -523,9 +584,42 @@ export async function* runLoop(
     // ── ② 调模型
     const request = ports.protocol.buildRequest(frame);
     const startedAt = now();
+
+    /**
+     * ── C1：给在途模型调用挂预算 deadline ────────────────────────────────
+     *
+     * 【定】不挂的话，`maxActiveWallClockMs` 的真实语义是
+     * **「至少 N 毫秒、上不封顶」** —— 预算只在循环顶部查一次，
+     * 而两次检查之间的那一个模型调用可以跑任意久。
+     *
+     * 2026-08-28 摸底考试实测：三次 trial 分别在 645 / 809 / 1,011 秒才结算，
+     * 限额是 600 秒；其中 trial3 的**最后一次调用单独跑了 613 秒**，
+     * 一次调用就超过了整个预算。循环入口的 active 从 404,093ms
+     * 一步跳到 806,406ms —— 480s 软限带和 600s 硬限带被同一次调用一起跨过，
+     * 所以连软限提醒都没发出过。
+     *
+     * `stepSignal()` 早就写好了（`loop/interrupt/index.ts`），
+     * 它是存量清单 U-2 登记的「已声明未接线」之一，这里接上其中一处。
+     *
+     * 下限取 1ms 而不是 0：额度已经耗尽时也要真的发起再立刻中断，
+     * 这样走的仍然是同一条 deadline 分支。若在这里直接返回，
+     * 「额度恰好为 0」会变成一条没有判据覆盖的独立路径。
+     */
+    const remainingActiveMs = spec.budgets.maxActiveWallClockMs - activeNow();
+    const callSignal = interrupts.stepSignal(Math.max(1, remainingActiveMs));
+
+    /**
+     * 【定】判别式是「用户没取消，但这次调用的 signal 断了」。
+     *
+     * `interrupts.aborted` 读的是**用户那个 controller**，
+     * `callSignal` 是它与 deadline 的 `AbortSignal.any()`。
+     * 两者一比就能分清是谁 abort 的 —— 不需要去解析 DOMException 的 name。
+     */
+    const deadlineHit = (): boolean => !interrupts.aborted && callSignal.aborted;
+
     let invocation;
     try {
-      const stream = ports.model.invoke(request, interrupts.signal);
+      const stream = ports.model.invoke(request, callSignal);
       let r = await stream.next();
       while (!r.done) {
         const sev = r.value;
@@ -535,6 +629,16 @@ export async function* runLoop(
       }
       invocation = r.value;
     } catch (err) {
+      /**
+       * 【定】deadline 要在 classifyError 之前分流。
+       *
+       * 选定端点的客户端把 abort 当预期路径处理（返回 `interrupted: true`
+       * 而不是抛），所以正常情况下走不到这里。但 `ModelPort` 是一个接口，
+       * 别的实现完全可以抛 AbortError —— 那时若直接 classifyError，
+       * 一次预算撞墙会被记成 `MODEL_ERROR`，成因线索当场丢失。
+       */
+      if (deadlineHit()) return yield* finishOnCallDeadline();
+
       const e = ports.protocol.classifyError(err);
       yield await emit("RuntimeErrorOccurred", { error: e });
 
@@ -570,13 +674,34 @@ export async function* runLoop(
      * U-1 的两个观测点。
      *
      * 规则 3（token 口径）用的是「编译帧时声明的 totalTokens」与
-     * 「端点实际计费的 inputTokens」之差 —— 这正是 2026-08-24 那两次实跑
+     * 「端点实际计费的输入量」之差 —— 这正是 2026-08-24 那两次实跑
      * 手工比对出 D-3 的方式。现在它是自动的：同样的偏差再次出现时，
      * 不需要有人恰好去翻日志。
+     *
+     * ── 【定】第二个参数必须是 `billedInputTokens`，不是 `inputTokens` ──────
+     *
+     * 这里此前传的是 `usage.inputTokens`，而那是**未命中缓存的增量**，
+     * 不是这一帧的输入总量。profile 里就写着该比哪个数：
+     * `billedInputFormula: "INPUT_PLUS_CACHE"`；下面 `budget` 那段的【定】
+     * 也写着「计费输入含缓存两项。只读 inputTokens 在命中时低估达 85%」——
+     * 这一行做的正是它隔了几十行明令禁止的事。
+     *
+     * 2026-08-28 摸底考试 14/14 个 run 都因此打出一条红色的假漂移
+     * （预估 3640 vs 实际 230，偏差 1482%），而对 billed 比是 0.14% ——
+     * 声明的 EXACT 一直是准的。两个后果都要记：
+     *   · 唯一的端点漂移告警变成永久假阳性，**真漂移淹没在噪声里**；
+     *   · `countTokensExcludesReasoning: false` 的 profile 走另一条分支，
+     *     `deviation > 0.02` 直接 FAIL_FAST —— 任何带前缀缓存的端点接上来
+     *     会在第一轮就被打死。这是一颗还没引爆的雷，不只是噪声。
+     *
+     * 它能躲过 86 条判据，是因为 `verify` 的 `makeUsage()` 把
+     * `billedInputTokens` 直接赋成 `inputTokens`、cache 计数恒 0 ——
+     * **夹具里这两个数永远相等，选错哪个都测不出来**。判据补在
+     * `verify:drift` 的新段，那里的 usage 让两者显式不等。
      */
     for (const o of [
       drift.observeToolCallCount(invocation.toolCalls.length, true),
-      drift.observeTokenAccuracy(frame.totalTokens, usage.inputTokens),
+      drift.observeTokenAccuracy(frame.totalTokens, usage.billedInputTokens),
     ]) {
       if (!o) continue;
       if (o.disposition === "RECORD" && driftAnnounced.has(o.field)) continue;
@@ -652,6 +777,13 @@ export async function* runLoop(
         // 这次模型调用已经发生并计费了，中断不改变这个事实。
         state = { ...state, budgetUsage: budget };
       }
+      /**
+       * 【定】按 abort 的**来源**分流，不要一律记成 ABORTED_STREAMING。
+       *
+       * 上面合成未配对 tool_result 的逻辑两条路都要走（不变量 8 与谁 abort 无关），
+       * 分流只发生在出口这一行。
+       */
+      if (deadlineHit()) return yield* finishOnCallDeadline();
       return yield* finish({ reason: "ABORTED_STREAMING" });
     }
 

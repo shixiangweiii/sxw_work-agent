@@ -61,16 +61,43 @@ class AnthropicMessagesProtocol implements ModelProtocolPort {
      * 评测报告记录的那 15% 命中率完全来自端点的**隐式**缓存，
      * Harness 从来没有主动做过任何事。
      *
-     * 断点打在哪：`tools` ＋ `system` 这一段。理由是它**完全稳定** ——
+     * 断点一：`tools` ＋ `system` 这一段。它**完全稳定** ——
      * 实测工具定义固定开销 540 token，加 system 约 640，一个 Run 内一字不变。
-     * 会长大的是 messages，而 messages 每轮都在变，打在那里没有意义。
      *
      * 这也是为什么受信时间事实被刻意放成 messages[0] 而不是拼进 system
      * （见 context/compile.ts）：拼进去的话这个断点前面的内容每轮都变，
      * STRICT_PREFIX 下命中率直接归零。决 3 把它冻到执行段级之后，
      * 连 messages[0] 也在段内稳定了。
+     *
+     * ── 断点二：messages 末尾。【定】这里原先什么都不打，理由是错的 ─────────
+     *
+     * 原注释写的是「会长大的是 messages，而 messages 每轮都在变，
+     * 打在那里没有意义」。**这条推理在 STRICT_PREFIX 下不成立**：
+     * transcript 是**只追加**的，第 N 轮的 messages 是第 N+1 轮的严格前缀。
+     * 「每轮都在变」把「尾部在增长」和「中间被改写」当成了同一件事，
+     * 而前缀缓存要的恰恰只是前者。
+     *
+     * 2026-08-28 摸底考试给了量化代价：`cacheReadInputTokens` 在**每个 run 的
+     * 每一次调用**上恒为 3405（就是 tools＋system 这一段），
+     * `cacheCreationInputTokens` 恒为 0，而 `inputTokens` 从 230 涨到 71,334 ——
+     * **对话部分一次都没进过缓存**。题 1 单次 run 累计 billed 420,784，
+     * 而最终上下文只有约 75k：同一份内容被全价重计了约 5.6 倍，
+     * 并直接拉长 prefill 时延，加剧墙钟撞墙。
+     *
+     * 【定】断点打在**最后一个 block** 上、每轮重建，不试图维持一个长命断点：
+     * Compact 会回改历史（剥离推理块），前缀随之改变、缓存失效。
+     * 这是固有代价 —— 也正是"每轮在末尾重新打一个"比"打一个就不动"更合适的原因：
+     * 失效之后下一轮自动重新建立，不需要任何人去管理断点的生命周期。
      */
     const wantsBreakpoint = this.profile.context.supportsExplicitCacheBreakpoints === true;
+
+    if (wantsBreakpoint && messages.length > 0) {
+      const lastMsg = messages[messages.length - 1]!;
+      const lastBlock = lastMsg.content[lastMsg.content.length - 1];
+      if (lastBlock && typeof lastBlock === "object") {
+        (lastBlock as Record<string, unknown>)["cache_control"] = { type: "ephemeral" };
+      }
+    }
 
     const body: Record<string, unknown> = {
       model: this.profile.modelId,
@@ -410,7 +437,12 @@ class AnthropicMessagesProtocol implements ModelProtocolPort {
  * Anthropic 形状的一个结构约束：tool_result 必须放在 user 消息里，
  * 而 tool_use 在 assistant 消息里。翻译在这里完成，Context 层不需要知道。
  */
-function toAnthropicMessages(items: ContextItem[]): unknown[] {
+/**
+ * 返回类型是具体的（不是 `unknown[]`）：`buildRequest` 要往**最后一个 block**
+ * 上挂 cache_control，拿 `unknown[]` 就只能靠断言硬转。
+ * `toBlock()` 每次都新建对象，所以那次挂载是安全的局部改写，不会串到别的请求上。
+ */
+function toAnthropicMessages(items: ContextItem[]): Array<{ role: string; content: unknown[] }> {
   const messages: Array<{ role: string; content: unknown[] }> = [];
 
   for (const item of items) {

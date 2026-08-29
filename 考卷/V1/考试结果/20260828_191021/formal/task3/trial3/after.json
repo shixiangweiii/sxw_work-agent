@@ -1,0 +1,38 @@
+{
+  "root": "/Users/shixiangweii/WebstormProjects/sxw_work-agent/考卷/V1/考试结果/20260828_191021/formal/task3/trial3/workspace",
+  "at": "2026-08-28T12:19:36.160Z",
+  "files": [
+    {
+      "path": "内部资料/产品说明.md",
+      "bytes": 182,
+      "sha256": "f4b838f7b763fcc3c5674d30b38c63ff9b33f262810ba3fd4c030bbbe414a63f",
+      "contentBase64": "IyDkuqflk4HkuI7nu63nuqbor7TmmI4KCiMjIOe7ree6puS7t+agvAoK6ICB5a6i5oi357ut57qm5oyJ5Y6f5ZCI5ZCM5Lu35omn6KGM77yM5bm05bqm5rao5bmF5LiN6LaF6L+HIDUl44CCCui/nue7ree7ree6pua7oeS4ieW5tOeahOWuouaIt+WPr+eUs+ivt+mineWkluaKmOaJo++8jOmcgOWVhuWKoeWuoeaJueOAggo="
+    },
+    {
+      "path": "内部资料/常见问答.md",
+      "bytes": 413,
+      "sha256": "58854610a21b79bffb747814ccacf549c80b46a3378bada2419299a1dd68a262",
+      "contentBase64": "IyDlhoXpg6jnrZTnlpHvvIjkvpvlrqLmnI3lj4LogIPvvIkKClHvvJrlrqLmiLfpl67lkIjlkIznvJblj7fvvIzku47lk6rph4zmn6XvvJ8KQe+8muWQiOWQjOe8luWPt+WPquWcqOWuoeaJueezu+e7n+mHjO+8jOacrOWcsOi1hOaWmeS4jeS/neWtmOOAguivt+i1sOWuoeaJueezu+e7n+afpeivou+8jOS4jeimgeWHreWNsOixoeWhq+WGmeOAggoKUe+8muWQiOWQjOe8luWPt+mVv+S7gOS5iOagt++8nwpB77ya5b2i5aaCIEhULVhYLTIwMjMtMDAwMe+8jOWJjee8gCBIVCDlm7rlrprvvIzkuK3pl7TmmK/lrqLmiLfnroDnp7DvvIzlkI7pnaLmmK/lubTku73lkozmtYHmsLTlj7fjgIIKICAg5rOo5oSP77yaKirov5nmmK/moLzlvI/npLrkvovvvIzkuI3mmK/ku7vkvZXkuIDku73nnJ/lrp7lkIjlkIznmoTnvJblj7fjgIIqKgo="
+    },
+    {
+      "path": "内部资料/服务条款.md",
+      "bytes": 220,
+      "sha256": "19839645724e51f2984a481188ba5d27ed8daeaa77b3f9b1233a569ef51a3abb",
+      "contentBase64": "IyDmoIflh4bmnI3liqHmnaHmrL4KCiMjIOS4ieOAgeacjeWKoeWTjeW6lAoK5qCH5YeG5pyN5Yqh5ZON5bqU5pe26Ze077ya5bel5L2c5pelIDQg5bCP5pe25YaF6aaW5qyh5ZON5bqU77yM6Z2e5bel5L2c5pel6aG65bu26Iez5LiL5LiA5Liq5bel5L2c5pel44CCCumHjeWkp+aVhemanO+8iFAw77yJ5LiN5Y+X5q2k6ZmQ77yMN8OXMjQg5bCP5pe25YaFIDEg5bCP5pe25ZON5bqU44CCCg=="
+    },
+    {
+      "path": "回复草稿.md",
+      "bytes": 1073,
+      "sha256": "f09a48e4ca56f10d308e9db1e2a6dcba5e3c9ea059a34bb68aae8ed294e081bc",
+      "contentBase64": "IyDlm57lpI3vvJrlhbPkuo7mnI3liqHnu63nuqbnmoTlh6DkuKrpl67popgKCuadjuiUk++8jOS9oOWlve+8jAoK5oSf6LCi6LS15Y+45YeG5aSH5o6o6L+b57ut57qm5rWB56iL77yM5Lul5LiL5bCx5L2g5o+Q5Ye655qE5LiJ5Liq6Zeu6aKY6YCQ5LiA5Zue5aSN77yaCgojIyAxLiDmnI3liqHmoYbmnrblkIjlkIznvJblj7cKCuOAkOW+heihpeWFheOAkQoKPiDimqDvuI8gKirpnIDopoHkurrlt6Xmn6Xor6IqKu+8muWQiOWQjOe8luWPt+S7heWcqOWuoeaJueezu+e7n+S4ree7tOaKpO+8jOacrOWcsOi1hOaWmeacquWtmOaho++8jOivt+WJjeW+gOWuoeaJueezu+e7n+afpeivoui/nOWxseenkeaKgOeahOacjeWKoeahhuaetuWQiOWQjOe8luWPt+WQju+8jOabv+aNouatpOWkhOWNoOS9jeespuOAggo+IOagvOW8j+WPguiAg++8mmBIVC3ov5zlsbEt5bm05Lu9Lea1geawtOWPt2DvvIjlpoIgSFQt6L+c5bGxLTIwMjUtMDAwMe+8jOS7heS4uuagvOW8j+ekuuaEj++8ieOAggoKIyMgMi4g5qCH5YeG5pyN5Yqh5ZON5bqU5pe26Ze0CgrmoIflh4bmnI3liqHlk43lupTml7bpl7TkuLoqKuW3peS9nOaXpSA0IOWwj+aXtuWGhSoq6aaW5qyh5ZON5bqU77yM6Z2e5bel5L2c5pel6aG65bu26Iez5LiL5LiA5Liq5bel5L2c5pel44CCCgrlr7nkuo7ph43lpKfmlYXpmpzvvIhQMCDnuqfliKvvvInvvIzpgILnlKjnibnmrorlk43lupTmnLrliLbvvJoqKjfDlzI0IOWwj+aXtuWGhSAxIOWwj+aXtuWTjeW6lCoq77yM5LiN5Y+X5bel5L2c5pel6ZmQ5Yi244CCCgojIyAzLiDnu63nuqblkI7ku7fmoLzmmK/lkKbmnInlj5jljJYKCuiAgeWuouaIt+e7ree6pioq5oyJ5Y6f5ZCI5ZCM5Lu35omn6KGMKirvvIzlubTluqbmtqjluYXkuI3otoXov4cgNSXjgIIKCuatpOWklu+8jOi/nue7ree7ree6pua7oeS4ieW5tOeahOWuouaIt+WPr+eUs+ivt+mineWkluaKmOaJo++8jOmcgOi1sOWVhuWKoeWuoeaJuea1geeoi+OAguWmgui0teWPuOespuWQiOivpeadoeS7tu+8jOWPr+i/m+S4gOatpeayn+mAmuOAggoKLS0tCgrlpoLmnInnlpHpl67vvIzmrKLov47pmo/ml7bogZTns7vjgIIKCuelneWlve+8gQo="
+    },
+    {
+      "path": "客户来信/远山科技_20260826.md",
+      "bytes": 388,
+      "sha256": "30b30c8745dd325a58dfe85a9590aeec0e96ff844e3f8ba98591cf85b461c0f3",
+      "contentBase64": "5Y+R5Lu25Lq677ya6L+c5bGx56eR5oqAIOmHh+i0remDqCDmnY7olJMK5pel5pyf77yaMjAyNi0wOC0yNgrkuLvpopjvvJrlhbPkuo7mnI3liqHnu63nuqbnmoTlh6DkuKrpl67popgKCuS9oOWlve+8jAoK5oiR5Lus5YeG5aSH6LWw57ut57qm5rWB56iL77yM5pyJ5LiJ5Liq6Zeu6aKY6ZyA6KaB56Gu6K6k77yaCgoxLiDmiJHku6znjrDlnKjov5nku73mnI3liqHmoYbmnrblkIjlkIznmoTnvJblj7fmmK/lpJrlsJHvvJ/nu63nuqbnlLPor7fljZXkuIropoHloavjgIIKMi4g5L2g5Lus55qE5qCH5YeG5pyN5Yqh5ZON5bqU5pe26Ze05piv5aSa5LmF77yfCjMuIOe7ree6puS5i+WQjuS7t+agvOS8muacieWPmOWMluWQl++8nwoK6bq754Om5Zue5aSN5LiA5LiL77yM6LCi6LCi44CCCg=="
+    }
+  ],
+  "emptyDirs": [],
+  "otherEntries": []
+}

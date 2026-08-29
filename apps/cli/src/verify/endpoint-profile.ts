@@ -123,6 +123,71 @@ async function main(): Promise<void> {
     "同一个帧，真实端点放行、虚拟端点拒绝 —— 校验强度来自声明而非代码",
   );
 
+  // ── C2. 前缀缓存断点：system 一个，messages 末尾一个
+  section("C2. U-9：cache_control 断点打在哪（前缀缓存的落点）");
+  console.log(
+    "   【定】断点要打**两个**：tools＋system 这段稳定前缀，以及 **messages 末尾**。\n\n" +
+      "   原实现只打前者，理由写在注释里：「会长大的是 messages，而 messages\n" +
+      "   每轮都在变，打在那里没有意义」。这条推理在 STRICT_PREFIX 下不成立 ——\n" +
+      "   transcript 是**只追加**的，第 N 轮的 messages 是第 N+1 轮的严格前缀。\n" +
+      "   「每轮都在变」把「尾部在增长」和「中间被改写」当成了同一件事。\n\n" +
+      "   代价是实测的：2026-08-28 摸底考试里 `cacheReadInputTokens` 在每个 run 的\n" +
+      "   每一次调用上**恒为 3405**（就是 tools＋system 那一段），\n" +
+      "   `cacheCreationInputTokens` 恒为 0，而 inputTokens 从 230 涨到 71,334 ——\n" +
+      "   对话部分一次都没进过缓存，同一份内容被全价重计了约 5.6 倍。\n",
+  );
+
+  const countBreakpoints = (body: unknown): { system: number; messages: number; tail: boolean } => {
+    const b = body as {
+      system?: unknown;
+      messages?: Array<{ content?: Array<Record<string, unknown>> }>;
+    };
+    const system = Array.isArray(b.system)
+      ? (b.system as Array<Record<string, unknown>>).filter((x) => x["cache_control"]).length
+      : 0;
+    const msgs = b.messages ?? [];
+    let messages = 0;
+    for (const m of msgs) for (const c of m.content ?? []) if (c["cache_control"]) messages += 1;
+    const lastMsg = msgs[msgs.length - 1];
+    const lastBlock = lastMsg?.content?.[(lastMsg.content?.length ?? 0) - 1];
+    return { system, messages, tail: Boolean(lastBlock?.["cache_control"]) };
+  };
+
+  /**
+   * 对照组必须显式关掉这个开关。
+   * `fakeProfile()` 默认也声明支持显式断点，直接拿它当反例会得到 1/1 ——
+   * 那不是「按声明行事」的反证，只是同一个正例跑了两遍。
+   */
+  const noBreakpoints = {
+    ...real,
+    context: { ...real.context, supportsExplicitCacheBreakpoints: false },
+  };
+  const bpReal = countBreakpoints(mk(real).buildRequest(frameWithoutReasoning).body);
+  const bpOff = countBreakpoints(mk(noBreakpoints).buildRequest(frameWithoutReasoning).body);
+
+  fact("真实端点：system / messages 上的断点数", `${bpReal.system} / ${bpReal.messages}`);
+  fact("真实端点：断点落在 messages 最后一个 block 上", bpReal.tail ? "是" : "否");
+  fact("声明不支持显式断点时：断点总数", bpOff.system + bpOff.messages);
+
+  /**
+   * 【定】三个方向缺一不可：
+   *   · 稳定前缀有断点（system == 1）；
+   *   · 增长部分也有断点，且**落在末尾那个 block 上**（tail）——
+   *     打在中间等于把后面的内容排除在缓存外；
+   *   · 声明不支持时一个都不发 —— 否则「按声明行事」这条就破了。
+   */
+  const c2Ok =
+    bpReal.system === 1 && bpReal.messages === 1 && bpReal.tail && bpOff.system + bpOff.messages === 0;
+  verdict(
+    c2Ok,
+    c2Ok
+      ? "断点两个：稳定前缀一个、messages 末尾一个；声明不支持显式断点的端点一个都不发 —— " +
+        "会长大的那一半终于也进缓存了"
+      : bpReal.messages === 0
+        ? "messages 上没有断点 —— 对话部分永远进不了缓存，每轮全价重计"
+        : `断点位置不对（system=${bpReal.system} messages=${bpReal.messages} tail=${bpReal.tail}）`,
+  );
+
   // ── D. 端到端：两个端点各跑一遍同样的脚本，主循环代码不得改动
   section("D. 端到端跑三种组合（脚本化模型，不发真实请求）");
   const e2e: Array<{ label: string; terminal: string; errCode?: string }> = [];

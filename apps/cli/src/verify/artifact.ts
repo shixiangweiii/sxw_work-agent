@@ -44,13 +44,26 @@ import {
   type PreparedAction,
   type RunId,
   type RunOutcome,
+  type ModelInvocationResult,
+  type ModelPort,
+  type ModelRequest,
+  type ModelStreamEvent,
   type ToolExecutionContext,
   type ToolExecutionOutcome,
   type ToolHandlerPort,
 } from "@workagent/harness-runtime";
 import { CommonToolHandler } from "@workagent/tools-common";
 import { compose } from "../compose.js";
-import { ScriptedModelPort, banner, fact, runVerify, section, tempWorkspace, verdict } from "./harness.js";
+import {
+  ScriptedModelPort,
+  banner,
+  fact,
+  makeUsage,
+  runVerify,
+  section,
+  tempWorkspace,
+  verdict,
+} from "./harness.js";
 
 interface ToolCall {
   toolCallId: string;
@@ -69,12 +82,110 @@ interface RunResult {
   composed: ReturnType<typeof compose>;
 }
 
+/** 从请求体里取最后一条 tool_result 的 JSON 正文。翻页模型靠它决定下一步。 */
+function lastToolResult(request: ModelRequest): Record<string, unknown> | undefined {
+  const msgs =
+    (request.body as { messages?: Array<{ content?: unknown[] }> }).messages ?? [];
+  for (let i = msgs.length - 1; i >= 0; i -= 1) {
+    const content = msgs[i]?.content ?? [];
+    for (let j = content.length - 1; j >= 0; j -= 1) {
+      const b = content[j] as { type?: string; content?: string };
+      if (b?.type === "tool_result") {
+        try {
+          return JSON.parse(String(b.content)) as Record<string, unknown>;
+        } catch {
+          return undefined;
+        }
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
+ * 一个**会看上一轮结果**的脚本化模型，专门用来把 blob 翻到底。
+ *
+ * ── 【定】为什么 A 段不能用 ScriptedModelPort ──────────────────────────
+ *
+ * ref 带随机后缀、续页偏移要从上一页的 `nextLineOffset` 里读 —— 两者都只有
+ * 跑起来才知道。写死脚本就只能绕过工具层直接调 `ports.blobs.get()`，
+ * 而 **那一跳恰恰是出过事的地方**：`line_offset` 在 `CommonToolHandler` 里
+ * 被丢掉，`read_blob` 对单行 blob 完全失效，2026-08-28 摸底考试题 1 因此
+ * 3/3 全灭 —— 而这一段当时是**绿的**，因为它测的是 bug 下面那一层。
+ *
+ * 段标题写着「read_blob 逐字取回」，断言打的却是 Port。抬头与断言不符，
+ * 与阶段 3 收口批修掉的那四条是同一个形态。
+ *
+ * 它模仿的就是真实模型的动作：拿到 stub → 用 ref 取第一页 →
+ * 看到 truncated 就把 nextStartLine / nextLineOffset 原样传回去接着取。
+ */
+class BlobPagingModelPort implements ModelPort {
+  private seq = 0;
+
+  async *invoke(
+    request: ModelRequest,
+    _signal: AbortSignal,
+  ): AsyncGenerator<ModelStreamEvent, ModelInvocationResult> {
+    const last = lastToolResult(request);
+    let call: ToolCall | undefined;
+
+    if (last === undefined) {
+      call = { toolCallId: "a1", name: "read_file", input: { path: "huge.txt" } };
+    } else if (last["status"] === "EXTERNALIZED") {
+      this.seq += 1;
+      call = {
+        toolCallId: `p${this.seq}`,
+        name: "read_blob",
+        input: { ref: String(last["ref"]), start_line: 1, limit: 2_000 },
+      };
+    } else if (last["truncated"] === true) {
+      this.seq += 1;
+      call = {
+        toolCallId: `p${this.seq}`,
+        name: "read_blob",
+        input: {
+          ref: String(last["ref"]),
+          start_line: Number(last["nextStartLine"] ?? 1),
+          limit: 2_000,
+          line_offset: Number(last["nextLineOffset"] ?? 0),
+        },
+      };
+    }
+
+    const usage = makeUsage(100, 20);
+    if (!call) {
+      return {
+        content: [{ type: "text", text: "取完了。" }],
+        toolCalls: [],
+        stopReason: "end_turn",
+        usage,
+        interrupted: false,
+      };
+    }
+    return {
+      content: [
+        { type: "tool_call", toolCallId: call.toolCallId, name: call.name, input: call.input },
+      ],
+      toolCalls: [call],
+      stopReason: "tool_use",
+      usage,
+      interrupted: false,
+    };
+  }
+
+  async countTokens(): Promise<number | undefined> {
+    return 100;
+  }
+}
+
 /** 跑一段脚本化 Run（可多轮），把 tool_result 与事件都收回来。 */
 async function runScript(
   workspaceRoot: string,
   turns: Array<{ text?: string; toolCalls: ToolCall[] }>,
   /** F 段用它注入一个「会谎报产物内容」的 Handler。见那一段的说明。 */
   toolsOverride?: ToolHandlerPort,
+  /** A 段用它注入会看上一轮结果的翻页模型。见 BlobPagingModelPort 的说明。 */
+  modelOverride?: ModelPort,
 ): Promise<RunResult> {
   const trace = new CollectingTraceSink();
   const composed = compose({
@@ -82,7 +193,8 @@ async function runScript(
     workspaceRoot,
     approvalDecider: async () => ({ approved: true }),
     trace,
-    modelPortOverride: new ScriptedModelPort([...turns, { text: "做完了。", toolCalls: [] }]),
+    modelPortOverride:
+      modelOverride ?? new ScriptedModelPort([...turns, { text: "做完了。", toolCalls: [] }]),
     ...(toolsOverride ? { portOverrides: { tools: toolsOverride } } : {}),
   });
 
@@ -165,11 +277,14 @@ async function sectionBlobRoundTrip(): Promise<void> {
     writeFileSync(join(ws.root, "huge.txt"), original, "utf8");
 
     // 第一轮读大文件（触发外置），第二轮把 ref 取回来。
-    // ScriptedModelPort 不会看上一轮结果，所以 ref 在第一轮跑完后才知道 ——
-    // 这里分两个 Run 做：第一个拿 ref，第二个用它。
-    const r1 = await runScript(ws.root, [
-      { text: "读大文件", toolCalls: [{ toolCallId: "a1", name: "read_file", input: { path: "huge.txt" } }] },
-    ]);
+    /**
+     * 【定】一个 Run 走完「读大文件 → 外置 → 逐页取回」，
+     * 而且**每一页都是真的 `read_blob` 工具调用**（经 CommonToolHandler）。
+     *
+     * 此前这里是两个 Run ＋ 直接调 `ports.blobs.get()`：store 层一直是对的，
+     * 所以那样测永远绿 —— 而真实事故就发生在被跳过的那一跳上。
+     */
+    const r1 = await runScript(ws.root, [], undefined, new BlobPagingModelPort());
     const stub = parse(r1.results.get("a1")?.content);
     const ref = String(stub["ref"] ?? "");
     const ext = r1.trace.byType("ToolResultExternalized")[0]?.payload;
@@ -202,20 +317,39 @@ async function sectionBlobRoundTrip(): Promise<void> {
     let roundTripOk = false;
     let fetched = "";
     let pages = 0;
+    let distinctPages = 0;
     if (ref) {
-      let startLine = 1;
-      let lineOffset = 0;
-      for (;;) {
-        const blob = await r1.composed.ports.blobs.get(ref, { startLine, lineOffset });
-        if (!blob) break;
-        pages += 1;
-        fetched += blob.content;
-        if (!blob.truncated) break;
-        // 【定】用 store 给的 next*，不自己算 —— 行内切片时下一页仍在同一行。
-        startLine = blob.nextStartLine ?? blob.endLine + 1;
-        lineOffset = blob.nextLineOffset ?? 0;
-        if (pages > 200) break; // 防御：翻页不收敛时不要挂死
+      /**
+       * 【定】页面正文从 **transcript 里的 tool_result** 收，
+       * 不再自己调 store —— 收的是模型真正看见的那些字节。
+       *
+       * 翻页动作由 `BlobPagingModelPort` 发起：它照真实模型的做法，
+       * 把上一页的 `nextStartLine` / `nextLineOffset` 原样传回去。
+       */
+      const pageBodies: string[] = [];
+      for (const [id, res] of r1.results) {
+        if (!id.startsWith("p")) continue;
+        const page = parse(res.content);
+        if (typeof page["content"] !== "string") continue;
+        pageBodies.push(String(page["content"]));
       }
+      pages = pageBodies.length;
+      fetched = pageBodies.join("");
+      distinctPages = new Set(pageBodies).size;
+
+      /**
+       * ── 【定】「每页互不相同」是这一段真正的判别力 ──────────────────────
+       *
+       * `line_offset` 被丢掉时的表现**不是报错，是每页都返回第 1 页**：
+       * 页数照样涨、`truncated` 照样是 true、`nextLineOffset` 照样有值 ——
+       * 一个看起来完全正常、实际上永远读不完的循环。
+       *
+       * 只断言「重组后等于原文」也能抓到它（拼出来的是 5 份第 1 页），
+       * 但失败信息会指向「内容对不上」，而真正的病因是「翻页没动」。
+       * 把它单独钉出来，红的时候一眼看得出是哪一种坏法。
+       */
+      fact("每页互不相同", `${distinctPages}/${pages}`);
+
       /**
        * 【定】比对的落点是**被读文件的原文**，不是「取回的字节数对不对」。
        *
@@ -233,7 +367,8 @@ async function sectionBlobRoundTrip(): Promise<void> {
         /* 拼不出合法 JSON 本身就说明翻页重组坏了 */
       }
       // pages > 1 是判据的一部分：只有真的翻了页，才证明字符预算那一层存在。
-      roundTripOk = pages > 1 && reassembled.content === original;
+      // distinctPages === pages 钉住「每一页都往前走了」——见上面那段说明。
+      roundTripOk = pages > 1 && distinctPages === pages && reassembled.content === original;
       fact("read_blob 翻页次数", pages);
       fact("取回总长度", `${fetched.length} 字符`);
       fact("重组后可解析为 JSON", reassembled.content !== undefined ? "是" : "否");
