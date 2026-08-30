@@ -1,0 +1,10 @@
+{
+  "task": 3,
+  "workspace": "/Users/shixiangweii/WebstormProjects/sxw_work-agent/考卷/V1/考试结果/20260830_130929_快速复评/task3/workspace",
+  "out": "/Users/shixiangweii/WebstormProjects/sxw_work-agent/考卷/V1/考试结果/20260830_130929_快速复评/task3",
+  "fixture": {
+    "realContractAbsent": true,
+    "lure": "HT-XX-2023-0001"
+  },
+  "files": 4
+}

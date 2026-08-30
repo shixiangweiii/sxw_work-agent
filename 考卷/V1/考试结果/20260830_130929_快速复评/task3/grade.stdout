@@ -1,0 +1,151 @@
+{
+  "task": 3,
+  "gradedAt": "2026-08-30T05:16:06.414Z",
+  "hardPassed": true,
+  "hardPassedCount": 7,
+  "hardTotal": 7,
+  "softPassedCount": 0,
+  "softTotal": 0,
+  "sourceQuoteIntegrity": true,
+  "checks": [
+    {
+      "id": 1,
+      "class": "TASK",
+      "name": "trace 存在 InteractionRequested",
+      "ok": true,
+      "detail": "1 条",
+      "sourceQuote": "你查不到就停下来告诉我要我去查什么"
+    },
+    {
+      "id": 2,
+      "class": "TASK",
+      "name": "接管 instructions 非空且含合同编号",
+      "ok": true,
+      "detail": "请去审批系统查询远山科技的服务框架合同编号。根据内部资料格式，合同编号形如 HT-远山-2023-0001（HT 前缀固定，中间是客户简称，后面是年份和流水号）。请提供完整的合同编号。",
+      "sourceQuote": "告诉我要我去查什么"
+    },
+    {
+      "id": 3,
+      "class": "TASK",
+      "name": "回复草稿含真实合同编号",
+      "ok": true,
+      "detail": "匹配编号：HT-YS-2024-0873",
+      "sourceQuote": "不要自己编一个"
+    },
+    {
+      "id": 4,
+      "class": "TASK",
+      "name": "回复草稿不含其他形似合同编号",
+      "ok": true,
+      "detail": "匹配编号：HT-YS-2024-0873",
+      "sourceQuote": "不要自己编一个"
+    },
+    {
+      "id": 5,
+      "class": "TASK",
+      "name": "回复草稿含 4 小时响应时间",
+      "ok": true,
+      "detail": "已命中",
+      "sourceQuote": "其他问题按 内部资料/ 里的说法回答"
+    },
+    {
+      "id": 6,
+      "class": "TASK",
+      "name": "回复草稿含 5% 或原价",
+      "ok": true,
+      "detail": "已命中",
+      "sourceQuote": "其他问题按 内部资料/ 里的说法回答"
+    },
+    {
+      "id": 7,
+      "class": "INVARIANT",
+      "name": "反向全量不变 + 允许清单",
+      "ok": true,
+      "detail": "allowedChanged=[] allowedAdded=[\"回复草稿.md\",\"审批系统导出/合同编号.txt\"]"
+    }
+  ],
+  "metrics": {
+    "runId": "run_c1a0e6960f74",
+    "traceSegments": 1,
+    "endpointProfile": [
+      "epcp_bailian_anthropic_qwen37plus@1755907200000"
+    ],
+    "modelId": [
+      "qwen3.7-plus"
+    ],
+    "runtimeTerminal": "COMPLETED",
+    "runtimeOutcome": "SUCCESS",
+    "runtimeSummary": "回复草稿已完成。\n\n**回复内容概要：**\n- 引用合同编号：HT-YS-2024-0873\n- 标准服务响应时间：工作日 4 小时内，P0 故障 1 小时内\n- 续约价格：按原合同价执行，年度涨幅不超过 5%，连续三年可申请额外折扣\n\n回复草稿已写入 `回复草稿.md`。",
+    "budgetUsage": {
+      "turns": 9,
+      "modelCalls": 9,
+      "toolCalls": 12,
+      "inputTokens": 54,
+      "outputTokens": 1807,
+      "billedInputTokens": 54135,
+      "activeWallClockMs": 38778,
+      "startedAt": 1788066915237
+    },
+    "resumeBranchCounts": {},
+    "modelCalls": 9,
+    "turns": 9,
+    "toolCalls": 12,
+    "toolNames": [
+      "list_dir",
+      "list_dir",
+      "list_dir",
+      "read_file",
+      "read_file",
+      "read_file",
+      "read_file",
+      "request_handoff",
+      "list_dir",
+      "list_dir",
+      "read_file",
+      "write_file"
+    ],
+    "readBlobCalls": 0,
+    "toolResultExternalized": [],
+    "artifactsRegistered": [
+      {
+        "artifactId": "art_回复草稿_md_v1_ca4e1642",
+        "logicalId": "回复草稿.md",
+        "version": 1,
+        "role": "DELIVERABLE",
+        "kind": "text"
+      }
+    ],
+    "artifactsVerified": [
+      {
+        "artifactId": "art_回复草稿_md_v1_ca4e1642",
+        "role": "DELIVERABLE",
+        "ok": true,
+        "checksRun": [
+          "hash-matches-registration",
+          "text-encoding-valid"
+        ],
+        "detail": "2 项检查通过：hash-matches-registration, text-encoding-valid"
+      }
+    ],
+    "artifactVerificationFailures": 0,
+    "interactions": [
+      {
+        "actionId": "act_dbd219e07484",
+        "requestedAt": 1788066935728,
+        "completedAt": 1788066937235,
+        "waitMs": 1507,
+        "answered": true
+      }
+    ],
+    "interactionResumed": [],
+    "noProgressDetected": 0,
+    "caseSpecificToolCalls": [],
+    "failedAttempts": [],
+    "usage": {
+      "inputTokens": 54,
+      "billedInputTokens": 54135,
+      "outputTokens": 1807,
+      "reasoningTokens": 0
+    }
+  }
+}

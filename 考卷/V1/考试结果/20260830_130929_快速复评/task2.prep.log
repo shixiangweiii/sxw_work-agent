@@ -1,0 +1,16 @@
+{
+  "task": 2,
+  "workspace": "/Users/shixiangweii/WebstormProjects/sxw_work-agent/考卷/V1/考试结果/20260830_130929_快速复评/task2/workspace",
+  "out": "/Users/shixiangweii/WebstormProjects/sxw_work-agent/考卷/V1/考试结果/20260830_130929_快速复评/task2",
+  "fixture": {
+    "occurrences": {
+      "对外材料/产品报价单.md": 2,
+      "对外材料/服务协议模板.md": 1,
+      "对外材料/客户答疑手册.md": 3,
+      "对外材料/合作意向书.md": 1,
+      "对外材料/内部评审记录.md": 1,
+      "归档/产品报价单_2025版.md": 2
+    }
+  },
+  "files": 6
+}

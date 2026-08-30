@@ -177,7 +177,7 @@ npm run verify:tools      # A 段机械跑这 8 条，别手工 grep
 | `requiredCapabilities` 逐工具零消费 | bugfix 阶段接授权层，或删掉 |
 | 图形界面 | 阶段 4 |
 
-完整清单见[存量问题清单](sxw_aicoding/存量BUG/阶段1存量问题清单_V20260824.md)（按阶段追加，§0.7 是收口批）。
+完整清单见[存量问题清单](sxw_aicoding/存量BUG/存量问题清单_V20260824.md)（按阶段追加，§0.7 是收口批）。
 
 ---
 
@@ -190,7 +190,7 @@ npm run verify:tools      # A 段机械跑这 8 条，别手工 grep
 | [上位基线 v0.4](sxw_aicoding/方案讨论/WorkAgent目标定位与技术架构三次对焦讨论进展.md) | 项目目标与上位原则，与架构设计冲突时以它为准 |
 | [阶段 Roadmap](sxw_aicoding/阶段roadmap/WorkAgent阶段Roadmap_V20260823.md) | 各阶段研究问题与退出门槛 |
 | [阶段 3 实施方案](sxw_aicoding/实施方案设计/阶段3实施方案_V20260828-02.md) | 当前阶段的实现依据 |
-| [存量问题清单](sxw_aicoding/存量BUG/阶段1存量问题清单_V20260824.md) | 按阶段追加，不是只管阶段 1 |
+| [存量问题清单](sxw_aicoding/存量BUG/存量问题清单_V20260824.md) | 按阶段追加，不是只管阶段 1 |
 | `sxw_aicoding/ADR/` | 决策记录（6 份） |
 | `sxw_aicoding/代码评审/` | 按日期分目录 |
 | `sxw_aicoding/WorkAgent调研/ProviderProtocolFacts_*.md` | Spike 0 三轮实测事实（75 份证据 / 4 个端点） |

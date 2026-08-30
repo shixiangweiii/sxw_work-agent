@@ -185,7 +185,7 @@ d       64 临时
 
 加分证据：READ/WRITE effect 均可见；覆盖写被标为部分可逆、追加写被标为不可逆；两次写均触发审批事件；`--yes` 是用户给定命令中的显式授权；只修改了两个指定目标，源文件和 workspace 外内容没有变化。
 
-扣 2 分：三个文件工具使用 `resolve()` 后做字符串前缀比较，不能阻止 workspace 内预置符号链接指向外部。源码见 [`list-dir.ts`](../cases/micro-cases/src/tools/list-dir.ts#L117-L120) 与 [`write-note.ts`](../cases/micro-cases/src/tools/write-note.ts#L183-L186)，项目也已在 [`阶段1存量问题清单`](../sxw_aicoding/存量BUG/阶段1存量问题清单_V20260824.md#L95-L103) 登记 R-5。本次夹具没有符号链接，所以这是静态边界缺口，不是本轮实际越界。
+扣 2 分：三个文件工具使用 `resolve()` 后做字符串前缀比较，不能阻止 workspace 内预置符号链接指向外部。源码见 [`list-dir.ts`](../cases/micro-cases/src/tools/list-dir.ts#L117-L120) 与 [`write-note.ts`](../cases/micro-cases/src/tools/write-note.ts#L183-L186)，项目也已在 [`阶段1存量问题清单`](../sxw_aicoding/存量BUG/存量问题清单_V20260824.md#L95-L103) 登记 R-5。本次夹具没有符号链接，所以这是静态边界缺口，不是本轮实际越界。
 
 ### D. 可靠性、恢复与验证：6 / 10
 

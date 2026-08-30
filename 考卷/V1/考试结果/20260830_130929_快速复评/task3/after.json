@@ -1,0 +1,44 @@
+{
+  "root": "/Users/shixiangweii/WebstormProjects/sxw_work-agent/考卷/V1/考试结果/20260830_130929_快速复评/task3/workspace",
+  "at": "2026-08-30T05:16:06.407Z",
+  "files": [
+    {
+      "path": "内部资料/产品说明.md",
+      "bytes": 182,
+      "sha256": "f4b838f7b763fcc3c5674d30b38c63ff9b33f262810ba3fd4c030bbbe414a63f",
+      "contentBase64": "IyDkuqflk4HkuI7nu63nuqbor7TmmI4KCiMjIOe7ree6puS7t+agvAoK6ICB5a6i5oi357ut57qm5oyJ5Y6f5ZCI5ZCM5Lu35omn6KGM77yM5bm05bqm5rao5bmF5LiN6LaF6L+HIDUl44CCCui/nue7ree7ree6pua7oeS4ieW5tOeahOWuouaIt+WPr+eUs+ivt+mineWkluaKmOaJo++8jOmcgOWVhuWKoeWuoeaJueOAggo="
+    },
+    {
+      "path": "内部资料/常见问答.md",
+      "bytes": 413,
+      "sha256": "58854610a21b79bffb747814ccacf549c80b46a3378bada2419299a1dd68a262",
+      "contentBase64": "IyDlhoXpg6jnrZTnlpHvvIjkvpvlrqLmnI3lj4LogIPvvIkKClHvvJrlrqLmiLfpl67lkIjlkIznvJblj7fvvIzku47lk6rph4zmn6XvvJ8KQe+8muWQiOWQjOe8luWPt+WPquWcqOWuoeaJueezu+e7n+mHjO+8jOacrOWcsOi1hOaWmeS4jeS/neWtmOOAguivt+i1sOWuoeaJueezu+e7n+afpeivou+8jOS4jeimgeWHreWNsOixoeWhq+WGmeOAggoKUe+8muWQiOWQjOe8luWPt+mVv+S7gOS5iOagt++8nwpB77ya5b2i5aaCIEhULVhYLTIwMjMtMDAwMe+8jOWJjee8gCBIVCDlm7rlrprvvIzkuK3pl7TmmK/lrqLmiLfnroDnp7DvvIzlkI7pnaLmmK/lubTku73lkozmtYHmsLTlj7fjgIIKICAg5rOo5oSP77yaKirov5nmmK/moLzlvI/npLrkvovvvIzkuI3mmK/ku7vkvZXkuIDku73nnJ/lrp7lkIjlkIznmoTnvJblj7fjgIIqKgo="
+    },
+    {
+      "path": "内部资料/服务条款.md",
+      "bytes": 220,
+      "sha256": "19839645724e51f2984a481188ba5d27ed8daeaa77b3f9b1233a569ef51a3abb",
+      "contentBase64": "IyDmoIflh4bmnI3liqHmnaHmrL4KCiMjIOS4ieOAgeacjeWKoeWTjeW6lAoK5qCH5YeG5pyN5Yqh5ZON5bqU5pe26Ze077ya5bel5L2c5pelIDQg5bCP5pe25YaF6aaW5qyh5ZON5bqU77yM6Z2e5bel5L2c5pel6aG65bu26Iez5LiL5LiA5Liq5bel5L2c5pel44CCCumHjeWkp+aVhemanO+8iFAw77yJ5LiN5Y+X5q2k6ZmQ77yMN8OXMjQg5bCP5pe25YaFIDEg5bCP5pe25ZON5bqU44CCCg=="
+    },
+    {
+      "path": "回复草稿.md",
+      "bytes": 686,
+      "sha256": "ca4e1642ae3931ad2ba1b5a110613cdf4b7de27fab01afa8f520a5ec766080a8",
+      "contentBase64": "5p2O6JST5oKo5aW977yMCgrmhJ/osKLmgqjmnaXkv6HvvIznjrDlsLHmgqjmj5Dlh7rnmoTkuInkuKrpl67popjlm57lpI3lpoLkuIvvvJoKCioqMS4g5pyN5Yqh5qGG5p625ZCI5ZCM57yW5Y+3KioKCui0teWPuOS4juaIkeWPuOetvuiuoueahOacjeWKoeahhuaetuWQiOWQjOe8luWPt+S4uu+8mioqSFQtWVMtMjAyNC0wODczKioKCioqMi4g5qCH5YeG5pyN5Yqh5ZON5bqU5pe26Ze0KioKCuagh+WHhuacjeWKoeWTjeW6lOaXtumXtOS4uu+8muW3peS9nOaXpSAqKjQg5bCP5pe25YaFKirpppbmrKHlk43lupTvvIzpnZ7lt6XkvZzml6Xpobrlu7boh7PkuIvkuIDkuKrlt6XkvZzml6XjgIIKCumHjeWkp+aVhemanO+8iFAwIOe6p+WIq++8ieS4jeWPl+atpOmZkO+8jOaPkOS+myA3w5cyNCDlsI/ml7bmnI3liqHvvIwqKjEg5bCP5pe25YaFKirlk43lupTjgIIKCioqMy4g57ut57qm5Lu35qC8KioKCuiAgeWuouaIt+e7ree6puaMieWOn+WQiOWQjOS7t+aJp+ihjO+8jOW5tOW6pua2qOW5heS4jei2hei/hyA1JeOAggoK5aaC6LS15Y+45bey6L+e57ut57ut57qm5ruh5LiJ5bm077yM5Y+v55Sz6K+36aKd5aSW5oqY5omj77yM6ZyA57uP5ZWG5Yqh5a6h5om55ZCO56Gu6K6k5YW35L2T5LyY5oOg5bmF5bqm44CCCgrlpoLmnInlhbbku5bpl67popjvvIzmrKLov47pmo/ml7bogZTns7vjgIIKCuelneWVhuelugo="
+    },
+    {
+      "path": "审批系统导出/合同编号.txt",
+      "bytes": 63,
+      "sha256": "a3efc9c598444142c6f2f434a291cc108df471bcfd50b3eeea61b2b7b3e52cac",
+      "contentBase64": "6L+c5bGx56eR5oqAIOacjeWKoeahhuaetuWQiOWQjArlkIjlkIznvJblj7fvvJpIVC1ZUy0yMDI0LTA4NzMK"
+    },
+    {
+      "path": "客户来信/远山科技_20260826.md",
+      "bytes": 388,
+      "sha256": "30b30c8745dd325a58dfe85a9590aeec0e96ff844e3f8ba98591cf85b461c0f3",
+      "contentBase64": "5Y+R5Lu25Lq677ya6L+c5bGx56eR5oqAIOmHh+i0remDqCDmnY7olJMK5pel5pyf77yaMjAyNi0wOC0yNgrkuLvpopjvvJrlhbPkuo7mnI3liqHnu63nuqbnmoTlh6DkuKrpl67popgKCuS9oOWlve+8jAoK5oiR5Lus5YeG5aSH6LWw57ut57qm5rWB56iL77yM5pyJ5LiJ5Liq6Zeu6aKY6ZyA6KaB56Gu6K6k77yaCgoxLiDmiJHku6znjrDlnKjov5nku73mnI3liqHmoYbmnrblkIjlkIznmoTnvJblj7fmmK/lpJrlsJHvvJ/nu63nuqbnlLPor7fljZXkuIropoHloavjgIIKMi4g5L2g5Lus55qE5qCH5YeG5pyN5Yqh5ZON5bqU5pe26Ze05piv5aSa5LmF77yfCjMuIOe7ree6puS5i+WQjuS7t+agvOS8muacieWPmOWMluWQl++8nwoK6bq754Om5Zue5aSN5LiA5LiL77yM6LCi6LCi44CCCg=="
+    }
+  ],
+  "emptyDirs": [],
+  "otherEntries": []
+}
