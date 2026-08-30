@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Atlas · 白盒界面</title>
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <!--
+      Layer 1（V05 §5）。
+
+      【定】这个目录里**一行 import 都没有**，一个构建步骤都没有。
+      边界 grep 第 8 条守的就是这件事（表在 apps/cli/src/verify/boundaries.ts）：
+      界面只能拿到 HTTP 给它的东西，拿不到 Runtime 的任何类型或函数。
+      —— 那条规则扫的就是本目录，所以这里连它的模式串都不能原样写出来，
+      否则这个注释自己会被报成违规（第一次跑就是这样）。
+      §5.5 保留的那条约束（UI 通过 RunEvent 流驱动，不直接读 Runtime 内部状态）
+      因此是**物理成立**的，不是君子协定。
+
+      【定】第二条：模型产出的文本一律 textContent，绝不 innerHTML
+      （边界 grep 第 10 条）。审批面板是 EXECUTE 唯一的人工边界，
+      而它要显示的东西全部由模型给 —— 一个可以被展示内容伪造的边界不再是边界。
+      CLI 那边同一件事的形态是剥离 ANSI 与零宽字符（main.ts 的 forTerminal）。
+    -->
+    <header id="topbar">
+      <div class="brand">
+        <span class="logo">Atlas</span>
+        <span class="sub">白盒界面 · Layer 1</span>
+      </div>
+      <div id="svcinfo" class="svcinfo"></div>
+    </header>
+
+    <main>
+      <aside id="sidebar">
+        <!--
+          工作空间选择器。它排在「新任务」**上面**是刻意的：
+          起一个 Run 之前，第一件该确认的事是「它会在哪个目录里干活」。
+        -->
+        <div id="wsbox" class="wsbox">
+          <div class="wsbox-head">
+            <span>工作空间</span>
+            <button id="wsnew" type="button" class="link">新建 / 打开…</button>
+          </div>
+          <select id="wspicker"></select>
+          <p class="hint mono" id="wspath"></p>
+          <form id="wsform" hidden>
+            <input id="wsinput" type="text" placeholder="绝对路径，例如 ~/work/report-2026Q2" />
+            <div class="row">
+              <button type="submit" class="primary">建立并切换</button>
+              <button type="button" id="wscancel">取消</button>
+            </div>
+            <p class="hint">目录不存在会**建出来**；已登记过的同一个目录不会重复添加。</p>
+          </form>
+        </div>
+
+        <form id="newrun">
+          <label for="task">新任务</label>
+          <textarea id="task" rows="4" placeholder="例如：盘点 2026Q2归档/ 下的四个子目录，写一份交接清单"></textarea>
+          <button type="submit" id="startbtn">开始</button>
+          <p class="hint" id="startstate"></p>
+        </form>
+        <div class="runs-head">
+          <span>Run</span>
+          <button id="refresh" type="button" class="link">刷新</button>
+        </div>
+        <ul id="runlist"></ul>
+      </aside>
+
+      <section id="detail">
+        <div id="empty" class="empty">左边挑一个 Run，或者起一个新的。</div>
+        <div id="runview" hidden>
+          <div id="runbar"></div>
+          <nav id="tabs"></nav>
+          <div id="view"></div>
+        </div>
+      </section>
+    </main>
+
+    <div id="pending" class="pending" hidden></div>
+    <div id="toast" class="toast" hidden></div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

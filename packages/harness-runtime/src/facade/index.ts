@@ -21,6 +21,7 @@ import type { ActionBatchId, ActionId, ModelInvocationId, RunId } from "../types
 import { asId } from "../types/ids.js";
 import type { RunListItem, RuntimePorts, ToolExecutionContext } from "../ports/index.js";
 import { assertResumeEndpointMatches, freezeRunSpec } from "../model/capability/profile-loader.js";
+import { assertResumeWorkspaceMatches } from "../workspace/index.js";
 import type {
   ApprovalDecider,
   PreparedAction,
@@ -43,6 +44,7 @@ import {
 } from "../transcript/index.js";
 import { executeBatch } from "../action/settle-batch.js";
 import { ToolRegistry, validateAndNormalize } from "../tool-runtime/index.js";
+import { makeError } from "../types/error.js";
 
 export interface HarnessRuntimeDeps {
   ports: RuntimePorts;
@@ -228,6 +230,19 @@ export class HarnessRuntime {
     );
 
     /**
+     * §18.3 的第二维：**workspace 身份**（S4-5）。
+     *
+     * 与端点闸门并排、同样排在生命周期闸门之前 —— 换了执行条件之后，
+     * 连「这个 Run 现在是什么状态」都该被怀疑。
+     *
+     * 【定】它对**缺失**那一档返回 `UNKNOWN_LEGACY` 而不是抛：这道闸门上线前
+     * 创建的 Run 没有冻结 workspace，硬拒会把库里所有存量 Run 一次性变成
+     * 不可恢复，而它们当初没做错什么。但也不能静默放行 —— 那正是这个洞
+     * 原来的样子。所以下面**发一条事件**把「不知道」说出来。
+     */
+    const workspaceMatch = assertResumeWorkspaceMatches(spec.workspace, this.deps.workspaceRoot);
+
+    /**
      * 【定】生命周期闸门。
      *
      * COMPLETED / FAILED 是终态，重跑它们会把已经结算过的副作用再做一遍 ——
@@ -319,6 +334,31 @@ export class HarnessRuntime {
         fromSequence: lastSeq,
         rebuiltMessages: messages.length,
       });
+
+      /**
+       * 【定】「这条 Run 没冻结 workspace，我无法核对」必须留在 Trace 上。
+       *
+       * 一条**放行了但没验过**的闸门，如果不说话，与「验过并通过」在事后
+       * 完全不可区分 —— 而这两者对复盘的意义相反。用既有的
+       * `RuntimeErrorOccurred` 承载（category INTERNAL、retryability NEVER、
+       * 副作用 NO_EFFECT）：它不是错误，但它是**必须被看见的降级**。
+       */
+      if (workspaceMatch === "UNKNOWN_LEGACY") {
+        yield await emit("RuntimeErrorOccurred", {
+          error: makeError({
+            code: "RESUME_WORKSPACE_UNVERIFIED",
+            source: "RUNTIME",
+            category: "INTERNAL",
+            retryability: "NEVER",
+            sideEffectState: "NO_EFFECT",
+            safeMessage:
+              `这个 Run 的 RunSpec 里没有冻结 workspace（它创建于 S4-5 闸门上线之前），` +
+              `因此**无法核对**恢复时的目录是否与当初一致。本次以当前服务指向的 ` +
+              `${this.deps.workspaceRoot} 继续。若它与当初不是同一个目录，` +
+              `后续所有相对路径的读写都会落错地方。`,
+          }),
+        });
+      }
 
       /**
        * ── S10 ③：上次崩在「等人」那一刻 ──────────────────────────────────

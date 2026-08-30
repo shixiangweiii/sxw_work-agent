@@ -48,161 +48,19 @@ import {
 import { commonMechanismTools, commonSceneTools, commonTools, renderText } from "@workagent/tools-common";
 import { runSegment } from "@workagent/testkit";
 import { DEFAULT_TOOLS, REPO_ROOT, compose } from "../compose.js";
+import { BOUNDARIES, grepBoundary } from "./boundaries.js";
 import { ScriptedModelPort, banner, fact, runVerify, section, tempWorkspace, verdict } from "./harness.js";
 
 const WORKER = resolve(fileURLToPath(new URL(".", import.meta.url)), "workers/run-segment.ts");
 
 // ══════════════════════════════════════════════════════ 边界 grep
 
-interface Boundary {
-  id: string;
-  desc: string;
-  pattern: string;
-  paths: string[];
-  /** 允许命中的路径前缀。空 = 一条都不许命中。 */
-  allowed: string[];
-}
-
 /**
- * 边界表：**编号到 7，条目 8 条** —— 6b 按惯例算作第 6 条的同族。
- * （阶段 3 把第 4 条推广、新增第 6 / 6b 条；阶段 3.5 新增第 7 条。）
+ * 【定】表本身住在 `boundaries.ts`，这里只负责跑。
  *
- * 【定】打印的数字一律由 `BOUNDARIES.length` 推出，不写死。
- * 这个表在我改它之前就已经是「7 个条目被称作六条」—— 写死的数字
- * 不会随表增长，而一条「说自己有 6 条、实际扫了 7 条」的输出，
- * 会让人以为新加的那条没生效。
- *
- * 【定】第 6b 条的模式不是方案里写的 `"cases/"`。
- *
- * 那个模式**抓不到最典型的违规形态** —— `import … from "@workagent/micro-cases"`
- * 里根本没有 `cases/` 这个子串。而包名 import 恰恰是通用工具依赖 Case 包
- * 最可能的写法（相对路径跨包 import 在这个仓里本来就不常见）。
- * 一条抓不到典型违规的 grep，比没有 grep 更糟：它会让人以为守住了。
- * 所以这里用 `@workagent/micro-cases|cases/`，两种写法都抓。
- * A 段的判别力实测打的就是包名那一种。
- *
- * ── 另一件事：把模式拼出来 ──────────────────────────────────────────
- *
- * 见下面 `lit()` 的说明。
+ * 阶段 4 起有第二个消费者（`verify:ui` 的判别力实测），抄成两份的后果是
+ * 「加了一条规则、只有一个脚本认识它」，而两个脚本都是绿的。
  */
-/**
- * 把模式拼出来，**不让它以字面量形式出现在本文件里**。
- *
- * 边界 1 与边界 5 的扫描范围包含 `apps/`，也就是包含本文件 —— 直接写字面量
- * 的话，检查器会把自己的模式表报成违规（第一次跑就是这样：3 处「违规」
- * 全在 tools.ts 的 BOUNDARIES 里）。
- *
- * 【定】处置是拆字符串，**不是**把本文件加进 allowed。
- * 加白名单会在这个文件上开一个永久的洞：以后真有人在这里 import 了 Provider SDK
- * 或 `node:sqlite`，七条 grep 一条都不会响 —— 而这个文件正是那七条 grep 的家。
- * 一个给自己发豁免的检查器，和一个永远返回空的检查器是同一类东西。
- */
-const lit = (...parts: string[]): string => parts.join("");
-
-const BOUNDARIES: Boundary[] = [
-  {
-    id: "1",
-    desc: "Provider SDK 只在形状适配器里",
-    pattern: lit("@anthropic", "-ai/", "sdk"),
-    paths: ["packages", "apps", "cases", "tools"],
-    allowed: [],
-  },
-  {
-    id: "2",
-    desc: "端点名不进 Runtime 代码",
-    pattern: "dashscope",
-    paths: ["packages/harness-runtime/src"],
-    allowed: [],
-  },
-  {
-    id: "3",
-    desc: "主循环不读端点声明",
-    pattern: "profile\\.",
-    paths: ["packages/harness-runtime/src/loop/run-loop.ts"],
-    allowed: [],
-  },
-  {
-    id: "4",
-    desc: "Runtime Core 不 import 任何工具实现",
-    pattern: "micro-cases|tools-common",
-    paths: ["packages/harness-runtime/src"],
-    allowed: [],
-  },
-  {
-    id: "5",
-    desc: lit("node", ":sqlite") + " 只在 packages/store-sqlite/",
-    pattern: lit("node", ":sqlite"),
-    paths: ["packages", "apps", "cases", "adapters", "tools"],
-    allowed: ["packages/store-sqlite/"],
-  },
-  {
-    id: "6",
-    desc: "★新增：Runtime 与适配器不得依赖工具包",
-    pattern: "@workagent/tools-|tools/common",
-    paths: ["packages", "adapters"],
-    allowed: [],
-  },
-  {
-    id: "6b",
-    desc: "★新增：通用工具不得依赖任何 Case 包",
-    pattern: "@workagent/micro-cases|cases/",
-    paths: ["tools"],
-    allowed: [],
-  },
-  {
-    /**
-     * 阶段 3.5 新增。它守的是「沙箱是工具域知识，不是 Runtime 知识」。
-     *
-     * 这条与第 4 / 6 条同源，但 grep 形态不同：`run_shell` 的诱惑不是
-     * import 工具包，而是**把命令解析和沙箱 profile 生成搬进
-     * `packages/harness-runtime/src/action/`** —— 那里本来就叫
-     * effect-resolver，看起来天经地义。搬进去之后 Runtime 就认识 shell 了，
-     * 而第 4 / 6 条一条都抓不到（它没有 import 任何工具包）。
-     *
-     * Runtime 侧允许存在的只有 `TrustedEffectResolver` 这个**类型**。
-     */
-    id: "7",
-    desc: "★阶段 3.5：沙箱与命令解析不得进 Runtime / 适配器",
-    pattern: "sandbox-exec|analyzeCommand|sbpl",
-    paths: ["packages", "adapters"],
-    allowed: [],
-  },
-];
-
-/**
- * 跑一条边界 grep，返回**真实依赖**的命中行。
- *
- * 【定】判据必须区分注释、类型定义与真实依赖（CLAUDE.md 的原话）。
- * 这些文件里到处引用边界规则本身 —— 把注释算成违规，七条 grep 会永远红，
- * 然后被人加白名单加到失去意义。
- *
- * 判据是「这一行去掉缩进后以 `*` / `//` / `/*` 开头」——
- * 本仓的注释密度很高但格式统一，这个判据足够，且不会漏掉真实的 import
- * （import 语句不可能以这三者开头）。
- */
-function grepBoundary(b: Boundary): string[] {
-  let raw: string;
-  try {
-    raw = execFileSync(
-      "grep",
-      ["-rnE", "--exclude-dir=node_modules", b.pattern, ...b.paths],
-      { cwd: REPO_ROOT, encoding: "utf8" },
-    );
-  } catch (err) {
-    // grep 无匹配时退出码 1，execFileSync 会抛。那是「干净」，不是错误。
-    const e = err as { status?: number; stdout?: string };
-    if (e.status === 1) return [];
-    raw = e.stdout ?? "";
-  }
-  return raw
-    .split("\n")
-    .filter((l) => l.trim().length > 0)
-    .filter((l) => {
-      const body = l.split(":").slice(2).join(":").trim();
-      return !(body.startsWith("*") || body.startsWith("//") || body.startsWith("/*"));
-    })
-    .filter((l) => !b.allowed.some((a) => l.startsWith(a)));
-}
 
 // ══════════════════════════════════════════════════ 两类声明扫描
 
@@ -374,11 +232,14 @@ async function main(): Promise<void> {
     "工具面立起来了吗？它有没有被某个任务反向定义？分页会不会退化成静默截断？",
   );
 
-  // ── A. 七条边界 grep ＋ 第 6b 条的判别力实测
-  section(`A. 边界 grep —— 编号 1…7 共 ${BOUNDARIES.length} 条规则（6b 是第 6 条的同族）`);
+  // ── A. 全部边界 grep ＋ 第 6b 条的判别力实测
+  //    （阶段 4 的第 8 / 9 / 10 条各有自己的判别力实测，在 verify:ui A 段）
+  section(
+    `A. 边界 grep —— 编号 1…${BOUNDARIES[BOUNDARIES.length - 1]!.id} 共 ${BOUNDARIES.length} 条规则（6b 是第 6 条的同族）`,
+  );
   console.log(
     "   判据区分注释与真实依赖 —— 这些文件里到处在引用边界规则本身，\n" +
-      "   把注释算成违规，七条 grep 会永远红，然后被人加白名单加到失去意义。\n",
+      "   把注释算成违规，这些 grep 会永远红，然后被人加白名单加到失去意义。\n",
   );
 
   let boundariesOk = true;
@@ -391,7 +252,7 @@ async function main(): Promise<void> {
   verdict(
     boundariesOk,
     boundariesOk
-      ? `编号 1…7 共 ${BOUNDARIES.length} 条边界规则全部守住（真实依赖零命中）`
+      ? `编号 1…${BOUNDARIES[BOUNDARIES.length - 1]!.id} 共 ${BOUNDARIES.length} 条边界规则全部守住（真实依赖零命中）`
       : "有边界被突破，见上面的行号",
   );
 

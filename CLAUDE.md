@@ -16,13 +16,146 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 当前状态
 
+**阶段 4 产品化半边完成（2026-08-30）：Atlas 有白盒界面了。**
+依据 [阶段 4 实施方案 V20260830-01](sxw_aicoding/实施方案设计/阶段4实施方案_V20260830.md)。
+
+```bash
+npm run ui        # → http://127.0.0.1:<随机端口>/?t=<会话 Token>
+```
+
+`apps/workagent-service`（Layer 2）＋ `apps/workagent-ui`（Layer 1）。
+六个视图：时间线 / 逐轮解剖 / 预算 / 产物 / Trace / 恢复；审批 · 提问 · 接管三条通道
+在浏览器里应答，用的是**与 CLI 同一批注入点**（`ApprovalDecider` / `HandoffChannel` /
+`QuestionChannel` 接口一个字没改）。左上角可以**选目录、新建 / 切换 workspace**。`verify:all` 涨到 **14 条脚本 / 151 条判据**，
+边界 grep 扩到 **12 条**（编号到 11）。**Case 02 不在本批**（决 1）。
+
+> ### 【定】研究问题的答案是「几乎能，差一处」，那一处比一屏绿判据重要
+>
+> 问的是：执行事实能不能只靠既有的事件流、transcript 与三个 Port 注入点投影成
+> 白盒界面，而 **Runtime Core 一行不改**？
+>
+> 差的是**八条预算轴的 `axis → [used, limit]` 对应表** —— 它只在撞墙时对外说一句话
+> （`Budget*LimitReached` 各带一条轴），没撞墙的轴在 Runtime 之外完全不可见；
+> 而「八条轴现在各自离墙有多远」是白盒最基本的一屏。
+> 处置：从 `checkBudgets()` 里把表提成 `readBudgetAxes()`，**`checkBudgets` 自己跑在它上面**。
+> 提出来的是**读数**不是判定 —— §5.2「合法状态迁移不由 UI 拥有」不因此松动。
+>
+> **不让 Layer 2 自己拼这张表的理由：它拼不对，而且错了不会有任何征兆。**
+> `inputTokens` 轴读的是 `billedInputTokens`，照字段名拼的人一定拼成 `inputTokens` ——
+> 界面显示「用了 3 万」而真正会撞墙的是 42 万（主循环那条 1482% 假漂移的同族）。
+
+> ### 【定】D-2 是这个界面的前提，实测数字在这里
+>
+> 只喂事件流投影 → 3 条工具活动、**有入参 0 条**（`ActionProposed` 只有 toolName/effect）；
+> 只喂 transcript 投影 → **0 轮**逐轮解剖（没有 stopReason / usage / 帧构成）。
+> 两条轨道各缺一半，能对齐它们的**只有 D-2 那条统一序列** ——
+> 阶段 2 把它列为开工前置时写的理由是「§23.2 的 Layer 2 投影游标没法收拾」，
+> **这个界面就是那个投影**。当初若是两个计数器，合并根本写不出来。
+
+> ⚠️ **一条仪器缺陷，记在这里因为它比它修掉的问题更值得记**：
+> `verify:ui` E 段「非 loopback Host 应当被拒」第一次跑打了 200，而 curl 打同一个服务是 403 ——
+> `Host` 是 fetch 规范里的 **forbidden header**，Node 的 `fetch` **静默丢掉**它。
+> **代码是对的，仪器是坏的**：那条判据连错误的值都送不出去，它只可能是绿的。
+> 改用裸 socket，并补一条「Host 正确时必须 200」的配对判据 —— 少了它，
+> 一个拒绝一切的服务与一个正确的服务不可区分（阶段 3.5 的沙箱栽过同一跤）。
+
+> ⚠️ **仍然开着的门槛（要花钱）**：用真实端点在界面上跑完一个多轮任务。
+> D 段是脚本化模型驱动的，证据等级是 **smoke**（链路形状成立，不证明真实体验）。
+
+### 阶段 4 收口：四份评审的处置（2026-08-30）
+
+四份独立评审（zcode / pi-kimi / pi-glm / codex），**codex 给的是 NO-GO**。
+逐条回源码复核 ＋ 能实测的都实测之后：**绝大多数成立，其中 7 条推翻了我自己
+上一轮打的绿勾**。修完 24 项，见[存量清单 §0.13](sxw_aicoding/存量BUG/存量问题清单_V20260824.md)。
+
+> ### 【定】被证伪的门槛比任何单条 bug 重要
+>
+> | 上一轮宣布的 | 实情 |
+> |---|---|
+> | 「凭证不外泄 —— 扫所有响应体」 | E 段扫了 state/detail/trace，**漏了唯一直接返回文件正文的 `/api/artifact`**。实测：workspace 内一个指向 `.env` 的 symlink，接口返回 **592 字节含真 key** |
+> | 「SSE 重连不重不漏」 | 判据测的是手工 `?since=`，真实 UI 走原生重连 ＋ `Last-Event-ID`，而**服务从不读那个头** |
+> | 「预算八轴」 | **从来没有正确渲染过** —— CSP `style-src 'self'` 吃掉内联 style，八条轴全是满格 |
+> | 「Trace 按段带 commit/gitDirty」 | 对 **Web 段**不成立（只写 event 行） |
+> | 边界 8 有判别力 | 实测证明的是「往 `public/` 放文件会红」，**不是** ADR 声称的「加构建步骤会红」 |
+> | 「自动放行两入口共用」 | 共用了，但**正分支零判据** —— 回退成 E-3 那个 bug，全套验收照样绿 |
+>
+> 共同形态还是那一条：**判据测的不是它声称在测的东西**。
+> 上一轮我刚为此拆掉一条自己写的装饰判据，然后在另外六处犯了同一类错。
+
+**修掉的四条安全项**（都实测复现过，也都实测复验过）：
+
+| 项 | 发现时 | 现在 |
+|---|---|---|
+| `/api/artifact` 是任意文件读 ＋ symlink 逃逸 | 返回 `.env` 真 key | 按 **runId ＋ artifactId** 取，走 `isInsideWorkspace` 的 realpath |
+| trace 路由 `%2f` 穿越（`[^/]+` 拦不住 percent-encoded 斜杠） | 逃出 traceDir 返回 367 行 | 路由层 runId 形状白名单 |
+| 审批面板不剥 Unicode 双向/零宽 | RLO/PDF/ZWSP **3 个原样进 DOM** | `stripUnsafeDisplayChars()` 提到 compose，两入口共用 |
+| 失败的 resume **锁死服务** | 终态 Run resume → 后续 start/resume 全 500，只能重启；而报错还让用户「取消它」，取消不管用 | 首事件 try/catch ＋ 前台槽位同步占位/释放 |
+
+> ### 【定】最危险的那条是语义的，不是安全的
+>
+> **`RECOVERY_REQUIRED` 的 `recoveryItems` 被丢掉了。** 那个状态按 §10.4 是
+> **非终态、按定义没有 outcome**，而 `detail()` 只从 `outcome.recoveryItems` 取 ——
+> 于是界面显示「状态未知的副作用：（无）」，同时照常给出 CONTINUE / ABORT 按钮。
+> 仓里有【定】说「只有显式决策能销账」，而**一个盲着做出的决策不是决策**。
+> 修法是优先从 transcript 的 RUN_META 读（跨进程仍在的权威副本）。
+
+> ### 【定】又一条装饰判据，又是注入实测当场拆掉的
+>
+> D3 段第二条第一版写的是 `kind !== "USER_REJECTED" && approvals.every(...)`。
+> 注入实测（把档位改回 E-3 那个写法）时第一条如期翻红，**这一条照样绿** ——
+> 那时 Run 挂住了，一个审批事件都没有：**空数组的 `every()` 恒真**。
+>
+> 这是连续第二批出现同一形态。结论不是「要记住这条教训」——
+> **是每加一条判据就必须做一次注入实测**，靠记是记不住的：两次我都是写完之后才发现的。
+
+### Workspace 选择与切换（2026-08-30，同批关闭 S4-5）
+
+界面左上角选目录、新建 / 切换工作空间。**做的顺序是反过来的：先关安全闸门，
+再放开切换** —— 倒过来等于把一个已登记的坑（S4-5）做成一键可达。
+
+> ### 【定】§18.3 的执行条件有**两维**，两条闸门并排
+>
+> | 维 | 闸门 | 换掉之后会怎样 |
+> |---|---|---|
+> | 端点 | `assertResumeEndpointMatches` | 协议校验强度、推理块档位、token 口径与 §18.2 三条分支的判定全变 |
+> | **workspace** | `assertResumeWorkspaceMatches` | 未配对工具的观察、幂等重试、后续所有相对路径的读写、自动放行的判定，**全部换一个根** |
+>
+> 第二条到现在才有：`RunSpec.workspace` 从阶段 1 起就在类型里、**一直是 undefined**，
+> 而 `resume()` 用的 workspaceRoot 来自当前 compose。CLI 时代它不易触发（要手打 runId），
+> **界面把它变成了列表里一个按钮**。
+>
+> **身份由 realpath 推出**（`ws_<sha256(realpath)[0:12]>`）—— `isInsideWorkspace`
+> 与 seatbelt 沙箱都按真实路径判，三处口径必须一致。
+>
+> **缺失那一档返回 `UNKNOWN_LEGACY` 不抛**：硬拒会把存量 Run 一次性变成不可恢复，
+> 但要发一条事件说出「我无法核对」—— 一条放行了却没验过的闸门如果不说话，
+> 与「验过并通过」事后不可区分。
+
+> ### 【定】两道防线缺一不可
+>
+> **存储隔离**：一个 workspace 一套 `<ws>/.workagent/{runs.db,runs/}`，
+> 于是「A 的 Run 出现在 B 的列表里」物理上不成立。
+> **闸门**：万一有人显式共用一个库（`--db` 仍支持，阶段 2 的默认行为就是共用），
+> 照样拦得住。
+>
+> 只做隔离不够 —— 共用库是**合法用法**，不能靠「大家都不这么干」保证正确性；
+> 只做闸门也不够 —— 那样每次切目录都靠一条报错教育用户，而正确的默认
+> 应该是**根本不会撞上**。
+>
+> 【定】**启动时用 CLI 参数登记的那个 workspace 保留旧路径**
+> （`.workagent-state/runs.db`）。换成新默认等于让已有的 Run 一夜之间从界面消失 ——
+> **迁移的代价不该由已经存在的数据来付。**
+
+有 Run 在跑时切换返回 **409**（不排队也不强杀：强杀会把正在写文件的 Run 停在半路 →
+§18.2 第三条分支 → 要人来销账）。移除 workspace **只摘登记、不删文件**（§22.5）。
+
 **阶段 3（通用能力面）开发完成（2026-08-28）。** 依据
 [阶段 3 实施方案 V20260828-02](sxw_aicoding/实施方案设计/阶段3实施方案_V20260828-02.md) 四批 S1…S14。
 
 > **范围在开工前被决 1 改写过**：原计划是「Case 01 网页归档」，改成**通用能力面**，
 > 网页归档移出本阶段（Case 是尺子，不是模具）。评测与 Eval 按决 4 统一推到开发完成之后。
 
-- **13 条验收脚本 115 条判据全绿**，`tsc --noEmit` 干净
+- **13 条验收脚本 115 条判据全绿**（**那是当时的数**；阶段 4 后是 14 条 / 151 条，见本文件开头），`tsc --noEmit` 干净
   （摸底考试 bugfix 批后 86 → 91；阶段 3.5 累计 +24：`verify:shell` 19、
   `verify:progress` +3、`verify:tools` +1、`verify:pairing` +1）
 - 新增 `tools/` 层，默认装配 **14 个工具**（9 场景 ＋ 3 机制 ＋ 2 测量）；固定开销起步价 ≈ 2520 token
@@ -30,7 +163,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   8＋2＋2 = 12，收口批统一更正。阶段 3.5 加 `run_shell` ＋ `ask_user` 后是 9＋3＋2 = 14）
 - `BlobStorePort` ＋ 外置 ＋ `read_blob` 取回；`ArtifactStorePort` **重设计** ＋ Artifact 级 Verification
 - Progress Guard（只做「在原地打转」检测）；人工接管全链路（`WAITING_FOR_INTERACTION` 的持久化 / resume / 等待扣除）
-- 边界 grep 全部守住 —— **编号 1…7、共 8 条规则**（6b 算第 6 条的同族）。
+- 边界 grep 全部守住 —— **编号 1…7、共 8 条规则**（6b 算第 6 条的同族；**那是当时的数**，阶段 4 扩到 11 条）。
   阶段 3 新增第 6 / 6b 条，阶段 3.5 新增第 7 条；6b 与 7 都做过判别力实测。
   【定】打印的条数由 `BOUNDARIES.length` 推出，不写死 —— 这个表在阶段 3.5 之前
   就已经是「7 个条目被称作六条」，写死的数字不会随表增长
@@ -268,13 +401,28 @@ D-25 决定不写单测，这些脚本就是本项目唯一的测量仪器；**�
 > 结算 `USER_REJECTED`，而全程没有任何人拒绝过任何东西。
 > **一条闸门排在另一条后面，等于没有闸门** —— 新增校验都要有能单独触发它的判据。
 
-GUI 在阶段 4，阶段 1–3 全部 headless。
+GUI 在阶段 4（已交付，见本文件开头），阶段 1–3 全部 headless。
+**终端与浏览器是同一套装配**：同一个 `compose()`、同一份工具集、同一个自动放行档位
+（`autoGrantVerdict`）、同一个库、同一个 trace 文件。两个入口的差别只有一个：**「人在哪」**。
+
+> ### 【定】浏览器与终端在「没有人」这件事上语义相反，不得抹平
+>
+> | | 无 TTY | 浏览器没连 |
+> |---|---|---|
+> | 含义 | **真的没有人** | 人可能只是关了标签页，**稍后回来** |
+> | 审批 | 按**拒绝**处置 | **一直等**，直到有人应答或 Run 被取消 |
+>
+> 把两者做成同一种处置，会让「关掉标签页」变成「拒绝了这次写入」——
+> 那正是 E-3 那条教训的形状（结算 `USER_REJECTED`，而没有任何人拒绝过任何东西）。
+> 代价如实记：**无人值守跑批不要用 Web 入口，用 CLI** —— 那里的非交互降级是为它设计的。
 
 ## 常用命令
 
 ```bash
 npm install                        # Node 24＋（.nvmrc / engines 都写了）
 npm run typecheck                  # tsc --noEmit，必须干净（每完成一步就跑一次）
+npm run ui                         # ★阶段 4：白盒界面。打印一个带会话 Token 的 loopback URL
+npm run ui -- --port 7788 --endpoint deepseek      # 端口/端点与 CLI 同一套参数
 npm run dev -- --task "看看根目录里有什么，然后写一份 summary.txt"
 npm run dev -- --list-runs         # 库里有哪些 Run
 npm run dev -- --resume <runId>    # 接上一个没跑完的 Run
@@ -309,8 +457,14 @@ npm run verify:artifact            # 批 2：外置与逐字取回 ＋ URL 护�
 npm run verify:progress            # 批 3：进展 ＋ 无进展 ＋ 真实慢工具取消 ＋ 人工接管三条状态闭合
 npm run verify:scenarios           # S13：三场景 smoke（决 7 的判据）＋ 三条护栏在场性总校验
 npm run verify:shell               # ★阶段 3.5：两道闸门 ＋ 沙箱实测 ＋ 分支三 ＋ 边界 7
-npm run verify:all                 # 13 条脚本 / 115 条判据
+npm run verify:ui                  # ★阶段 4：边界判别力 ＋ 投影幂等 ＋ 三条等人通道走 HTTP ＋ 自动放行正分支
+                                   #   ＋ 失败 resume ＋ 恢复项可见 ＋ **跨 workspace 闸门** ＋ workspace 隔离 ＋ §22.6 ＋ SSE 游标
+npm run verify:all                 # 14 条脚本 / 151 条判据
 ```
+
+> **【定】`verify:ui` 必须真的起 HTTP 服务**，不能直接调 `PendingHub` 的方法测。
+> 后者测的是那个类；真实链路上还夹着路由、鉴权、JSON 编解码与 `pendingId` 的往返，
+> 而 E-3 那条教训说的就是中间任何一层出错、前面的绿灯都不作数。
 
 `verify:scenarios -- --live` 用真实端点跑同样三个任务（**花钱，不在 verify:all 里**）。
 
@@ -460,7 +614,11 @@ isBlockClosed     形状提供事件          端点提供有无
 
 主力端点是**百炼 Anthropic 形状 `qwen3.7-plus`**（D-16）。选它而不是评分更高的 DeepSeek，因为它**零协议兜底**（缺 tool_result、错 tool_call_id 一律 200 放行）且服务端无状态——用一个什么都不校验的端点开发，能逼出自持逻辑的全部漏洞。`compose.ts` 是全仓唯一写死端点名的地方。
 
-### 边界 grep：编号 1…7、共 8 条规则（有机械判据，改动后复核）
+### 边界 grep：编号 1…11、共 12 条规则（有机械判据，改动后复核）
+
+**【定】表在 `apps/cli/src/verify/boundaries.ts`，不要在别处抄第二份。**
+从阶段 4 起有两个消费者（`verify:tools` 跑全表、`verify:ui` 对新增几条做判别力实测），
+抄一份的后果是「加了一条规则、只有一个脚本认识它」，而两个脚本都是绿的。
 
 ```bash
 grep -rn "@anthropic-ai/sdk" packages apps cases tools      # 1. Provider SDK 只在形状适配器里
@@ -471,9 +629,34 @@ grep -rn "node:sqlite" packages apps cases adapters tools    # 5. 只允许 pack
 grep -rnE "@workagent/tools-|tools/common" packages adapters # 6. ★阶段 3：Runtime 与适配器不得依赖工具包
 grep -rnE "@workagent/micro-cases|cases/" tools/             # 6b. ★阶段 3：通用工具不得依赖任何 Case 包
 grep -rnE "sandbox-exec|analyzeCommand|sbpl" packages adapters # 7. ★阶段 3.5：沙箱与命令解析不得进 Runtime
+grep -rn "@workagent/" apps/workagent-ui/public              # 8. ★阶段 4：UI 不得依赖任何后端模块
+grep -rnE "\.setStatus\(|runLoop\(|executeBatch\(|settleOutcome\(" apps/workagent-service/src  # 9. ★阶段 4：Layer 2 不得推进执行语义
+grep -rnE "\.(inner|outer)HTML|insertAdjacentHTML" apps/workagent-ui/public  # 10. ★阶段 4：模型产出不得走 innerHTML
+grep -rnE 'style: "|style="' apps/workagent-ui/public       # 11. ★阶段 4 收口：不得用内联 style（被自己的 CSP 丢弃）
 ```
 
-**`verify:tools` A 段机械跑这 8 条**，不要手工 grep 了事 —— 它还会过滤注释行
+阶段 4 三条各自的「违反了会怎样」：
+
+| 条 | 违反的形态 | 后果 |
+|---|---|---|
+| **8** | 给界面加个构建步骤，然后 import 一个 Runtime 类型 | §5.5 保留的那条约束（UI 经 RunEvent 流驱动、不直接读 Runtime 状态）从**物理事实**退回君子协定 |
+| **9** | 服务里补一句 `setStatus` 去「修正」看起来不对的状态 | Layer 2 成为**第二个状态推进者**，§23.1 的裁决规则不成立，而界面看起来更「对」了 |
+| **10** | 审批面板用 `innerHTML` 拼命令原文 | 模型可以在命令注释里塞 HTML 把上面几行盖掉 —— 与 ANSI 伪造是同一件事，换了个渲染器 |
+| **11** | 用 `style="width:…"` 设进度条比例 | **被自己的 CSP（`style-src 'self'`）静默丢弃** —— 属性进了 DOM、声明是空的，八条预算轴全部渲染成满格。一个说假话的白盒，而且**在截图里看不出来** |
+
+> **第 8 条不是恒真式。** 它成立靠的是「UI 没有构建步骤」这个物理事实，
+> 而这个事实随时会被一次改动破坏 —— 那一刻它是唯一会说话的东西。
+> 判别力实测过：注入一行 import，当场翻红并指出行号。
+> **收口批把它的扫描范围从 `public/` 放宽到整个 `apps/workagent-ui/`** ——
+> 只扫 `public/` 的话，「加了打包器之后会红」这句 ADR 主张并不成立
+> （源码会在 `src/`，产物里包名已被消解）。豁免用**行级** `exceptLines`
+> 只放行本包自己的 `name` 声明，而不是豁免整个 `package.json`。
+>
+> **第 10 条的模式带前导点**（`\.innerHTML`），因为**散文里也会提到这个词** ——
+> 这几个文件的文件头就在讲这条规则。第一次跑时第 8 条就抓到了我自己写在
+> `index.html` 注释里的模式串。
+
+**`verify:tools` A 段机械跑这 12 条**，不要手工 grep 了事 —— 它还会过滤注释行
 （这些文件里到处在引用边界规则本身），并在 A2 段做**判别力实测**：
 往 `tools/common` 注入一行对 Case 包的 import，第 6b 条必须当场翻红并指出行号。
 
@@ -519,6 +702,7 @@ packages/harness-runtime/    Layer 3 全部
   src/loop/progress-guard.ts ★阶段 3。只回答「在原地打转吗」；「还活着吗」那半边
                              收口批删了（进展是批结算时才排空的，时间戳判不了存活）
   src/facade/                HarnessRuntime：start / resume / cancel / interject / inspect
+  src/workspace/             ★workspace 身份冻结 ＋ resume 一致性闸门（§18.3 第二维，S4-5）
 packages/store-sqlite/       ★阶段 2。唯一允许 import node:sqlite 的地方
   src/migrations/            单一 runner，固定顺序（§26.3【定】）
   src/transcript-store.ts    TranscriptStorePort 的 SQLite 实现（接口一字未改）
@@ -546,11 +730,32 @@ tools/common/                ★阶段 3。Case 无关的通用能力面（@work
                              —— 边界 7 抓的就是这一条
   src/artifact-checks/       JSON / ZIP / 编码 / hash 四项。**不做「Markdown 可解析」**（恒绿）
 cases/micro-cases/           只剩 append_log 与 slow_write —— **测量工具**，不是能力
-apps/cli/                    Composition Root（compose.ts）＋ 入口 ＋ 12 条验收脚本 ＋ 一次性探针
+apps/cli/                    Composition Root（compose.ts）＋ 终端入口 ＋ 14 条验收脚本 ＋ 一次性探针
   src/composite.ts           ★阶段 3。工具包组合器。【定】必须路由 Verifier 的**三个**方法
   src/stdin-channel.ts       ★阶段 3。**单一** readline，按「谁在等」分派三种语义
   src/trace/file-sink.ts     事件流落 JSONL（header / event / footer 三种行）
+  src/verify/boundaries.ts   ★阶段 4。边界表**唯一**一份（tools 跑全表、ui 做判别力实测）
+apps/workagent-service/      ★阶段 4。Layer 2 Application Service（@workagent/service）
+  src/projection.ts          纯函数投影。【定】只合并与转述，**不推算**（决 5）
+  src/run-host.ts            §6.6 Runtime Host。【定】不推进执行语义 —— 边界 9 抓的就是这里
+  src/human-channels.ts      「人在浏览器里」的三条通道。**接口一个字没改**
+  src/workspace-registry.ts  ★workspace 注册表（Layer 2 产品状态，**不进 Layer 3 的库**）
+  src/workspace-hosts.ts     ★选目录 / 切换。【定】同时只有一个活着的 RunHost
+  src/security.ts            §22.6：随机端口 / 会话 Token / Origin ＋ **Host** 校验
+  src/server.ts              HTTP ＋ SSE。游标是 transcript sequence（D-2）
+  src/api-types.ts           线上契约。**不是** Runtime 类型的再导出
+apps/workagent-ui/public/    ★阶段 4。Layer 1。**没有 src/、没有构建、没有一行 import**
+                             【定】边界 8 与 10 守的就是这个目录（判别力实测过）
 ```
+
+> **【定】Composition Root 只有一份**，住在 `apps/cli/src/compose.ts`；
+> `workagent-service` 与 `eval/suite` 都 import 它，**不抄第二份** ——
+> 抄一份的后果是两个入口的工具集 / 端点枚举 / system prompt / 审批档位迟早不一致，
+> 而那种不一致在绿灯下看不出来。
+>
+> 它为什么不搬进 `packages/`：**边界 6 会当场翻红**（compose 必须 import 工具包）。
+> **那条 grep 反过来正好证明了 Composition Root 属于 app 层。**
+> 名字里带 `cli` 是历史不是设计，登记为欠账 S4-1。
 
 **`read_blob` 为什么要按字符分页**：被外置的是**工具结果**，而工具结果几乎都是
 **一行 JSON** —— 一个 64KB 的 `read_file` 结果 `totalLines` 就是 1。只按行分页的话，
@@ -575,11 +780,12 @@ apps/cli/                    Composition Root（compose.ts）＋ 入口 ＋ 12 �
 | [**阶段 2 实施方案 V20260826-03**](sxw_aicoding/实施方案设计/阶段2实施方案_V20260826.md) | **阶段 2 的实现依据**。§0 七个决定、§0.3 十七条修订记录、§7 的 36 项处置映射 |
 | [阶段 2 方案评审](sxw_aicoding/方案评审/2026-08-26/阶段2实施方案评审-zcode.md) | 逐条核源码的评审，P1 四条已吸收进方案 §0.3 |
 | [**阶段 3 实施方案 V20260828-02**](sxw_aicoding/实施方案设计/阶段3实施方案_V20260828-02.md) | **阶段 3 的实现依据**。§0 七个决定（决 2 / 决 3 有修订）、§4 十四条不得绕过、§5 结构性退出门槛 |
+| [**阶段 4 实施方案 V20260830-01**](sxw_aicoding/实施方案设计/阶段4实施方案_V20260830.md) | **阶段 4 产品化半边的实现依据**。§0 七个决定、§1 研究问题与九条退出门槛、§3 十条不得绕过、§4 边界 grep 扩到 10 |
 | [阶段 3 方案评审](sxw_aicoding/方案评审/2026-08-28/) | 两份（zcode / pi）。含一条**被驳回**的：pi 维度 6 说 R-1 / R-2 未修是事实错误，但它指向的后果成立，已并入 S10 |
 | [探针记录](sxw_aicoding/WorkAgent调研/探针记录/) | 花钱探针的**原始输出**。`probe-requirement-extraction` 推翻了回归评测 §5.1 的归因 |
 | `WorkAgent调研/ProviderProtocolFacts_*.md` | Spike 0 三轮实测事实（75 份证据 / 4 个端点） |
 | `代码评审/` | 按日期分目录。`2026-08-24/` 两份阶段 1 评审；`2026-08-25/` 一份 Bugfix 批次评审 |
-| `ADR/` | 决策记录。阶段 2 三份（[0001](sxw_aicoding/ADR/0001-outcome-kind-不区分是谁没做成.md) / [0002](sxw_aicoding/ADR/0002-恢复可观测性改为-action-级事实.md) / [0003](sxw_aicoding/ADR/0003-受信时间事实冻结到执行段.md)）＋ 阶段 3 三份（[0004 工具归属](sxw_aicoding/ADR/0004-通用工具归属与两类分拣标准.md) / [0005 lease 不做](sxw_aicoding/ADR/0005-PARKED-lease-不做的理由.md) / [0006 读放开的护栏](sxw_aicoding/ADR/0006-读放开的护栏边界.md)）＋ **阶段 3.5 两份**（[0007 结构转换 vs 语义挑选](sxw_aicoding/ADR/0007-html-结构转换可内置语义挑选不可.md) / [0008 ask_user 与 handoff 是两个洞](sxw_aicoding/ADR/0008-ask-user-与-request-handoff-是两个洞.md)）；**阶段 1 的四份欠了两个阶段了** |
+| `ADR/` | 决策记录。阶段 2 三份（[0001](sxw_aicoding/ADR/0001-outcome-kind-不区分是谁没做成.md) / [0002](sxw_aicoding/ADR/0002-恢复可观测性改为-action-级事实.md) / [0003](sxw_aicoding/ADR/0003-受信时间事实冻结到执行段.md)）＋ 阶段 3 三份（[0004 工具归属](sxw_aicoding/ADR/0004-通用工具归属与两类分拣标准.md) / [0005 lease 不做](sxw_aicoding/ADR/0005-PARKED-lease-不做的理由.md) / [0006 读放开的护栏](sxw_aicoding/ADR/0006-读放开的护栏边界.md)）＋ **阶段 3.5 两份**（[0007 结构转换 vs 语义挑选](sxw_aicoding/ADR/0007-html-结构转换可内置语义挑选不可.md) / [0008 ask_user 与 handoff 是两个洞](sxw_aicoding/ADR/0008-ask-user-与-request-handoff-是两个洞.md)）＋ **阶段 4 一份**（[0009 UI 不引入前端框架与 Electron](sxw_aicoding/ADR/0009-阶段4-UI-不引入前端框架与-Electron.md)）；**阶段 1 的四份欠了三个阶段了** |
 | `spikes/s0-provider-protocol/` | 一次性探针，已完成，不进主干依赖（`tsconfig.json` 已 exclude） |
 
 V04 及更早的架构设计、`V03_Spike0回填清单.md` **不再作为实现依据**，只作过程记录。

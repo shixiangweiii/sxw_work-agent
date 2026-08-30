@@ -10,3 +10,4 @@ export * from "./facade/index.js";
 export * from "./budget/index.js";
 export * from "./trace/index.js";
 export * from "./model/capability/index.js";
+export * from "./workspace/index.js";

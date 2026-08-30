@@ -7,6 +7,7 @@
  */
 
 import { config as loadDotenv } from "dotenv";
+import { execFileSync } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,12 +21,14 @@ import {
   asId,
   assertProfileMatchesEndpoint,
   freezeProfile,
+  freezeWorkspace,
   loadProfileFromFile,
   makeError,
   warnIfAssumed,
   type AgentSpecId,
   type ApprovalDecider,
   type EndpointCapabilityProfile,
+  type PreparedAction,
   type RedactionOutcome,
   type RedactionPort,
   type RunSpec,
@@ -49,6 +52,7 @@ import {
   SHELL_RESOLVER_KEY,
   ShellEffectResolver,
   commonTools,
+  isInsideWorkspace,
   type HandoffChannel,
   type QuestionChannel,
 } from "@workagent/tools-common";
@@ -204,6 +208,126 @@ export function readEndpointConfig(
     apiKey,
     modelId,
     profilePath: resolve(REPO_ROOT, "adapters/endpoint-profiles", spec.profile),
+  };
+}
+
+// ═══════════════════════════════════════════════ 自动放行档位（决 3）
+
+export type AutoGrantVerdict = { ok: true } | { ok: false; why: string };
+
+/**
+ * 「这一步我事先同意了吗」—— 阶段 3 决 3 的默认档位。
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ * 【定】它住在 Composition Root，**两个入口共用同一份**。
+ *
+ * 阶段 4 之前它是 `main.ts` 里的一个闭包，只有终端能用。Web 入口再抄一份的
+ * 直接后果是**两个入口的闸门档位迟早不一致** —— 而那种不一致在绿灯下看不出来：
+ * 两边都能跑、都会问、只是问的东西不一样。`parseEndpointArg` 的注释里已经
+ * 记过一次同样的教训（抄一份 → eval 的端点枚举一直没跟上）。
+ *
+ * ── 语义：「workspace 内、找得回来的写，我事先同意」──────────────────────
+ *
+ * 三条都满足才放行：
+ *   ① 不是 EXECUTE；
+ *   ② 不是 IRREVERSIBLE（覆盖写算「找得回来」，追加与删除不算）；
+ *   ③ 作用域落在 workspace 内（realpath 之后，与 R-5 同一道判定）。
+ *
+ * 【定】`PARTIALLY_REVERSIBLE` 属于放行范围。E-3 原文写的是「可逆（**覆盖写可逆**；
+ * 追加、删除不可逆）」，而实现曾经写成 `reversibility !== "REVERSIBLE"` 就拒，
+ * 于是**这条规则从来没有覆盖过它唯一为之而写的那个工具**（`write_file` 声明的
+ * 正是 `PARTIALLY_REVERSIBLE`）。2026-08-28 真实端点实跑撞出来：模型正确做完了
+ * 全部工作，两次写入被「无人应答」挡掉，结算 `USER_REJECTED` ——
+ * 而全程没有任何人拒绝过任何东西。
+ * ══════════════════════════════════════════════════════════════════════
+ */
+export function autoGrantVerdict(a: PreparedAction, workspaceRoot: string): AutoGrantVerdict {
+  const e = a.resolvedEffect;
+  if (e.effectType === "EXECUTE") return { ok: false, why: "EXECUTE 类操作不在自动放行范围内" };
+  if (e.reversibility === "IRREVERSIBLE") {
+    return { ok: false, why: "IRREVERSIBLE（追加 / 删除这类找不回来的操作需要逐次确认）" };
+  }
+  // 【定】执行前用 realpath 重新校验一次，与工具内部那道是同一个判定。
+  // 授权是在「决定的那一刻」给的，而路径可能在那之后被换掉。
+  if (e.scope.kind === "FILE" || e.scope.kind === "DIRECTORY") {
+    const target = resolve(workspaceRoot, e.scope.value);
+    if (!isInsideWorkspace(workspaceRoot, target)) {
+      return { ok: false, why: `作用域 ${e.scope.value} 不在 workspace 内（realpath 后判定）` };
+    }
+  }
+  return { ok: true };
+}
+
+// ═══════════════════════════════════════════ 展示面的字符剥离（两入口共用）
+
+/**
+ * 把**模型产出的文本**变成可以安全展示的形式。
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ * 【定】它住在 Composition Root，终端与浏览器**共用同一份**。
+ *
+ * 审批提示是 EXECUTE 的**唯一**人工边界，而它要显示的东西（`command` /
+ * `description`）完全由模型给。**一个可以被展示内容伪造的边界不再是边界。**
+ *
+ * 阶段 4 收口批把它从 `main.ts` 提出来，理由是实测：Web 审批面板用
+ * `textContent` 渲染，挡住了 HTML 注入，却**原样保留 Unicode 双向覆盖与
+ * 零宽字符** —— 实测一条命令带 RLO/PDF/ZWSP 三个控制字符全部进了 DOM。
+ * 于是同一条 `run_shell` 命令在终端上是剥过的，在浏览器上不是：
+ *
+ *     rm -rf /tmp/‮gpj.eliforp    ← 浏览器显示成 rm -rf /tmp/profile.jpg
+ *
+ * 这与 E-3 是同一个形状：**一条闸门只覆盖了它两个入口中的一个**，
+ * 而没被覆盖的那个恰好是现在的主入口。
+ *
+ * 剥离而不是转义：这里不需要保留模型给的任何样式，保留得越少可伪造面越小。
+ * 三类各有理由：
+ *   · C0/C1 控制符 —— ESC 开头的 ANSI 序列能清屏、移光标、改标题；
+ *   · CR —— 把光标拉回行首覆盖已打印内容，不需要 ESC 就能骗人；
+ *   · 零宽与双向控制 —— 能让两条不同的命令渲染成**一模一样**（Trojan Source）。
+ * ══════════════════════════════════════════════════════════════════════
+ */
+export function stripUnsafeDisplayChars(raw: string): string {
+  return raw
+    .replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "")
+    .replace(/\r/g, "")
+    .replace(/[\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff]/g, "");
+}
+
+// ═══════════════════════════════════════════════ 工作树身份（两入口共用）
+
+export interface GitProvenance {
+  commit: string;
+  /**
+   * 工作树是否有未提交改动（E-5）。
+   *
+   * 复评报告的具体教训：一份 trace 的 header 记着 commit `012717d`，而实际运行时
+   * 工作树包含尚未提交的修复 —— **没有这个标志位，「旧 commit ＋ 未提交改动」
+   * 在 artifact 里看起来就是「旧 commit」**。
+   */
+  gitDirty: boolean | "unknown";
+}
+
+/**
+ * 当前 commit 与工作树状态。取不到就如实写 unknown，**不要猜** ——
+ * artifact 的价值全在可复核。
+ *
+ * 【定】它同样是两个入口共用的：阶段 4 之前只有 CLI 写 trace header，
+ * 于是 Web 入口跑出来的段在 Trace 视图里没有 commit / gitDirty ——
+ * Roadmap 声明的「Trace 按段带 commit + gitDirty」对 Web 段不成立。
+ */
+export function gitProvenance(): GitProvenance {
+  const run = (args: string[]): string | undefined => {
+    try {
+      return execFileSync("git", args, { cwd: REPO_ROOT, encoding: "utf8" }).trim();
+    } catch {
+      return undefined;
+    }
+  };
+  const commit = run(["rev-parse", "HEAD"]);
+  const status = run(["status", "--porcelain"]);
+  return {
+    commit: commit ?? "unknown",
+    gitDirty: status === undefined ? "unknown" : status.length > 0,
   };
 }
 
@@ -502,6 +626,18 @@ export function compose(opts: ComposeOptions): Composed {
     },
     // 【定】Run 启动时冻结。Replay 使用冻结版本，不使用当前配置。
     endpointProfile: freezeProfile(profile),
+    /**
+     * 【定】workspace 身份也要冻结（S4-5）。
+     *
+     * 这个字段从阶段 1 起就在 `RunSpec` 的类型里，**一直是 undefined** ——
+     * 而 `resume()` 用的 workspaceRoot 来自当前 compose。于是「在 /A 起的 Run
+     * 用 --workspace /B 恢复」会让旧 Run 在错误的目录里继续产生副作用，
+     * 且盘上看不出来。填上它，`assertResumeWorkspaceMatches` 才有东西可比。
+     *
+     * 阶段 4 之前这个洞不易触发（CLI 要手打 runId）；白盒界面把它变成了
+     * 列表里一个按钮 —— 所以「选目录 → 切换 workspace」必须先有这道闸门。
+     */
+    workspace: freezeWorkspace(opts.workspaceRoot),
     budgets: DEFAULT_BUDGETS,
     runtimeEnvironmentFingerprint: `node-${process.version}`,
     createdAt: clock.now(),

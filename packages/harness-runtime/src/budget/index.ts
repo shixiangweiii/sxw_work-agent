@@ -128,27 +128,15 @@ export interface CheckBudgetsInput {
  * 那一整夜都算进来。`startedAt` 只服务 `maxTotalWallClockMs` 这条独立的轴。
  */
 export function checkBudgets(input: CheckBudgetsInput): BudgetVerdict {
-  const { usage, budgets, consecutiveFailures, now } = input;
-  const ratio = budgets.softLimitRatio;
+  const ratio = input.budgets.softLimitRatio;
+  const axes = readBudgetAxes(input);
 
-  /** [used, limit] 对，limit 为 undefined 表示该轴未设限。 */
-  const axes: Array<[BudgetAxis, number, number | undefined]> = [
-    ["turns", usage.turns, budgets.maxTurns],
-    ["activeWallClockMs", usage.activeWallClockMs, budgets.maxActiveWallClockMs],
-    ["totalWallClockMs", now - usage.startedAt, budgets.maxTotalWallClockMs],
-    ["modelCalls", usage.modelCalls, budgets.maxModelCalls],
-    ["toolCalls", usage.toolCalls, budgets.maxToolCalls],
-    ["inputTokens", usage.billedInputTokens, budgets.maxInputTokens],
-    ["outputTokens", usage.outputTokens, budgets.maxOutputTokens],
-    ["consecutiveFailures", consecutiveFailures, budgets.maxConsecutiveFailures],
-  ];
-
-  for (const [axis, used, limit] of axes) {
+  for (const { axis, used, limit } of axes) {
     if (limit === undefined) continue;
     if (used >= limit) return { kind: "HARD", axis, used, limit };
   }
 
-  for (const [axis, used, limit] of axes) {
+  for (const { axis, used, limit } of axes) {
     // consecutiveFailures 不报软限：它的限值通常是 3，0.8×3=2.4，
     // 第 3 次失败前一轮就提醒没有意义，只会制造噪音。
     if (limit === undefined || axis === "consecutiveFailures") continue;
@@ -156,6 +144,84 @@ export function checkBudgets(input: CheckBudgetsInput): BudgetVerdict {
   }
 
   return { kind: "OK" };
+}
+
+/** 一条轴的读数。`limit` 缺席 = 这条轴未设限（`maxTotalWallClockMs` 默认就是）。 */
+export interface BudgetAxisReading {
+  axis: BudgetAxis;
+  used: number;
+  limit?: number;
+  /** 单位。界面要靠它决定「12000」是毫秒还是 token —— 两者差 4 个数量级。 */
+  unit: "count" | "ms" | "token";
+}
+
+/**
+ * 八条轴的当前读数。**`checkBudgets` 自己就跑在它上面**（唯一的表）。
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ * ── 它为什么在阶段 4 才出现 ────────────────────────────────────────────
+ *
+ * 在此之前这张表只以「撞墙时报一条」的形态对外：`BudgetSoftLimitReached` /
+ * `BudgetHardLimitReached` 各带一条轴。也就是说**没撞墙的轴在外面完全不可见** ——
+ * 而白盒界面要显示的恰恰是「八条轴现在各自离墙有多远」。
+ *
+ * 阶段 4 的研究问题是「Runtime 一行不改能不能投影出白盒界面」。这里是**唯一
+ * 答不上来的一处**，如实记在这儿：不是事件流缺一个字段，是这张
+ * `axis → [used, limit]` 的对应表本身是 Runtime 知识，且从来没有对外形态。
+ *
+ * ── 为什么不让 Layer 2 自己拼这张表 ────────────────────────────────────
+ *
+ * 【定】因为它拼不对，而且**错了不会有任何征兆**。
+ *
+ * 看 `inputTokens` 这一行：它读的是 `usage.billedInputTokens`，不是
+ * `usage.inputTokens`。任何一个照着字段名拼表的人都会拼成后者 —— 于是界面上
+ * 显示「输入 token 用了 3 万」，而真正会撞墙的那个数是 42 万。
+ * 这正是主循环里那条【定】记过的坑（「只读 inputTokens 在命中缓存时低估达 85%」，
+ * 摸底考试 14/14 个 run 打出 1482% 假漂移）—— 换个地方再犯一次。
+ *
+ * 【定】所以提出来的是**读数**，不是判定：`checkBudgets` 仍然是唯一的判官，
+ * Layer 2 拿到的是它用的同一张表。§5.2「合法状态迁移不由 UI 拥有」不因此松动。
+ * ══════════════════════════════════════════════════════════════════════
+ */
+export function readBudgetAxes(input: CheckBudgetsInput): BudgetAxisReading[] {
+  const { usage, budgets, consecutiveFailures, now } = input;
+  return [
+    { axis: "turns", used: usage.turns, limit: budgets.maxTurns, unit: "count" },
+    {
+      axis: "activeWallClockMs",
+      used: usage.activeWallClockMs,
+      limit: budgets.maxActiveWallClockMs,
+      unit: "ms",
+    },
+    {
+      axis: "totalWallClockMs",
+      used: now - usage.startedAt,
+      limit: budgets.maxTotalWallClockMs,
+      unit: "ms",
+    },
+    { axis: "modelCalls", used: usage.modelCalls, limit: budgets.maxModelCalls, unit: "count" },
+    { axis: "toolCalls", used: usage.toolCalls, limit: budgets.maxToolCalls, unit: "count" },
+    // 【定】billed，不是 inputTokens。见上面那段的说明 —— 这一行是整张表里
+    // 唯一一个「字段名与读数不同名」的地方，也正是抄表的人会抄错的那一行。
+    {
+      axis: "inputTokens",
+      used: usage.billedInputTokens,
+      limit: budgets.maxInputTokens,
+      unit: "token",
+    },
+    {
+      axis: "outputTokens",
+      used: usage.outputTokens,
+      limit: budgets.maxOutputTokens,
+      unit: "token",
+    },
+    {
+      axis: "consecutiveFailures",
+      used: consecutiveFailures,
+      limit: budgets.maxConsecutiveFailures,
+      unit: "count",
+    },
+  ];
 }
 
 /**

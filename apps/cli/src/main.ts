@@ -14,7 +14,6 @@
  *   npm run dev -- --resume run_xxx --recovery-decision CONTINUE --recovery-note "已人工确认"
  */
 
-import { execFileSync } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import type {
@@ -28,8 +27,18 @@ import type {
 } from "@workagent/harness-runtime";
 import { NullTraceSink, asId, readRunFacts } from "@workagent/harness-runtime";
 import { SqliteRunStore, openDb } from "@workagent/store-sqlite";
-import { isInsideWorkspace, type HandoffChannel, type QuestionChannel } from "@workagent/tools-common";
-import { compose, parseEndpointArg, REPO_ROOT, resolveDbPath, type EndpointChoice } from "./compose.js";
+import type { HandoffChannel, QuestionChannel } from "@workagent/tools-common";
+import {
+  autoGrantVerdict,
+  compose,
+  gitProvenance,
+  parseEndpointArg,
+  REPO_ROOT,
+  resolveDbPath,
+  stripUnsafeDisplayChars,
+  type AutoGrantVerdict,
+  type EndpointChoice,
+} from "./compose.js";
 import { FileTraceSink } from "./trace/file-sink.js";
 import { finishRendering, renderEvent } from "./render.js";
 import { StdinChannel } from "./stdin-channel.js";
@@ -121,30 +130,6 @@ function parseArgs(argv: string[]): Args {
   };
 }
 
-/** 当前 commit。取不到就如实写 unknown，不要猜 —— artifact 的价值全在可复核。 */
-function gitCommit(): string {
-  try {
-    return execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encoding: "utf8" }).trim();
-  } catch {
-    return "unknown";
-  }
-}
-
-/**
- * 工作树是否有未提交改动（E-5）。
- *
- * 复评报告的具体教训：一份开发自测 trace 的 header 记着 commit `012717d`，
- * 而实际运行时工作树包含尚未提交的修复 —— **没有这个标志位，
- * 「旧 commit ＋ 未提交改动」在 artifact 里看起来就是「旧 commit」**。
- */
-function gitDirty(): boolean | "unknown" {
-  try {
-    return execFileSync("git", ["status", "--porcelain"], { cwd: REPO_ROOT, encoding: "utf8" }).trim().length > 0;
-  } catch {
-    return "unknown";
-  }
-}
-
 /**
  * 交互式审批。
  *
@@ -191,43 +176,15 @@ function interactiveApproval(
     };
   }
 
-  const autoGrant = (a: PreparedAction): { ok: true } | { ok: false; why: string } => {
-    const e = a.resolvedEffect;
-    if (e.effectType === "EXECUTE") return { ok: false, why: "EXECUTE 类操作不在自动放行范围内" };
-    /**
-     * ── 档位：只有 IRREVERSIBLE 才逐次问 ──────────────────────────────────
-     *
-     * 【定】`PARTIALLY_REVERSIBLE` 属于放行范围。
-     *
-     * E-3 原文写的是「② 可逆（**覆盖写可逆**；追加、删除不可逆）」——
-     * 也就是说它本来就打算放行覆盖写。但实现写的是
-     * `reversibility !== "REVERSIBLE"` 就拒，而 `write_file` 声明的是
-     * `PARTIALLY_REVERSIBLE`（文件还在，旧内容没了）。
-     *
-     * 后果是：**这条自动放行规则从来没有覆盖过它唯一为之而写的那个工具。**
-     * 2026-08-28 的真实端点实跑撞出来的 —— 模型正确地读完文档、
-     * 正确地生成了汇总，两次写入都被「非交互环境下无人应答」挡掉，
-     * Run 结算成 USER_REJECTED，而全程没有任何一个人拒绝过任何东西。
-     *
-     * 这与 §0.7 记的 U-6 是同一个形状：一条闸门被另一条挡在后面，
-     * 于是它想放行的东西从来没被放行过，而没有人会发现 ——
-     * 因为「被拒绝」看起来完全像是正常工作。
-     *
-     * 【定】线仍然在，只是画在真正不可逆的地方：追加与删除逐次问。
-     */
-    if (e.reversibility === "IRREVERSIBLE") {
-      return { ok: false, why: "IRREVERSIBLE（追加 / 删除这类找不回来的操作需要逐次确认）" };
-    }
-    // 【定】执行前用 realpath 重新校验一次，与工具内部那道是同一个判定。
-    // 授权是在「决定的那一刻」给的，而路径可能在那之后被换掉。
-    if (e.scope.kind === "FILE" || e.scope.kind === "DIRECTORY") {
-      const target = resolve(workspaceRoot, e.scope.value);
-      if (!isInsideWorkspace(workspaceRoot, target)) {
-        return { ok: false, why: `作用域 ${e.scope.value} 不在 workspace 内（realpath 后判定）` };
-      }
-    }
-    return { ok: true };
-  };
+  /**
+   * 【定】档位判定住在 Composition Root（`compose.ts` 的 `autoGrantVerdict`），
+   * 终端与 Web 两个入口**共用同一份**。
+   *
+   * 阶段 4 之前它是这里的一个闭包 —— 只有终端能用。Web 入口再抄一份的直接后果是
+   * 两个入口的闸门档位迟早不一致，而那种不一致在绿灯下看不出来：两边都会问，
+   * 只是问的东西不一样。理由与判定内容都搬到了 `autoGrantVerdict` 的注释里。
+   */
+  const autoGrant = (a: PreparedAction): AutoGrantVerdict => autoGrantVerdict(a, workspaceRoot);
 
   /**
    * 停下来问一句。
@@ -408,8 +365,7 @@ async function main(): Promise<void> {
             ? resolve(REPO_ROOT, ".workagent-runs", `${runId}.jsonl`)
             : resolve(args.trace!),
         () => ({
-          commit: gitCommit(),
-          gitDirty: gitDirty(),
+          ...gitProvenance(),
           nodeVersion: process.version,
           endpointProfile: profileRef,
           modelId,
@@ -683,32 +639,15 @@ function terminalQuestion(stdin: StdinChannel, signal: AbortSignal): QuestionCha
 }
 
 /**
- * 把**模型产出的文本**变成可以安全打进终端的形式（2026-08-30 评审 P1）。
+ * 把**模型产出的文本**变成可以安全打进终端的形式。
  *
- * ══════════════════════════════════════════════════════════════════════
- * 审批提示是 EXECUTE 的**唯一**人工边界，而它要显示的东西
- * （`command` / `description`）完全由模型给。原样 `console.log` 的后果：
- *
- *   一条命令可以在自己的注释里塞 ESC 序列，把上面几行**清掉再重画** ——
- *   用户看到的是「ls -la」，真正批准的是别的东西。
- *
- * 【定】一个可以被展示内容本身伪造的边界，不再是边界。
- * V05 §22.4（不可信内容）在这里的具体落点：模型输出流进终端渲染
- * 本身就是一次渲染注入，而这条链路上模型是唯一的内容来源。
- *
- * 处置是**剥离**不是转义：这里不需要保留模型给的任何样式，
- * 保留得越少可伪造面越小。三类各有理由：
- *   · C0/C1 控制符 —— ESC 开头的 ANSI 序列能清屏、移光标、改标题；
- *   · CR —— 把光标拉回行首覆盖已打印内容，不需要 ESC 就能骗人；
- *   · 零宽与双向控制 —— 能让两条不同的命令渲染成**一模一样**。
- * ══════════════════════════════════════════════════════════════════════
+ * 【定】判定与字符类都在 `compose.ts` 的 `stripUnsafeDisplayChars()` 里，
+ * 终端与浏览器**共用同一份**。阶段 4 收口批提出来的理由是实测：
+ * Web 审批面板用 textContent 挡住了 HTML 注入，却原样保留了 Unicode 双向
+ * 与零宽字符 —— 一条闸门只覆盖了两个入口中的一个，而没被覆盖的那个
+ * 恰好是现在的主入口。
  */
-function forTerminal(raw: string): string {
-  return raw
-    .replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "")
-    .replace(/\r/g, "")
-    .replace(/[\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff]/g, "");
-}
+const forTerminal = stripUnsafeDisplayChars;
 
 /** 只取 host —— 完整 URL 的路径里有时带部署标识，而这一行会被贴进报告。 */
 function hostOf(baseUrl: string): string {

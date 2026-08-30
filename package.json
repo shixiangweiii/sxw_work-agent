@@ -17,6 +17,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "dev": "tsx apps/cli/src/main.ts",
+    "ui": "tsx apps/workagent-service/src/main.ts",
     "verify:endpoint-profile": "tsx apps/cli/src/verify/endpoint-profile.ts",
     "verify:pairing": "tsx apps/cli/src/verify/pairing.ts",
     "verify:resume": "tsx apps/cli/src/verify/resume.ts",
@@ -30,7 +31,8 @@
     "verify:progress": "tsx apps/cli/src/verify/progress.ts",
     "verify:scenarios": "tsx apps/cli/src/verify/scenarios.ts",
     "verify:shell": "tsx apps/cli/src/verify/shell.ts",
-    "verify:all": "npm run verify:endpoint-profile && npm run verify:pairing && npm run verify:resume && npm run verify:compact && npm run verify:persistence && npm run verify:budget && npm run verify:crash && npm run verify:drift && npm run verify:tools && npm run verify:artifact && npm run verify:progress && npm run verify:shell && npm run verify:scenarios",
+    "verify:ui": "tsx apps/cli/src/verify/ui.ts",
+    "verify:all": "npm run verify:endpoint-profile && npm run verify:pairing && npm run verify:resume && npm run verify:compact && npm run verify:persistence && npm run verify:budget && npm run verify:crash && npm run verify:drift && npm run verify:tools && npm run verify:artifact && npm run verify:progress && npm run verify:shell && npm run verify:ui && npm run verify:scenarios",
     "eval:suite": "tsx eval/suite/index.ts",
     "probe:reasoning-tokens": "tsx apps/cli/src/verify/reasoning-tokens.ts",
     "probe:binary-chain": "tsx apps/cli/src/verify/probe-binary-chain.ts",

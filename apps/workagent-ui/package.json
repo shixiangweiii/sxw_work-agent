@@ -1,0 +1,7 @@
+{
+  "name": "@workagent/ui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Layer 1：白盒界面。纯静态资源 —— 没有 src/、没有构建步骤、没有一行 import。见边界 grep 第 8 条。"
+}
