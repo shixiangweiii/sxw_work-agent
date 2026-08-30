@@ -381,6 +381,89 @@ async function main(): Promise<void> {
     }
   }
 
+  // ── 工具违约：ok:false 却不带 error（阶段 3.5 撞出来的）
+  section("工具违约：ok:false 却没带 error，Harness 不得崩");
+  console.log(
+    "   `ToolExecutionOutcome.error` 在类型上是**可选**的，而结算处原本写的是\n" +
+      "   `renderError(outcome.error!)` —— 一个非空断言掩着一个真洞：任何工具\n" +
+      "   返回 ok:false 而忘了带 error，那一行就抛 TypeError，**整个 Run 当场崩掉**。\n\n" +
+      "   为什么这条值得单列：`tools/` 这一层的全部意义就是让工具包能被独立地写、\n" +
+      "   独立地接进来。一个第三方工具包的疏忽不该让 Harness 崩溃 ——\n" +
+      "   它该拿到一条说得清楚的 tool_result，而这一批的配对也必须照样守住。\n\n" +
+      "   2026-08-30 阶段 3.5 期间用故障注入撞出来的（改 ask_user 的 NO_ANSWER\n" +
+      "   分支返回 ok:false 时，堆栈直接停在 settle-batch 那一行）。\n",
+  );
+  {
+    const ws = tempWorkspace();
+    try {
+      const composed = compose({
+        dbPath: ":memory:",
+        workspaceRoot: ws.root,
+        approvalDecider: async () => ({ approved: true }),
+        trace: new CollectingTraceSink(),
+        portOverrides: {
+          // 【定】违约的是**工具**，所以旋钮拧在 ToolHandlerPort 上，
+          // 不是在被测的结算逻辑里加分支。
+          tools: {
+            async execute() {
+              return { ok: false, output: "", sideEffectState: "NO_EFFECT" as const };
+            },
+          },
+        },
+        modelPortOverride: new ScriptedModelPort([
+          { toolCalls: [{ toolCallId: "bad1", name: "now", input: {} }] },
+          { text: "收到错误，收尾。", toolCalls: [] },
+        ]),
+      });
+
+      let crashed: string | undefined;
+      let runId = "";
+      try {
+        const gen = composed.runtime.start(composed.makeRunSpec("工具违约"));
+        let r = await gen.next();
+        while (!r.done) {
+          if (!runId) runId = String(r.value.runId);
+          r = await gen.next();
+        }
+      } catch (err) {
+        crashed = String((err as Error).message).slice(0, 120);
+      }
+
+      const messages = runId
+        ? await composed.ports.transcript.rebuildMessages(runId as never)
+        : [];
+      const unpaired = findUnpairedToolUses(messages).length;
+      const res = messages
+        .flatMap((m) => m.content)
+        .find((c) => c.type === "tool_result" && c.toolCallId === "bad1");
+      const body =
+        res?.type === "tool_result" ? (JSON.parse(res.content) as Record<string, unknown>) : {};
+      composed.db.close();
+
+      fact("Run 有没有崩", crashed ?? "没有");
+      fact("bad1 有没有 result", res ? "有" : "无 ← 违反不变量 8");
+      fact("合成的错误码", String(body["code"] ?? "（无）"));
+      fact("未配对 tool_use", unpaired);
+
+      const ok =
+        crashed === undefined &&
+        res !== undefined &&
+        body["code"] === "TOOL_CONTRACT_NO_ERROR" &&
+        unpaired === 0;
+      verdict(
+        ok,
+        ok
+          ? "工具违约被合成成一条**点名违约**的 tool_result（TOOL_CONTRACT_NO_ERROR），" +
+            "Run 没崩、批内配对守住 —— 排查的人能一眼看出问题在工具的返回值上，" +
+            "而不是在它做的那件事上"
+          : `工具违约没有被正确兜住：崩=${crashed ?? "无"} result=${res ? "有" : "无"} ` +
+            `code=${body["code"]} 未配对=${unpaired}`,
+      );
+    } finally {
+      ws.cleanup();
+    }
+  }
+
   // ── orphan result 的反向注入（存量清单 §4 第 4 条）
   section("反向注入：让 findOrphanResults() 返回非空");
   console.log(

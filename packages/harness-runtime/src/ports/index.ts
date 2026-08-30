@@ -272,6 +272,29 @@ export interface EffectResolverPort {
 }
 
 /**
+ * 受信任 Resolver —— `effectResolution.kind === "RESOLVER"` 那一档的实现形状。
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ * 【定】这里只有**类型**，实现必须来自 `tools/`，由 Composition Root 注入。
+ *
+ * 边界 4（Runtime 不得 import 任何工具实现）在这一条上最容易破：
+ * 「把命令解析写进 `action/` 反正它是 Runtime 的一部分」是最自然的写法，
+ * 而那等于让 Runtime 认识 shell 语法 —— 与认识工具名是同一种越界，
+ * 只是 `grep -rnE "@workagent/tools-|tools/common" packages` 抓不到它。
+ *
+ * ── 为什么需要这一档（§12.4 原话）─────────────────────────────────────
+ *
+ * 「文件路径、Shell、Browser、批量操作必须使用受信任 Resolver。」
+ * DECLARATIVE 那一档靠 JSON Pointer 指向输入里的目标字段，而**一条 shell
+ * 命令的作用域读不出任何一个字段** —— `zip -r out.zip src` 的作用域既不是
+ * `/command` 这个字符串本身，也不在任何单独的参数里，它要靠解析才能得出。
+ * ══════════════════════════════════════════════════════════════════════
+ */
+export interface TrustedEffectResolver {
+  resolve(normalizedInput: JsonValue, workspaceRoot: string): ResolvedEffect;
+}
+
+/**
  * ★ VerificationPort —— 独立验证外部世界是否达到目标。
  *
  * 强制它的不变量：Run 进入 COMPLETED 前必须结算 outcome.kind，

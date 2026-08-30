@@ -46,6 +46,7 @@ import type {
   IdGeneratorPort,
   RedactionPort,
   ToolExecutionContext,
+  ToolExecutionOutcome,
   ToolHandlerPort,
   VerificationPort,
 } from "../ports/index.js";
@@ -464,9 +465,25 @@ export async function* executeBatch(
           yield ev(deps, "InteractionCompleted", {
             actionId,
             toolName: call.name,
-            // 【定】`answered` 说的是「人应答了没有」，**不是**「任务成功了没有」。
-            // §20.3：完成信号不等于任务成功，必须重新 Observation。
-            answered: outcome.ok,
+            /**
+             * 【定】`answered` 说的是「人应答了没有」，**不是**「任务成功了没有」。
+             * §20.3：完成信号不等于任务成功，必须重新 Observation。
+             *
+             * ── 2026-08-30 评审：`outcome.ok` 单独用不够了 ──────────────────
+             *
+             * 阶段 3.5 的 `ask_user` 在**没有人**回答时刻意返回 `ok: true`
+             * ＋ `status: "NO_ANSWER"`（决 3：问不到人不该让任务中止）。
+             * 两个各自正确的决定在乘积处产生了一条错误事实：
+             * Trace 上每一次无人应答都被记成「人应答了」。
+             *
+             * 行为上目前没坏（等待扣除只看事件对、不看这个字段），
+             * 但 §20.3 的审计语义失真 —— 非交互跑批的「人工参与率」会全是假的。
+             *
+             * 【定】判据是**工具自报的事实**，不是 Runtime 猜的。
+             * 工具在 output 里说了 NO_ANSWER，这里就照着记；
+             * Runtime 不认识任何具体工具，只认这个约定好的字段名。
+             */
+            answered: outcome.ok && !declaresNoAnswer(outcome.output),
           });
         }
         /**
@@ -728,7 +745,7 @@ export async function* executeBatch(
         }
         settle(call.toolCallId, materialized.text + note, vr.status === "FAILED");
       } else {
-        settle(call.toolCallId, renderError(outcome.error!), true);
+        settle(call.toolCallId, renderError(errorOf(outcome, call.name)), true);
         if (settlement.onActionFailure === "SKIP_REMAINING") skipRemaining = true;
         if (settlement.onActionFailure === "ABORT_BATCH") break;
       }
@@ -1005,6 +1022,72 @@ async function guard<T>(
       }),
     };
   }
+}
+
+/**
+ * 工具有没有在结果里自报「没人应答」。
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ * 【定】Runtime **不认识任何具体工具**，所以这里不能写
+ * `if (toolName === "ask_user")` —— 那与 `waitsForHumanInteraction`
+ * 做成声明而不是工具名判定是同一条边界（见 `types/tool.ts` 那段）。
+ *
+ * 认的是一个**约定好的字段名**：任何「等人」的工具想表达「问了但没人答」，
+ * 就在结果 JSON 里写 `"status": "NO_ANSWER"`。将来第二个这类工具
+ * 不用改 Runtime 一行。
+ *
+ * 解析失败 → 返回 false（即按「应答了」记）。方向的理由：
+ * 这个字段只用于审计，不参与任何控制流；把一个解析不了的结果记成
+ * 「没应答」会凭空造出一堆假的无人应答事件，比漏记更误导。
+ * ══════════════════════════════════════════════════════════════════════
+ */
+function declaresNoAnswer(output: string): boolean {
+  if (!output.includes("NO_ANSWER")) return false;
+  try {
+    return (JSON.parse(output) as { status?: unknown }).status === "NO_ANSWER";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 取工具报的错；工具违约（`ok: false` 却没带 `error`）时**合成一条**。
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ * 这里原本是 `outcome.error!` —— 一个非空断言掩着一个真洞。
+ *
+ * `ToolExecutionOutcome.error` 在类型上是**可选**的，所以任何一个工具
+ * 返回 `ok: false` 而忘了带 error，这一行就抛 `TypeError: Cannot read
+ * properties of undefined (reading 'code')`，**整个 Run 当场崩掉**。
+ *
+ * 而 `tools/` 这一层的全部意义就是让工具包能被独立地写、独立地接进来 ——
+ * 一个第三方工具包的疏忽不该让 Harness 崩溃，它该得到一条说得清楚的
+ * tool_result。2026-08-30 阶段 3.5 期间用故障注入撞出来的（改 `ask_user`
+ * 的 NO_ANSWER 分支返回 ok:false 时，堆栈直接停在这一行）。
+ *
+ * 【定】合成而不是抛，理由是**不变量 8**：抛异常会让这一批在 `settle()`
+ * 之前中断，配对补齐只能靠 `finally` 里的 `finalize()` 兜 —— 那是最后一道网，
+ * 不该被一个可预见的契约违反常态性地触发。
+ *
+ * 合成的错误里点名「工具违约」，不伪装成一次普通的工具失败：
+ * 排查的人要能一眼看出问题在工具的返回值上，而不是在它做的那件事上。
+ * ══════════════════════════════════════════════════════════════════════
+ */
+function errorOf(outcome: ToolExecutionOutcome, toolName: string): RuntimeErrorRecord {
+  if (outcome.error) return outcome.error;
+  return makeError({
+    code: "TOOL_CONTRACT_NO_ERROR",
+    source: "TOOL_HANDLER",
+    category: "INTERNAL",
+    // 同样的输入再来一次还是同样的违约 —— 让模型改输入没有意义。
+    retryability: "NEVER",
+    // 【定】沿用工具自己报的副作用状态。工具说不清错误，不代表它说不清
+    // 有没有写下去 —— 把这里硬编成 NO_EFFECT 会凭空抹掉一条恢复线索。
+    sideEffectState: outcome.sideEffectState,
+    safeMessage:
+      `工具 ${toolName} 报告失败（ok: false）却没有附带 error —— 这是工具的契约违反。` +
+      `Harness 合成了这条记录以保住批内配对（不变量 8）。请检查该工具的实现。`,
+  });
 }
 
 function renderError(e: RuntimeErrorRecord): string {

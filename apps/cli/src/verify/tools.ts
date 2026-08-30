@@ -7,7 +7,7 @@
  * 「不做定制」这句话必须有机械判据，否则半年后没人能复核。本脚本是那三道
  * 机械闸门里的前两道（第三道是 S13 的跨场景 smoke，它在批 4）：
  *
- *   A 段  六条边界 grep —— 通用工具不得依赖任何 Case 包
+ *   A 段  七条边界 grep —— 通用工具不得依赖任何 Case 包
  *   B 段  两类声明     —— 场景工具写三场景用例，机制工具写它服务哪条机制
  *
  * 其余各段验的是「工具本身的形态约束」：
@@ -45,7 +45,7 @@ import {
   type RunId,
   type ToolSnapshot,
 } from "@workagent/harness-runtime";
-import { commonMechanismTools, commonSceneTools, commonTools } from "@workagent/tools-common";
+import { commonMechanismTools, commonSceneTools, commonTools, renderText } from "@workagent/tools-common";
 import { runSegment } from "@workagent/testkit";
 import { DEFAULT_TOOLS, REPO_ROOT, compose } from "../compose.js";
 import { ScriptedModelPort, banner, fact, runVerify, section, tempWorkspace, verdict } from "./harness.js";
@@ -64,7 +64,13 @@ interface Boundary {
 }
 
 /**
- * 六条边界（阶段 3 把第 4 条推广、并新增第 6 / 6b 条）。
+ * 边界表：**编号到 7，条目 8 条** —— 6b 按惯例算作第 6 条的同族。
+ * （阶段 3 把第 4 条推广、新增第 6 / 6b 条；阶段 3.5 新增第 7 条。）
+ *
+ * 【定】打印的数字一律由 `BOUNDARIES.length` 推出，不写死。
+ * 这个表在我改它之前就已经是「7 个条目被称作六条」—— 写死的数字
+ * 不会随表增长，而一条「说自己有 6 条、实际扫了 7 条」的输出，
+ * 会让人以为新加的那条没生效。
  *
  * 【定】第 6b 条的模式不是方案里写的 `"cases/"`。
  *
@@ -88,7 +94,7 @@ interface Boundary {
  *
  * 【定】处置是拆字符串，**不是**把本文件加进 allowed。
  * 加白名单会在这个文件上开一个永久的洞：以后真有人在这里 import 了 Provider SDK
- * 或 `node:sqlite`，六条 grep 一条都不会响 —— 而这个文件正是那六条 grep 的家。
+ * 或 `node:sqlite`，七条 grep 一条都不会响 —— 而这个文件正是那七条 grep 的家。
  * 一个给自己发豁免的检查器，和一个永远返回空的检查器是同一类东西。
  */
 const lit = (...parts: string[]): string => parts.join("");
@@ -143,13 +149,31 @@ const BOUNDARIES: Boundary[] = [
     paths: ["tools"],
     allowed: [],
   },
+  {
+    /**
+     * 阶段 3.5 新增。它守的是「沙箱是工具域知识，不是 Runtime 知识」。
+     *
+     * 这条与第 4 / 6 条同源，但 grep 形态不同：`run_shell` 的诱惑不是
+     * import 工具包，而是**把命令解析和沙箱 profile 生成搬进
+     * `packages/harness-runtime/src/action/`** —— 那里本来就叫
+     * effect-resolver，看起来天经地义。搬进去之后 Runtime 就认识 shell 了，
+     * 而第 4 / 6 条一条都抓不到（它没有 import 任何工具包）。
+     *
+     * Runtime 侧允许存在的只有 `TrustedEffectResolver` 这个**类型**。
+     */
+    id: "7",
+    desc: "★阶段 3.5：沙箱与命令解析不得进 Runtime / 适配器",
+    pattern: "sandbox-exec|analyzeCommand|sbpl",
+    paths: ["packages", "adapters"],
+    allowed: [],
+  },
 ];
 
 /**
  * 跑一条边界 grep，返回**真实依赖**的命中行。
  *
  * 【定】判据必须区分注释、类型定义与真实依赖（CLAUDE.md 的原话）。
- * 这些文件里到处引用边界规则本身 —— 把注释算成违规，六条 grep 会永远红，
+ * 这些文件里到处引用边界规则本身 —— 把注释算成违规，七条 grep 会永远红，
  * 然后被人加白名单加到失去意义。
  *
  * 判据是「这一行去掉缩进后以 `*` / `//` / `/*` 开头」——
@@ -350,11 +374,11 @@ async function main(): Promise<void> {
     "工具面立起来了吗？它有没有被某个任务反向定义？分页会不会退化成静默截断？",
   );
 
-  // ── A. 六条边界 grep ＋ 第 6b 条的判别力实测
-  section("A. 六条边界 grep");
+  // ── A. 七条边界 grep ＋ 第 6b 条的判别力实测
+  section(`A. 边界 grep —— 编号 1…7 共 ${BOUNDARIES.length} 条规则（6b 是第 6 条的同族）`);
   console.log(
     "   判据区分注释与真实依赖 —— 这些文件里到处在引用边界规则本身，\n" +
-      "   把注释算成违规，六条 grep 会永远红，然后被人加白名单加到失去意义。\n",
+      "   把注释算成违规，七条 grep 会永远红，然后被人加白名单加到失去意义。\n",
   );
 
   let boundariesOk = true;
@@ -366,7 +390,9 @@ async function main(): Promise<void> {
   }
   verdict(
     boundariesOk,
-    boundariesOk ? "六条边界全部守住（真实依赖零命中）" : "有边界被突破，见上面的行号",
+    boundariesOk
+      ? `编号 1…7 共 ${BOUNDARIES.length} 条边界规则全部守住（真实依赖零命中）`
+      : "有边界被突破，见上面的行号",
   );
 
   // 判别力：往 tools/common 注入一行对 Case 包的 import，第 6b 条必须当场翻红。
@@ -934,6 +960,99 @@ async function sectionKnownRedBlob(): Promise<void> {
   } finally {
     ws.cleanup();
   }
+
+  // ══════════════════════════════════════════════════════ I 段（阶段 3.5）
+  section("I. fetch_url 的 as 参数：结构转换 ≠ 正文挑选（ADR-0007）");
+  console.log(
+    "   【定】这一段的重心不是「转换成功了」，是**它有没有越过 ADR-0007 那条线**。\n\n" +
+      "   决 1 说 fetch_url「不得内置任何正文提取逻辑」。ADR-0007 划的是它内部\n" +
+      "   的一条线：结构转换（标签 → 语法）可以，语义挑选（哪块是正文）不可以。\n" +
+      "   判据是「换个 Case 结论会不会变」——\n" +
+      "     <h1> 该变成 #     三个场景里都一样      → 转换\n" +
+      "     导航栏要不要留   归档要丢、盘点站点要留 → 业务判断\n\n" +
+      "   所以下面那条**导航文本必须仍然在**是本段的核心判据：\n" +
+      "   它红了说明有人加了 readability 那类规则，从内部把决 1 绕过去了。\n",
+  );
+
+  /**
+   * 夹具刻意做成「导航 ＋ 正文 ＋ 页脚 ＋ script/style」的真实网页形状。
+   * 不联网 —— `url-guard` 拒绝私网，本地起服务器也测不了（见 renderText 的注释）。
+   */
+  const FIXTURE = [
+    "<!DOCTYPE html><html><head><title>标题</title>",
+    "<style>.a{color:red;font-size:12px;background:#fff;padding:0}</style>",
+    "<script>window.__DATA__={a:1,b:2,c:3};function boot(){console.log('x')}</script>",
+    "</head><body>",
+    '<nav><a href="/docs">Documentation</a><a href="/pricing">Pricing</a></nav>',
+    "<main><h1>发布说明</h1><p>这是<strong>正文</strong>第一段，含一个<a href=\"/x\">链接</a>。</p>",
+    "<ul><li>第一条</li><li>第二条</li></ul>",
+    "<pre><code>npm install</code></pre></main>",
+    "<footer>Earendil Inc. 版权所有</footer>",
+    "</body></html>",
+  ].join("");
+
+  const md = renderText(FIXTURE, "text/html; charset=utf-8", undefined);
+  const rawOut = renderText(FIXTURE, "text/html", "raw");
+  const json = renderText('{"a":1}', "application/json", undefined);
+
+  fact("默认 format", md.format);
+  fact("as=raw 时 format", rawOut.format);
+  fact("application/json 的 format", json.format);
+  fact("转换后长度", `${FIXTURE.length} → ${md.content.length} 字符`);
+
+  // ① 默认就转（不依赖模型主动传参）
+  const defaultConverts = md.format === "markdown" && md.content.includes("# 发布说明");
+  // ② 导航与页脚**仍然在** —— 结构转换的判据
+  const navKept = md.content.includes("Documentation") && md.content.includes("Earendil");
+  // ③ script / style 的正文不进上下文
+  const noiseDropped = !md.content.includes("__DATA__") && !md.content.includes("font-size");
+  // ④ 结构真的转出来了
+  const structural =
+    md.content.includes("[链接](/x)") &&
+    md.content.includes("**正文**") &&
+    // 【定】列表标记后的空格数不写死 —— turndown 输出的是 `-   第一条`（3 个空格）。
+    // 断言一个自己想当然的格式，红的是判据不是代码；第一次跑就撞到了。
+    /^-\s+第一条$/m.test(md.content);
+  // ⑤ as=raw 原样返回
+  const rawWorks = rawOut.format === "html" && rawOut.content === FIXTURE;
+  // ⑥ 非 HTML 不受影响
+  const jsonUntouched = json.format === "text" && json.content === '{"a":1}';
+
+  console.log(
+    `\n   ① 默认转换            ${defaultConverts ? "✓" : "✗"}\n` +
+      `   ② 导航/页脚仍在        ${navKept ? "✓" : "✗"}   ← 越过 ADR-0007 这条会红\n` +
+      `   ③ script/style 被丢弃  ${noiseDropped ? "✓" : "✗"}\n` +
+      `   ④ 标题/链接/强调/列表  ${structural ? "✓" : "✗"}\n` +
+      `   ⑤ as="raw" 原样返回    ${rawWorks ? "✓" : "✗"}\n` +
+      `   ⑥ JSON 不被当 HTML 转  ${jsonUntouched ? "✓" : "✗"}`,
+  );
+
+  verdict(
+    defaultConverts && navKept && noiseDropped && structural && rawWorks && jsonUntouched,
+    defaultConverts && navKept && noiseDropped && structural && rawWorks && jsonUntouched
+      ? "六项全部成立：默认转 Markdown、**导航与页脚仍在**（做的是结构转换不是正文挑选）、" +
+        "script/style 不进上下文、as=\"raw\" 有退路、非 HTML 不受影响"
+      : `ADR-0007 的边界或转换本身有问题：默认转=${defaultConverts} 导航仍在=${navKept} ` +
+        `噪音丢弃=${noiseDropped} 结构=${structural} raw=${rawWorks} JSON=${jsonUntouched}`,
+  );
+
+  /**
+   * ⑦ 真实规模下的削减幅度。
+   *
+   * 【定】这条不做阈值断言，只**打印事实**。
+   * 削减比例取决于页面本身（一个纯文本页面转完可能一点都不小），
+   * 卡一个数字会得到一条随夹具漂移的假判据。真实测量记在这里：
+   * pi.dev/news/releases/0.84.3 实测 38280 → 13023 字符（**66%**），
+   * ≈15312 → ≈5210 token。
+   */
+  const bulky = FIXTURE.repeat(40);
+  const bulkyMd = renderText(bulky, "text/html", undefined);
+  fact(
+    "放大 40 倍后的削减",
+    `${bulky.length} → ${bulkyMd.content.length} 字符` +
+      `（${(100 - (bulkyMd.content.length / bulky.length) * 100).toFixed(1)}%）`,
+  );
+  fact("真实页面实测（记录用）", "pi.dev 0.84.3：38280 → 13023 字符，66%，≈15312 → ≈5210 token");
 }
 
 void runVerify(main);

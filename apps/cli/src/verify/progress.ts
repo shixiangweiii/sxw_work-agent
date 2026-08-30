@@ -48,7 +48,7 @@ import {
 } from "@workagent/harness-runtime";
 import { SqliteRunStore, openDb } from "@workagent/store-sqlite";
 import { runSegment } from "@workagent/testkit";
-import type { HandoffChannel } from "@workagent/tools-common";
+import type { HandoffChannel, QuestionChannel } from "@workagent/tools-common";
 import { compose } from "../compose.js";
 import { StdinChannel } from "../stdin-channel.js";
 import { ScriptedModelPort, banner, fact, runVerify, section, tempWorkspace, verdict } from "./harness.js";
@@ -75,6 +75,7 @@ async function main(): Promise<void> {
   await sectionWaitNotCounted();
   await sectionInterject();
   await sectionStdinArbitration();
+  await sectionAskUser();
 }
 
 /** A 段：进展真的发出并落进 Trace；长任务不被步骤级超时误杀。 */
@@ -855,6 +856,238 @@ async function sectionStdinArbitration(): Promise<void> {
   } finally {
     chan.close();
     input.end();
+  }
+}
+
+/**
+ * H 段：`ask_user`（阶段 3.5）。
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ * 【定】这一段要证明的**不是**「问了一句」，而是三件互相独立的事：
+ *
+ *   ① 有人时：Run 真的进 `WAITING_FOR_INTERACTION`，答案原样回到模型；
+ *   ② 没人时：**ok:true ＋ NO_ANSWER**，不是失败 —— 这是决 3，
+ *      与 `request_handoff` 的处置**刻意相反**；
+ *   ③ 等待时间从 active 墙钟里扣掉。
+ *
+ * ② 是这一段的重心。它与 D 段的差别不是措辞而是语义：handoff 缺的是
+ * 一个真实发生过的外部动作（没发生就是没发生），ask_user 缺的只是一个
+ * 偏好（模型可以自己定）。把两者处置成同一种，会让一次本可完成的任务
+ * 因为旁边没人而中止 —— 2026-08-30 的跑批里那个形态真的出现过。
+ * ══════════════════════════════════════════════════════════════════════
+ */
+async function sectionAskUser(): Promise<void> {
+  section("H. ask_user：有人时拿到答案，没人时 NO_ANSWER 而不是失败");
+
+  // ── ① 有人回答 ──
+  const ws = tempWorkspace();
+  let statusDuringWait: RunStatus | undefined;
+  let runIdRef = "";
+  let askedOptions: string[] = [];
+  try {
+    const trace = new CollectingTraceSink();
+    const question: QuestionChannel = {
+      async ask(req) {
+        if (runIdRef) statusDuringWait = await composed.ports.runs.getStatus(runIdRef as RunId);
+        askedOptions = req.options;
+        return { choice: "扁平结构：md 与 images 平级" };
+      },
+    };
+    const composed = compose({
+      dbPath: ":memory:",
+      workspaceRoot: ws.root,
+      approvalDecider: async () => ({ approved: true }),
+      trace,
+      question,
+      modelPortOverride: new ScriptedModelPort([
+        {
+          text: "这里有歧义，先问一句",
+          toolCalls: [
+            {
+              toolCallId: "q1",
+              name: "ask_user",
+              input: {
+                question: "归档目录用哪种结构？",
+                options: "扁平结构：md 与 images 平级\n带顶层目录：都放进一个同名文件夹",
+              },
+            },
+          ],
+        },
+        { text: "按你选的做完了。", toolCalls: [] },
+      ]),
+    });
+
+    const gen = composed.runtime.start(composed.makeRunSpec("有歧义的归档任务"));
+    let r = await gen.next();
+    while (!r.done) {
+      if (!runIdRef) runIdRef = String(r.value.runId);
+      r = await gen.next();
+    }
+
+    const messages = await composed.ports.transcript.rebuildMessages(runIdRef as RunId);
+    const res = messages
+      .flatMap((m) => m.content)
+      .find((c) => c.type === "tool_result" && c.toolCallId === "q1");
+    const payload =
+      res?.type === "tool_result" ? (JSON.parse(res.content) as Record<string, unknown>) : {};
+    composed.db.close();
+
+    const req = trace.byType("InteractionRequested")[0]?.payload;
+    const done = trace.byType("InteractionCompleted")[0]?.payload;
+
+    fact("等待期间 Run 状态", statusDuringWait ?? "（没读到）");
+    fact("通道收到的选项数", askedOptions.length);
+    fact("InteractionRequested", req ? `有（${req.toolName}）` : "无");
+    fact("InteractionCompleted.answered", done ? String(done.answered) : "（无事件）");
+    fact("工具返回 status", String(payload["status"]));
+    fact("工具返回 choice", String(payload["choice"]));
+
+    const okAnswered =
+      statusDuringWait === "WAITING_FOR_INTERACTION" &&
+      askedOptions.length === 2 &&
+      req?.toolName === "ask_user" &&
+      done?.answered === true &&
+      payload["status"] === "ANSWERED" &&
+      payload["choice"] === "扁平结构：md 与 images 平级";
+
+    verdict(
+      okAnswered,
+      okAnswered
+        ? "有人时：Run 进 WAITING_FOR_INTERACTION、选项按行拆成 2 个、" +
+          "用户选的那一项**原样**回到模型 —— 与 request_handoff 共用同一条等待链路"
+        : `有人应答这条路没走通：status=${statusDuringWait} 选项数=${askedOptions.length} ` +
+          `事件=${req?.toolName} answered=${done?.answered} 返回=${JSON.stringify(payload)}`,
+    );
+  } finally {
+    ws.cleanup();
+  }
+
+  // ── ② 没有人：必须 ok:true ＋ NO_ANSWER，不是失败 ──
+  const ws2 = tempWorkspace();
+  try {
+    const trace2 = new CollectingTraceSink();
+    const composed = compose({
+      dbPath: ":memory:",
+      workspaceRoot: ws2.root,
+      approvalDecider: async () => ({ approved: true }),
+      trace: trace2,
+      // 【定】刻意不传 question 通道 —— 模拟非交互环境 / CI。
+      modelPortOverride: new ScriptedModelPort([
+        {
+          toolCalls: [
+            {
+              toolCallId: "q2",
+              name: "ask_user",
+              input: { question: "用哪种结构？", options: "甲\n乙" },
+            },
+          ],
+        },
+        { text: "没人回答，我自己选了甲，理由是……", toolCalls: [] },
+      ]),
+    });
+    const gen = composed.runtime.start(composed.makeRunSpec("没人可问"));
+    let runId = "";
+    let r = await gen.next();
+    while (!r.done) {
+      if (!runId) runId = String(r.value.runId);
+      r = await gen.next();
+    }
+    const outcome = r.value.outcome?.kind;
+    const messages = await composed.ports.transcript.rebuildMessages(runId as RunId);
+    const res = messages
+      .flatMap((m) => m.content)
+      .find((c) => c.type === "tool_result" && c.toolCallId === "q2");
+    const isError = res?.type === "tool_result" ? res.isError : undefined;
+    const payload =
+      res?.type === "tool_result" && !res.isError
+        ? (JSON.parse(res.content) as Record<string, unknown>)
+        : {};
+    composed.db.close();
+
+    /**
+     * 【定】必须同时断言 `InteractionCompleted.answered`（2026-08-30 评审 P2-2）。
+     *
+     * 原来这一段只看 tool_result 与 outcome，照不到事件字段 —— 而
+     * `settle-batch.ts` 当时写的是 `answered: outcome.ok`，
+     * 于是 NO_ANSWER（刻意的 `ok: true`）在 Trace 上被记成**「人应答了」**。
+     *
+     * 两个各自正确的决定（决 3 的 ok:true ＋ answered 的语义定义）
+     * 在乘积处产生了一条错误事实。行为没坏，但非交互跑批的
+     * 「人工参与率」会全是假的 —— 而那正是这个字段存在的唯一理由。
+     */
+    const doneEv = trace2.byType("InteractionCompleted")[0]?.payload;
+    fact("无通道时 tool_result.isError", String(isError));
+    fact("返回 status", String(payload["status"] ?? "（不是结构化结果）"));
+    fact("InteractionCompleted.answered", doneEv ? String(doneEv.answered) : "（无事件）");
+    fact("Run outcome", outcome ?? "（未结算）");
+
+    const okNoAnswer =
+      isError === false &&
+      payload["status"] === "NO_ANSWER" &&
+      doneEv?.answered === false &&
+      outcome === "SUCCESS";
+    verdict(
+      okNoAnswer,
+      okNoAnswer
+        ? "没人时：ok:true ＋ NO_ANSWER，Run 照常跑完（SUCCESS），" +
+          "**且 Trace 上 answered=false** —— 前半是决 3（与 request_handoff 刻意相反：" +
+          "报失败会让一次本可完成的任务因为旁边没人而中止）；" +
+          "后半是审计诚实：工具说没人答，事件就不能说人答了"
+        : `没人时的处置不对：isError=${isError} status=${payload["status"]} ` +
+          `answered=${doneEv?.answered}（期望 false） outcome=${outcome}`,
+    );
+  } finally {
+    ws2.cleanup();
+  }
+
+  // ── ③ 选项数量非法必须报结构化错误，不能静默接受 ──
+  const ws3 = tempWorkspace();
+  try {
+    const composed = compose({
+      dbPath: ":memory:",
+      workspaceRoot: ws3.root,
+      approvalDecider: async () => ({ approved: true }),
+      trace: new CollectingTraceSink(),
+      question: { async ask() { return { choice: "不该走到这里" }; } },
+      modelPortOverride: new ScriptedModelPort([
+        {
+          toolCalls: [
+            {
+              toolCallId: "q3",
+              name: "ask_user",
+              input: { question: "只有一个选项算什么选择题", options: "唯一一项" },
+            },
+          ],
+        },
+        { text: "收到错误，改。", toolCalls: [] },
+      ]),
+    });
+    const gen = composed.runtime.start(composed.makeRunSpec("非法选项"));
+    let runId = "";
+    let r = await gen.next();
+    while (!r.done) {
+      if (!runId) runId = String(r.value.runId);
+      r = await gen.next();
+    }
+    const messages = await composed.ports.transcript.rebuildMessages(runId as RunId);
+    const res = messages
+      .flatMap((m) => m.content)
+      .find((c) => c.type === "tool_result" && c.toolCallId === "q3");
+    const isError = res?.type === "tool_result" ? res.isError : undefined;
+    const text = res?.type === "tool_result" ? res.content : "";
+    composed.db.close();
+
+    fact("1 个选项时 isError", String(isError));
+    fact("错误信息里有没有说清要求", /2\D{0,4}5|至少|要求/.test(text) ? "有" : "没有");
+    verdict(
+      isError === true && text.includes("候选"),
+      isError === true && text.includes("候选")
+        ? "选项数量非法时报**结构化错误**并说清要求（2–5 个），而不是静默按 1 个选项去问 —— " +
+          "错误里说得出理由，模型才改得对（retryability: AFTER_MODEL_CORRECTION）"
+        : `非法选项没有被挡下：isError=${isError} 内容=${text.slice(0, 120)}`,
+    );
+  } finally {
+    ws3.cleanup();
   }
 }
 

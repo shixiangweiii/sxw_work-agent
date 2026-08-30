@@ -16,21 +16,46 @@ import type {
   ResolvedEffect,
 } from "../types/tool.js";
 import type { JsonValue } from "../types/ids.js";
-import type { EffectResolverPort } from "../ports/index.js";
+import type { EffectResolverPort, TrustedEffectResolver } from "../ports/index.js";
 
 export class DeclarativeEffectResolver implements EffectResolverPort {
+  /**
+   * 受信任 Resolver 注册表，键是 `${resolverRef.id}@${resolverRef.version}`。
+   *
+   * 【定】默认空表。装配时不注入 ≠ 静默放行 —— 见下面 RESOLVER 分支的抛错。
+   */
+  constructor(private readonly trusted: ReadonlyMap<string, TrustedEffectResolver> = new Map()) {}
+
   resolve(
     descriptor: EffectResolutionDescriptor,
     normalizedInput: JsonValue,
     workspaceRoot: string,
   ): ResolvedEffect {
-    if (descriptor.kind !== "DECLARATIVE") {
-      // 【定】文件路径、Shell、Browser、批量操作必须使用受信任 Resolver。
-      // 阶段 1 只实现声明式；RESOLVER 分支留到阶段 3（Browser Capability）。
-      throw new Error(
-        `阶段 1 只实现 DECLARATIVE effect resolution。收到 kind=${descriptor.kind}，` +
-          `受信任 Resolver 的 SDK 是阶段 3 的范围。`,
-      );
+    /**
+     * ── RESOLVER 分支（阶段 3.5 接上）─────────────────────────────────────
+     *
+     * 【定】查不到注册项**必须抛**，不得回退到 `noEffect()`。
+     *
+     * 回退看起来更「健壮」，实际后果是：一个声明了 RESOLVER 却没被装配的工具，
+     * 会拿到 `effectType: "NONE"` —— 于是 Policy 的 `mutates` 判定为假、
+     * `requiresApprovalFor` 也不命中，**它会一路畅通地执行任意副作用**，
+     * 而 Trace 上写着「无副作用」。
+     *
+     * 这与 U-6 是同一个形状：一条闸门被另一条挡在后面，于是它从来没生效过，
+     * 而没有人会发现 —— 因为「被放行」看起来完全像是正常工作。
+     * 装配漏了就该在第一次调用时炸掉，那是最便宜的发现时机。
+     */
+    if (descriptor.kind === "RESOLVER") {
+      const key = `${descriptor.resolverRef.id}@${descriptor.resolverRef.version}`;
+      const impl = this.trusted.get(key);
+      if (!impl) {
+        throw new Error(
+          `effectResolution 声明了受信任 Resolver "${key}"，但注册表里没有它。` +
+            `已注册：${[...this.trusted.keys()].join(", ") || "(空)"}。` +
+            `这是装配错误 —— 不回退到「无副作用」，那会让这个工具绕过 Policy。`,
+        );
+      }
+      return impl.resolve(normalizedInput, workspaceRoot);
     }
 
     const rule = descriptor.rules[0];

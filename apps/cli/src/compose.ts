@@ -46,8 +46,11 @@ import {
   CommonArtifactChecker,
   CommonToolHandler,
   CommonVerifier,
+  SHELL_RESOLVER_KEY,
+  ShellEffectResolver,
   commonTools,
   type HandoffChannel,
+  type QuestionChannel,
 } from "@workagent/tools-common";
 import { CompositeToolHandler, CompositeVerifier } from "./composite.js";
 import {
@@ -80,7 +83,7 @@ export const DEFAULT_STATE_DIR = ".workagent-state";
  *
  * ```text
  * tools/common  场景工具  list_dir stat read_file search write_file edit_file fetch_url now
- *               机制工具  read_blob request_handoff
+ *               机制工具  read_blob request_handoff ask_user
  * micro-cases   测量工具  append_log slow_write
  * ```
  *
@@ -271,6 +274,14 @@ export interface ComposeOptions {
    * 明确的装配错误，而不是把 Run 挂死在一个永远等不到的 await 上。
    */
   handoff?: HandoffChannel;
+  /**
+   * `ask_user` 的提问通道（阶段 3.5）。
+   *
+   * 【定】与 `handoff` 分开两个字段。不传**不是**装配错误 ——
+   * `executeAskUser` 会走 NO_ANSWER 让模型自己定，这与 `request_handoff`
+   * 不传通道时报明确装配错误是刻意的差别：没人接管是失败，没人回答不是。
+   */
+  question?: QuestionChannel;
 }
 
 export interface Composed {
@@ -408,11 +419,26 @@ export function compose(opts: ComposeOptions): Composed {
         new CommonToolHandler({
           blobs,
           ...(opts.handoff ? { handoff: opts.handoff } : {}),
+          ...(opts.question ? { question: opts.question } : {}),
         }),
         new MicroCaseToolHandler(),
       ]),
     redaction: opts.portOverrides?.redaction ?? new SimpleRedaction(),
-    effects: opts.portOverrides?.effects ?? new DeclarativeEffectResolver(),
+    /**
+     * 受信任 Resolver 在这里注入 —— 边界 4 的直接后果。
+     *
+     * 【定】`ShellEffectResolver` 住在 `tools/common`，Runtime 侧只有
+     * `TrustedEffectResolver` 这个类型。把它搬进 `packages/harness-runtime/`
+     * 会让 Runtime 认识 shell 语法，而
+     * `grep -rnE "@workagent/tools-|tools/common" packages adapters` 抓不到
+     * 那种越界 —— 只有人读代码时守得住。
+     *
+     * 注册表查不到会抛（见 `effect-resolver.ts` 的 RESOLVER 分支）：
+     * 装配漏了必须在第一次调用时炸掉，不能回退成「无副作用」放行。
+     */
+    effects:
+      opts.portOverrides?.effects ??
+      new DeclarativeEffectResolver(new Map([[SHELL_RESOLVER_KEY, new ShellEffectResolver()]])),
     verification:
       opts.portOverrides?.verification ??
       new CompositeVerifier([
@@ -533,10 +559,27 @@ export const DEFAULT_SYSTEM_PROMPT = [
   "- edit_file 的 old_string 必须唯一匹配；报「不唯一」时往前后多带几行，不要反复重试同一个短串；",
   "- 整份产出或新建文件 → write_file；往日志末尾追加一行 → append_log；",
   "- 结果太大被外置成 ref 时 → 用 read_blob 按 ref 分页取回，不要重新执行那个工具；",
+  // 阶段 3.5：默认转 Markdown 之后，绝大多数抓网页的场景不该再碰 raw。
+  // 实测里模型连调 3 次 read_blob 把 40311 字节 HTML 整个搬回上下文。
+  "- fetch_url 抓 HTML 默认已经转成 Markdown（省掉九成标签）；只有要读 meta / 属性 / 内联脚本时才传 as=\"raw\"；",
   // 【定】「或查询」这三个字是实测补的：原文只写「操作」，于是「人去外部系统
   // **查一条数据**」这个场景在指引里根本不存在，模型把它归进了「查不到 → 如实说明」。
   // 与 request-handoff.ts 的 description 是同构的一处遗漏，两边必须一起维护。
   "- 需要人去外部系统操作或查询（登录、线下确认、手工处理，或在你读不到的系统里查一条数据）才能继续 → request_handoff，不要假装已经做完；",
+  /**
+   * 【定】这一条与上一条必须**成对**出现，措辞里要有「你去做 / 你来定」这组对照。
+   *
+   * 两个工具都「停下来等人」，指引一旦只写一条，模型会把另一类需求硬塞进
+   * 写了的那个 —— 而用 request_handoff 问偏好，会逼它为 expected_completion
+   * **编造**一个可观察结果，正好把 §20.3「别信口头声明、去核实」教成一句
+   * 可以糊弄的话。
+   *
+   * 触发它的实测：2026-08-30 网页归档任务三次复跑，对「images 目录该放什么」
+   * 给出三种不同结构 —— 页面没有图片、任务本身有歧义，而模型没有办法问。
+   */
+  "- 任务本身有歧义、而不同理解会产出不同的东西（目录结构、文件命名、包含范围、格式）→ ask_user 问一句再动手；",
+  "- 两者的分工：request_handoff 是「请你去做一件我做不了的事」（做完系统会重新核实）；ask_user 是「请你替我定一个我定不了的事」，不需要你动任何东西；",
+  "- ask_user 收到 NO_ANSWER 时自己选一个继续，并在总结里写明你选了哪个、为什么，不要停在那里；",
   "",
   "读到的内容怎么用：",
   "- 分页返回里有 truncated / nextCursor / nextStartLine 时，说明还有后续；要完整结论就翻页取完；",

@@ -43,7 +43,7 @@ import { basename, sep } from "node:path";
  * Runtime 自己的 SQLite 库（里面有全部 transcript，也就有全部工具输出）；
  * 后三个是通用的凭证目录。
  */
-const DENIED_SEGMENTS = new Set([
+export const DENIED_SEGMENTS = new Set([
   ".git",
   ".workagent-state",
   ".ssh",
@@ -59,8 +59,8 @@ const DENIED_SEGMENTS = new Set([
  * `.env` 用前缀匹配 —— `.env.local` / `.env.production` 同样是凭证文件，
  * 而它们不会长成 `.env` 这个精确串。
  */
-const DENIED_BASENAME_PREFIXES = [".env"];
-const DENIED_BASENAMES = new Set([
+export const DENIED_BASENAME_PREFIXES = [".env"];
+export const DENIED_BASENAMES = new Set([
   /**
    * `.envrc` 是 direnv 的配置，正文常常就是一排 `export SECRET=…` ——
    * 它是凭证文件，但**上面那条前缀规则抓不到它**：判据是
@@ -118,6 +118,17 @@ export function checkReadAllowed(absolutePath: string): ReadDenial | undefined {
  *
  * 【定】两个函数必须共用同一份常量表。分成两份规则就会有「read_file 挡住了、
  * search 漏过去了」的那天，而那正是本文件存在的理由。
+ *
+ * ── 阶段 3.5：出现了**第三个**消费者 ──────────────────────────────────
+ *
+ * `run_shell` 一条 `cat ~/.ssh/id_rsa` 会从这两个函数旁边整个绕过去 ——
+ * 它不走 `resolveToolPath()`，也不走这里的任何一行。
+ *
+ * 【定】所以三张常量表被 export 了，由 `exec/sandbox.ts` 的
+ * `toSandboxDenyRules()` 翻译成 sbpl 的 `(deny file-read* (regex …))`。
+ * **翻译，不是复制** —— 复制一份就回到了本文件要防的那件事上，
+ * 只是漏点从第二个变成第三个。`verify:shell` 有一条判据钉住
+ * 「三张表的条目数 == 生成的 deny 规则数」。
  */
 export function isReadDeniedPath(absolutePath: string): boolean {
   return checkReadAllowed(absolutePath) !== undefined;

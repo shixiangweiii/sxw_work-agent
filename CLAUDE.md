@@ -22,13 +22,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > **范围在开工前被决 1 改写过**：原计划是「Case 01 网页归档」，改成**通用能力面**，
 > 网页归档移出本阶段（Case 是尺子，不是模具）。评测与 Eval 按决 4 统一推到开发完成之后。
 
-- **12 条验收脚本 91 条判据全绿**，`tsc --noEmit` 干净（摸底考试 bugfix 批后从 86 增至 91）
-- 新增 `tools/` 层，默认装配 **12 个工具**（8 场景 ＋ 2 机制 ＋ 2 测量）；固定开销起步价 ≈ 2160 token
+- **13 条验收脚本 115 条判据全绿**，`tsc --noEmit` 干净
+  （摸底考试 bugfix 批后 86 → 91；阶段 3.5 累计 +24：`verify:shell` 19、
+  `verify:progress` +3、`verify:tools` +1、`verify:pairing` +1）
+- 新增 `tools/` 层，默认装配 **14 个工具**（9 场景 ＋ 3 机制 ＋ 2 测量）；固定开销起步价 ≈ 2520 token
   （`fixedOverheadTokens()` = 工具数 × 180。此前各处文档写的「11 个 / 1980」是同一处算术错误：
-  8＋2＋2 = 12，收口批统一更正）
+  8＋2＋2 = 12，收口批统一更正。阶段 3.5 加 `run_shell` ＋ `ask_user` 后是 9＋3＋2 = 14）
 - `BlobStorePort` ＋ 外置 ＋ `read_blob` 取回；`ArtifactStorePort` **重设计** ＋ Artifact 级 Verification
 - Progress Guard（只做「在原地打转」检测）；人工接管全链路（`WAITING_FOR_INTERACTION` 的持久化 / resume / 等待扣除）
-- **六条**边界 grep 全部守住（阶段 3 新增第 6 / 6b 条，且第 6b 条做过判别力实测）
+- 边界 grep 全部守住 —— **编号 1…7、共 8 条规则**（6b 算第 6 条的同族）。
+  阶段 3 新增第 6 / 6b 条，阶段 3.5 新增第 7 条；6b 与 7 都做过判别力实测。
+  【定】打印的条数由 `BOUNDARIES.length` 推出，不写死 —— 这个表在阶段 3.5 之前
+  就已经是「7 个条目被称作六条」，写死的数字不会随表增长
 
 **阶段 3 关掉了哪些存量**：P1-1 / `interject` CLI 入口 / N-8 / P3-26 / U-3 / U-8 / R-2 派生缺口。
 **明确不做**：`CapabilityLeasePort`（决 5，见 [ADR-0005](sxw_aicoding/ADR/0005-PARKED-lease-不做的理由.md)）、
@@ -39,8 +44,158 @@ Planner / Memory / Sub-agent（决 6）、通用 Completion Gate（论据被探�
 > 跨进程 resume 的真实端点实跑、DeepSeek 对照端点实跑（当前 401，已核实是端点侧拒绝）。
 
 > ⚠️ **一条新登记的欠账**：`requiredCapabilities` **逐工具零消费** ——
-> 12 个工具全都声明了它，无人读。已在每个声明处留注释，走 bugfix 阶段。
+> 14 个工具全都声明了它，无人读。已在每个声明处留注释，走 bugfix 阶段。
 > 见[存量清单 §0.6](sxw_aicoding/存量BUG/阶段1存量问题清单_V20260824.md) 的 S3-1。
+
+### 阶段 3.5：内置 shell 执行（2026-08-30）
+
+**起因是实测，不是路线图。** 用真实端点跑「访问网页 → 归档成含 markdown 与
+images 目录的 zip」（Run `run_9610d44d3a62`）：**19 轮（预算 20）、6.5 分钟、
+结算 `SUCCESS`，而 zip 不存在**。8 次 `write_file` 里 5 次在写模型自己跑不了的
+打包脚本；模型三次明说「我没有 shell 执行能力」。而 `grep -rn '"EXECUTE"' tools cases`
+当时是**零命中** —— Policy、`autoGrant`、`EffectScope.kind: "PROCESS"` 三处
+早就为 EXECUTE 写好了分支，没有任何工具能触发它们。
+
+新增 `run_shell`，并打通 `effectResolution` 的 `RESOLVER` 分支 —— 它从阶段 1 起就在类型里、一直抛错。
+
+> ### 【定】两道闸门，职责不能混
+>
+> | 层 | 文件 | 判什么 | 判错的代价 |
+> |---|---|---|---|
+> | 一 | `tools/common/src/exec/command-analysis.ts` | 要不要**停下来问人** | **多问一次** |
+> | 二 | `tools/common/src/exec/sandbox.ts` | 跑起来**能碰到什么** | **真的没有边界** |
+>
+> Claude Code 为第一层写了约 8500 行（`bashSecurity.ts` 2629 ＋ `bashPermissions.ts` 2621
+> ＋ `readOnlyValidation.ts` 1990 ＋ `pathValidation.ts` 1303），因为它必须在**无人值守**下
+> 决定 allow/deny。而它自己在 `shouldUseSandbox.ts` 文件头写着：命令名匹配是
+> 「用户便利功能，**不是安全边界**」。
+>
+> 本仓有人在回路里，所以第一层可以只有 ~150 行：**判不出来就落 EXECUTE → 审批**。
+> 失败方向固定在保守侧，规则就能粗暴到显然正确（有任一 shell 元字符 → EXECUTE）。
+> **合并这两层必然出现的写法是「既然解析说它只读，那就不用沙箱了」—— 那正好把边界拆掉。**
+
+四个决定：① RESOLVER 解析 ＋ `sandbox-exec` 真沙箱两道；② cwd / env **不跨调用持久**
+（持久 cwd 是 transcript 之外的隐藏状态，resume 后 `cd` 的效果会丢且盘上看不出）；
+③ 判定为只读的命令自动放行 —— 走的是**既有 Policy 的原生行为**，`policy.ts` 一行没改
+（READ 不在 `requiresApprovalFor` 里）；④ 只加这一个工具，不加 zip / mkdir / rm / mv
+四个专用工具（那会是 +720 token），把「一个通用 EXECUTE 能替掉多少专用工具」当研究问题。
+
+**复跑同一道题**：zip 真的生成（`release-notes.md` 12039 字节 ＋ `images/`），
+轮数 19 → 12，没有再出现写打包脚本的绕行。
+
+> ⚠️ **实测撞出的两个坑，都记在代码注释里**：
+> ① macOS `tmpdir()` 是 `/var/folders/…` 符号链接而 seatbelt 按**真实路径**匹配 subpath ——
+> 沙箱一度把 **workspace 内的写也一起拒了**。它只在「验了能写的那一侧」时才暴露：
+> 一个拒绝一切的沙箱与一个正确的沙箱，在「越界写被拦」那条判据下**不可区分**。
+> ② 故障注入期间 `deny file-write*` 被摘掉那一次，真的在 `$HOME` 建出了探针文件，
+> 之后每次 `existsSync` 都为真，判据被**永久毒化**。仪器不得在被测系统之外留痕。
+
+> ⚠️ **默认档位下无人值守跑批时 EXECUTE 全灭**（非 TTY 审批按拒绝处置）。
+> 这是 E-3 那个坑的形状，本批**不新增 `--yes-exec` 档位**去绕它 ——
+> 那会又造一条没有证据支撑的闸门。复跑用 `--yes-all`，
+> **此时沙箱是唯一还在的闸门 —— 这就是决 1 坚持要真沙箱的全部价值。**
+
+### 阶段 3.5 的另两个工具（同批，2026-08-30）
+
+**`ask_user`（机制工具）—— 问用户一道选择题。** [ADR-0008](sxw_aicoding/ADR/0008-ask-user-与-request-handoff-是两个洞.md)
+
+> ### 【定】它与 `request_handoff` 是**两个**洞，不是一个
+>
+> `request-handoff.ts` 原本写着「它同时是 U-8 的落点 —— 两个洞是同一个」，
+> 存量清单也据此把 U-8 记为阶段 3 已关。**回源核对 U-8 原文后：那句话对了一半。**
+> U-8 说的是 `WAITING_FOR_USER` 这个枚举值零产出点 —— 状态机那一半确实关了。
+>
+> | | `request_handoff` | `ask_user` |
+> |---|---|---|
+> | 语义 | **你去做**一件我做不了的事 | **你来定**一个我定不了的事 |
+> | `expected_completion` | **必填**，做完要能被观察到 | 不存在 —— 没有可观察的结果 |
+> | 之后 | 必须重新 Observation（§20.3） | 直接用答案往下走 |
+> | 没人时 | **失败**（那件事真的没做） | **不失败**，返回 NO_ANSWER 让模型自己定 |
+>
+> 硬要用 handoff 问偏好，模型必须为 `expected_completion` **编造**一个可观察结果 ——
+> 而那个字段的全部意义就是「别信口头声明，去核实」。
+>
+> **教训比结论重要：「两个洞是同一个」这类合并判断必须回源核对原文**，
+> 不能因为两件事表面上都「停下来等人」就合并。而这次的合并恰恰写在一处
+> 看起来很权威的**文件头注释**里，它比清单本身更容易被后人当作依据。
+
+触发它的实测：网页归档任务三次复跑对「`images/` 目录该放什么」给出**三种不同结构** ——
+页面根本没有图片、任务本身有歧义，而模型没有任何办法问一句。三次都结算 SUCCESS。
+
+**`fetch_url` 的 `as` 参数 —— HTML 默认转 Markdown。** [ADR-0007](sxw_aicoding/ADR/0007-html-结构转换可内置语义挑选不可.md)
+
+> ### 【定】结构转换可以内置，语义挑选不可以
+>
+> 阶段 3 那条「不得内置任何正文提取逻辑」**一个字没改**。ADR-0007 划的是它内部的线，
+> 判据是**换一个 Case 结论会不会变**：
+>
+> - `<h1>` 该变成 `#` —— 三个场景都一样 → **结构转换**，可以内置
+> - 导航栏要不要留 —— 归档要丢、盘点站点要留 → **语义挑选**，仍然不做
+>
+> `verify:tools` I 段有一条判据钉住它：**转换后导航与页脚文本必须仍然在**。
+> 它红了说明有人加了 readability 那类规则，从内部把决 1 绕过去了 ——
+> 这件事此前「只有人读代码时守得住」，现在有机械判据了。
+
+实测：`pi.dev/news/releases/0.84.3` **38280 → 13023 字符（削减 66%）**，
+≈15312 → ≈5210 token。原链路上那 3 次 `read_blob` 直接消失。
+**默认值是 `markdown` 不是 `raw`** —— 一个需要模型主动选择才生效的优化，
+在真实运行里等于不存在（摸底考试题 3 的教训）。
+
+### 阶段 3.5 收口：三份评审的处置（2026-08-30）
+
+三份独立评审（zcode / pi / codex）逐条回源码复核，**codex 给的是 NO-GO**。
+关掉 20 项、新登记 12 项，见[存量清单 §0.10](sxw_aicoding/存量BUG/阶段1存量问题清单_V20260824.md)。
+
+> ### 【定】最刺眼的一条：判定层的**失败方向反了**
+>
+> `command-analysis.ts` 的文件头写着「保守方向是 EXECUTE，判不出来就问」，
+> 而实现**只看 `argv[0]`**。三份评审各自实测，得到同一批反例：
+>
+> ```
+> READ ← 自动放行   find . -delete                  递归删除，不含任何元字符
+> READ ← 自动放行   rg --pre 'touch /tmp/x' pat f   任意命令执行
+> READ ← 自动放行   git reflog expire --all         摧毁仓库全部恢复元数据
+> ```
+>
+> **元字符表挡住 `find -exec` 是偶然，不是设计** —— 它靠的是要写分号或大括号，
+> 而 `rg --pre` 什么特殊字符都不带。「多问一次」这个自我安慰在**参数**这一层
+> 不成立：错误方向恰好是**少问一次**。
+>
+> 处置是**两道**：白名单砍到只剩恒只读程序（`git` 整个移出 —— 它在沙箱里
+> 本来就跑不了，读黑名单 deny `.git`），再加一道**写出口参数嗅探**。
+
+另外三条安全项也在这一批修掉：
+
+| 项 | 实测证据 |
+|---|---|
+| **子进程继承全部 env，含真实端点凭证** | `printenv dashscope_api_key` → `sk-ws-…`。改环境**白名单** ＋ 显式清 `BASH_ENV` |
+| **审批界面可被 ANSI / CR / 零宽字符伪造** | 它是 EXECUTE 唯一的人工边界，而展示内容全由模型给 |
+| **SSRF：`http://[::ffff:7f00:1]/x` 原本放行** | URL 解析器**总是**把 mapped 地址规范化成十六进制，而原规则只认点分十进制 —— 那条规则从没在真实链路上生效过 |
+
+> ### 【定】我自己犯的那条，比上面几条更值得记
+>
+> A 段每条用例都带 `kills`（改坏哪里会让它翻红）。修完白名单后按惯例做
+> 判别力实测 —— 把 `find`/`sort`/`rg` 加回白名单，**没有翻红**：
+> 它们都带写出口参数，被第二道挡住了。
+>
+> **那几条 `kills` 声称的因果不成立。** 一条不准的 `kills` 比没有更糟 ——
+> 它让人以为某处改坏会被抓住，而真去改的时候不会。
+> 处置：按**真正的守卫**把用例分三组，对前两组各做独立注入实测。
+>
+> 同批还有一条同源的：`verify:shell` E2 那个「已改成断言关系而非常数」的
+> 修复本身是**恒真式**（`overhead` 就是用 `names.length * 180` 算的），
+> 而它已经被当成教训写进了实施记录。**记进教训里的装饰会被抄到第二处去。**
+
+### 同批顺带修掉的一条崩溃路径
+
+`settle-batch.ts` 的 `renderError(outcome.error!)` —— 一个非空断言掩着真洞：
+**任何工具返回 `ok:false` 而忘了带 `error`，整个 Run 抛 TypeError 崩掉，
+且批内配对被破坏（不变量 8）**。而 `tools/` 这一层的全部意义就是让工具包
+能被独立地写、独立地接进来。已改为合成 `TOOL_CONTRACT_NO_ERROR`（点名违约，
+不伪装成普通工具失败）。判据在 `verify:pairing`，判别力实测过。
+
+它是改 `ask_user` 的 NO_ANSWER 分支做故障注入时撞出来的 ——
+**故障注入的价值不止于验证判据，它还会撞出判据之外的东西。**
 
 ### 收口修复批次（2026-08-28）
 
@@ -149,11 +304,12 @@ npm run verify:persistence         # 跨进程恢复：真 kill -9 之后能不�
 npm run verify:budget              # 预算八轴逐条撞墙 ＋ 墙钟拆分 ＋ 时间事实段级冻结
 npm run verify:crash               # 三个崩溃窗口 × 三条恢复分支（决 6 的判别力在这里）
 npm run verify:drift               # 端点漂移检测 ＋ 对照端点装配 ＋ resume 端点一致性闸门（U-1 / U-6 / P1-1）
-npm run verify:tools               # 批 1：六条边界 grep ＋ 两类声明 ＋ 分页非截断 ＋ 组合器三方法路由 ＋ 读黑名单
+npm run verify:tools               # 批 1：边界 grep（1…7 共 8 条） ＋ 两类声明 ＋ 分页非截断 ＋ 组合器三方法路由 ＋ 读黑名单
 npm run verify:artifact            # 批 2：外置与逐字取回 ＋ URL 护栏 ＋ 产物登记与第二层验证 ＋ role 分流
 npm run verify:progress            # 批 3：进展 ＋ 无进展 ＋ 真实慢工具取消 ＋ 人工接管三条状态闭合
 npm run verify:scenarios           # S13：三场景 smoke（决 7 的判据）＋ 三条护栏在场性总校验
-npm run verify:all                 # 12 条脚本 / 91 条判据
+npm run verify:shell               # ★阶段 3.5：两道闸门 ＋ 沙箱实测 ＋ 分支三 ＋ 边界 7
+npm run verify:all                 # 13 条脚本 / 115 条判据
 ```
 
 `verify:scenarios -- --live` 用真实端点跑同样三个任务（**花钱，不在 verify:all 里**）。
@@ -174,7 +330,15 @@ npm run probe:reasoning-tokens     # D-3：count_tokens 算不算推理块
 
 **不写单测、不引入测试框架**（D-25）。验收以**可运行脚本**交付，打印可读证据供人判断，而不是断言绿灯——与 Spike 0 的探针形态一致。新增验证时按这个形态写，放进 `apps/cli/src/verify/`，用 `harness.ts` 里的 `banner/section/fact/verdict` 输出。
 
-工程基线：**Node 24 ＋ npm workspaces，不引入 pnpm / turbo / nx**。运行期依赖只有 `@anthropic-ai/sdk` 和 `dotenv` —— **SQLite 用内置 `node:sqlite`，不新增依赖**；`tsx` 直接跑 TS，无构建步骤。
+工程基线：**Node 24 ＋ npm workspaces，不引入 pnpm / turbo / nx**。运行期依赖 **3 个**：
+`@anthropic-ai/sdk`、`dotenv`、`turndown` —— **SQLite 用内置 `node:sqlite`，不新增依赖**；`tsx` 直接跑 TS，无构建步骤。
+
+> ⚠️ **`turndown` 是阶段 3.5 破的基线**（原本只有 2 个，见 [ADR-0007](sxw_aicoding/ADR/0007-html-结构转换可内置语义挑选不可.md)）。
+> 磁盘 208K ＋ 传递依赖 `@mixmark-io/domino` 8.6M。
+> 换来的是抓网页时 66% 的 token 削减（实测 38280 → 13023 字符）。
+> 不手写的理由：手写要在没有 DOM 的 Node 里解析任意 HTML，而**「差不多能解析」的
+> HTML 处理正是最容易出静默错误的一类代码** —— 它不报错，只在某些页面上少转一块，
+> 而模型没有办法发现自己拿到的不完整。
 
 ### 凭证
 
@@ -247,9 +411,16 @@ Progress Guard 判定（U-3，无进展 → 具名 Terminal `NO_PROGRESS`），
 | `list_dir` / `stat` / `read_file` / `search` / `now` / `fetch_url` / `read_blob` | tools/common | 只读、幂等 | 一：真的重新执行 |
 | `write_file` | tools/common | **幂等**（覆盖写同样内容两次 == 一次） | 一 |
 | **`edit_file`** | tools/common | **真的非幂等** ＋ 相对操作（`requiresPreFingerprint: true`） | 二：**唯一天然落在分支二的场景工具** |
-| `request_handoff` | tools/common | 只读、幂等；`waitsForHumanInteraction` | 一 |
+| `request_handoff` / **`ask_user`** | tools/common | 只读、幂等；`waitsForHumanInteraction` | 一 |
 | `append_log` | cases/micro-cases | 非幂等、执行后不可验、**相对**操作 | 二或三：**取决于有没有拍到执行前指纹** |
 | `slow_write` | cases/micro-cases | 可控慢的**写**（`delay_ms`） | 一（幂等，与 `write_file` 同理） |
+| **`run_shell`** | tools/common | 既不幂等也不只读；**崩溃后无从观察** | 三：**第一个天然落分支三的场景工具** |
+
+> `run_shell` 那一行是诚实的结果，不是字段填错：崩在 `zip -r` 中途，
+> 半个 zip 与没有 zip 在磁盘上都可能长得像成功。它声明
+> `requiresPreFingerprint: true` 而 `CommonVerifier` 给不出指纹 → `canObserve` 恒假。
+> **副产品**：分支三此前只有 `append_log` 这个**测量工具**做载体，
+> 而用测量工具去测分支分布，正是阶段 2 决 6 要防的「旋钮长在被测对象身上」。
 
 > **收口批改过 `write_file` 那一行。** 它此前声明 `isIdempotent: false` 落分支二，
 > 而注释自己承认那是「为了让分支二有**通用工具**可测」—— 与把 `delay_ms` 赶出这个工具
@@ -289,7 +460,7 @@ isBlockClosed     形状提供事件          端点提供有无
 
 主力端点是**百炼 Anthropic 形状 `qwen3.7-plus`**（D-16）。选它而不是评分更高的 DeepSeek，因为它**零协议兜底**（缺 tool_result、错 tool_call_id 一律 200 放行）且服务端无状态——用一个什么都不校验的端点开发，能逼出自持逻辑的全部漏洞。`compose.ts` 是全仓唯一写死端点名的地方。
 
-### 六条边界（有机械判据，改动后 grep 复核）
+### 边界 grep：编号 1…7、共 8 条规则（有机械判据，改动后复核）
 
 ```bash
 grep -rn "@anthropic-ai/sdk" packages apps cases tools      # 1. Provider SDK 只在形状适配器里
@@ -299,9 +470,10 @@ grep -rnE "micro-cases|tools-common" packages/harness-runtime/src   # 4. Runtime
 grep -rn "node:sqlite" packages apps cases adapters tools    # 5. 只允许 packages/store-sqlite/ 命中
 grep -rnE "@workagent/tools-|tools/common" packages adapters # 6. ★阶段 3：Runtime 与适配器不得依赖工具包
 grep -rnE "@workagent/micro-cases|cases/" tools/             # 6b. ★阶段 3：通用工具不得依赖任何 Case 包
+grep -rnE "sandbox-exec|analyzeCommand|sbpl" packages adapters # 7. ★阶段 3.5：沙箱与命令解析不得进 Runtime
 ```
 
-**`verify:tools` A 段机械跑这六条**，不要手工 grep 了事 —— 它还会过滤注释行
+**`verify:tools` A 段机械跑这 8 条**，不要手工 grep 了事 —— 它还会过滤注释行
 （这些文件里到处在引用边界规则本身），并在 A2 段做**判别力实测**：
 往 `tools/common` 注入一行对 Case 包的 import，第 6b 条必须当场翻红并指出行号。
 
@@ -311,6 +483,12 @@ grep -rnE "@workagent/micro-cases|cases/" tools/             # 6b. ★阶段 3�
 第 6b 是「通用」这个词的机械含义：**通用工具一旦依赖某个 Case，它就不通用了**，
 而这件事从代码上看不出来。注意它的模式**不是**方案里写的 `"cases/"` ——
 那个抓不到 `import … from "@workagent/micro-cases"`，而包名 import 恰恰是最典型的违规形态。
+
+第 7 条守的是「沙箱是工具域知识」。它与第 4 / 6 条同源但**形态不同**：
+`run_shell` 的诱惑不是 import 工具包，而是把命令解析和沙箱 profile 生成搬进
+`packages/harness-runtime/src/action/` —— 那里本来就叫 effect-resolver，看着天经地义。
+搬进去之后 Runtime 就认识 shell 了，而第 4 / 6 条**一条都抓不到**（它没 import 任何工具包）。
+Runtime 侧允许存在的只有 `TrustedEffectResolver` 这个类型。
 
 前两条是研究问题「端点差异能否被完全挡在主循环之外」的机械判据。判据要区分**注释、类型定义与真实依赖**——`ApiShape` 这类类型定义命中不算违规。
 
@@ -357,7 +535,15 @@ tools/common/                ★阶段 3。Case 无关的通用能力面（@work
   src/fs/fs-common.ts        **唯一一份**边界判定与 fs 错误分类（cases/ 反过来 import 它）
   src/fs/read-guard.ts       读黑名单（决 3 护栏 1，**必须同时覆盖 read_file 与 search**）
   src/net/                   fetch_url ＋ url-guard（私网拒绝，DNS 解析后判 ＋ 重定向终点再判）
-  src/mech/                  read_blob / request_handoff —— 机制工具，声明义务不同
+                             ＋ html-to-markdown（★3.5，只做结构转换，见 ADR-0007）
+  src/mech/                  read_blob / request_handoff / ask_user（★3.5）—— 机制工具，声明义务不同
+                             【定】request_handoff 与 ask_user 的 description 是**成对**的，
+                             只改一边会让模型在两者之间随机选（ADR-0008）
+  src/exec/                  ★阶段 3.5。run_shell ＋ 两道闸门，职责不得合并：
+                             command-analysis.ts 判「要不要问人」（判错＝多问一次）
+                             sandbox.ts          判「能碰到什么」（判错＝没有边界）
+                             shell-effect-resolver.ts 住这里而不是 Runtime 的 action/
+                             —— 边界 7 抓的就是这一条
   src/artifact-checks/       JSON / ZIP / 编码 / hash 四项。**不做「Markdown 可解析」**（恒绿）
 cases/micro-cases/           只剩 append_log 与 slow_write —— **测量工具**，不是能力
 apps/cli/                    Composition Root（compose.ts）＋ 入口 ＋ 12 条验收脚本 ＋ 一次性探针
@@ -393,7 +579,7 @@ apps/cli/                    Composition Root（compose.ts）＋ 入口 ＋ 12 �
 | [探针记录](sxw_aicoding/WorkAgent调研/探针记录/) | 花钱探针的**原始输出**。`probe-requirement-extraction` 推翻了回归评测 §5.1 的归因 |
 | `WorkAgent调研/ProviderProtocolFacts_*.md` | Spike 0 三轮实测事实（75 份证据 / 4 个端点） |
 | `代码评审/` | 按日期分目录。`2026-08-24/` 两份阶段 1 评审；`2026-08-25/` 一份 Bugfix 批次评审 |
-| `ADR/` | 决策记录。阶段 2 三份（[0001](sxw_aicoding/ADR/0001-outcome-kind-不区分是谁没做成.md) / [0002](sxw_aicoding/ADR/0002-恢复可观测性改为-action-级事实.md) / [0003](sxw_aicoding/ADR/0003-受信时间事实冻结到执行段.md)）＋ 阶段 3 三份（[0004 工具归属](sxw_aicoding/ADR/0004-通用工具归属与两类分拣标准.md) / [0005 lease 不做](sxw_aicoding/ADR/0005-PARKED-lease-不做的理由.md) / [0006 读放开的护栏](sxw_aicoding/ADR/0006-读放开的护栏边界.md)）；**阶段 1 的四份欠了两个阶段了** |
+| `ADR/` | 决策记录。阶段 2 三份（[0001](sxw_aicoding/ADR/0001-outcome-kind-不区分是谁没做成.md) / [0002](sxw_aicoding/ADR/0002-恢复可观测性改为-action-级事实.md) / [0003](sxw_aicoding/ADR/0003-受信时间事实冻结到执行段.md)）＋ 阶段 3 三份（[0004 工具归属](sxw_aicoding/ADR/0004-通用工具归属与两类分拣标准.md) / [0005 lease 不做](sxw_aicoding/ADR/0005-PARKED-lease-不做的理由.md) / [0006 读放开的护栏](sxw_aicoding/ADR/0006-读放开的护栏边界.md)）＋ **阶段 3.5 两份**（[0007 结构转换 vs 语义挑选](sxw_aicoding/ADR/0007-html-结构转换可内置语义挑选不可.md) / [0008 ask_user 与 handoff 是两个洞](sxw_aicoding/ADR/0008-ask-user-与-request-handoff-是两个洞.md)）；**阶段 1 的四份欠了两个阶段了** |
 | `spikes/s0-provider-protocol/` | 一次性探针，已完成，不进主干依赖（`tsconfig.json` 已 exclude） |
 
 V04 及更早的架构设计、`V03_Spike0回填清单.md` **不再作为实现依据**，只作过程记录。

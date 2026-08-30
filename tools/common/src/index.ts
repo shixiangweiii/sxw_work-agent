@@ -45,11 +45,14 @@ import { executeWriteFile, verifyWriteFile, writeFileSnapshot } from "./fs/write
 import { executeNow, nowSnapshot } from "./time/now.js";
 import { executeFetchUrl, fetchUrlSnapshot } from "./net/fetch-url.js";
 import { executeReadBlob, readBlobSnapshot } from "./mech/read-blob.js";
+import { executeRunShell, runShellSnapshot } from "./exec/run-shell.js";
+import { isSandboxAvailable } from "./exec/sandbox.js";
 import {
   executeRequestHandoff,
   requestHandoffSnapshot,
   type HandoffChannel,
 } from "./mech/request-handoff.js";
+import { askUserSnapshot, executeAskUser, type QuestionChannel } from "./mech/ask-user.js";
 import { resolveToolPath } from "./fs/fs-common.js";
 import type { BlobStorePort } from "@workagent/harness-runtime";
 
@@ -57,13 +60,33 @@ export * from "./fs/fs-common.js";
 export * from "./fs/read-guard.js";
 export * from "./net/url-guard.js";
 export * from "./artifact-checks/index.js";
-export { fetchUrlDefinition, fetchUrlSnapshot } from "./net/fetch-url.js";
+export { fetchUrlDefinition, fetchUrlSnapshot, executeFetchUrl, renderText } from "./net/fetch-url.js";
 export { readBlobDefinition, readBlobSnapshot } from "./mech/read-blob.js";
+export { runShellDefinition, runShellSnapshot, executeRunShell } from "./exec/run-shell.js";
+export { analyzeCommand, type CommandAnalysis } from "./exec/command-analysis.js";
+export {
+  ShellEffectResolver,
+  SHELL_RESOLVER_KEY,
+  SHELL_RESOLVER_REF,
+} from "./exec/shell-effect-resolver.js";
+export {
+  SANDBOX_EXEC,
+  buildSandboxProfile,
+  isSandboxAvailable,
+  readGuardEntryCount,
+  toSandboxDenyRules,
+} from "./exec/sandbox.js";
 export {
   requestHandoffDefinition,
   requestHandoffSnapshot,
   type HandoffChannel,
 } from "./mech/request-handoff.js";
+export {
+  askUserDefinition,
+  askUserSnapshot,
+  type QuestionChannel,
+} from "./mech/ask-user.js";
+export { htmlToMarkdown, type HtmlToMarkdownResult } from "./net/html-to-markdown.js";
 export { listDirDefinition, listDirSnapshot } from "./fs/list-dir.js";
 export { readFileDefinition, readFileSnapshot } from "./fs/read-file.js";
 export { statDefinition, statSnapshot } from "./fs/stat.js";
@@ -73,10 +96,17 @@ export { searchDefinition, searchSnapshot } from "./fs/search.js";
 export { nowDefinition, nowSnapshot } from "./time/now.js";
 
 /**
- * 场景工具（8 个，批 2 补齐 `fetch_url`）。
+ * 场景工具（阶段 3.5 起 **9 个**，新增 `run_shell`）。
  *
  * 【定】新增任何一个都要过决 2 的两类标准之一，并重读
  * `fixedOverheadTokens` 基线 —— 工具数是随时可读的过拟合警报。
+ *
+ * ── `run_shell` 为什么可以只算 **1 个** ────────────────────────────────
+ *
+ * 2026-08-30 的实测同时暴露了四个缺口：不能打包、不能建目录、不能删除、
+ * 不能移动。四个专用工具会让起步价一次涨 720 token，而它们共享同一个
+ * 答案。阶段 3.5 决 4 因此只加这一个，并把「一个通用 EXECUTE 能替掉
+ * 多少专用工具」当成本批的研究问题 —— 答案由复跑数据给，不由方案给。
  */
 export const commonSceneTools: ToolSnapshot[] = [
   listDirSnapshot,
@@ -87,6 +117,17 @@ export const commonSceneTools: ToolSnapshot[] = [
   editFileSnapshot,
   fetchUrlSnapshot,
   nowSnapshot,
+  /**
+   * 【定】没有沙箱就**不进工具面**，不降级为无沙箱执行。
+   *
+   * 装配期这一道与 `executeRunShell` 里执行期那一道是两道独立闸门，
+   * 两道都要能单独触发 —— E-3 的教训是「一条闸门排在另一条后面
+   * 等于没有闸门」，而那条 bug 活了整整一个阶段没人发现。
+   *
+   * 副作用：非 darwin 上 `fixedOverheadTokens()` 会少 180，
+   * 跨平台比对 token 数据时要记得这一条。
+   */
+  ...(isSandboxAvailable() ? [runShellSnapshot] : []),
 ];
 
 /**
@@ -98,7 +139,15 @@ export const commonSceneTools: ToolSnapshot[] = [
  *
  * 声明义务因此不同：文件头必须指出**是哪一条机制**、**不做它会怎样**。
  */
-export const commonMechanismTools: ToolSnapshot[] = [readBlobSnapshot, requestHandoffSnapshot];
+export const commonMechanismTools: ToolSnapshot[] = [
+  readBlobSnapshot,
+  requestHandoffSnapshot,
+  /**
+   * 阶段 3.5 新增。它与 `request_handoff` **不是同一个洞** ——
+   * 后者是「你去做」，它是「你来定」，见 `ask-user.ts` 文件头那张对照表。
+   */
+  askUserSnapshot,
+];
 
 export const commonTools: ToolSnapshot[] = [...commonSceneTools, ...commonMechanismTools];
 
@@ -123,6 +172,16 @@ export interface CommonToolHandlerDeps {
    * 「能发起接管却无人接收」等于把 Run 挂死，而挂死是最难排查的那种失败。
    */
   handoff?: HandoffChannel;
+  /**
+   * `ask_user` 要用它把问题交给人（阶段 3.5）。
+   *
+   * 【定】与 `handoff` 分成两个字段，不合并成一个「交互通道」。
+   * 两者的**失败语义相反**：没人接管 handoff 是失败，
+   * 没人回答 ask_user 不是失败（模型可以自己定）。见 ask-user.ts。
+   *
+   * 也因此**不注入不是装配错误** —— `executeAskUser` 会走 NO_ANSWER。
+   */
+  question?: QuestionChannel;
 }
 
 export class CommonToolHandler implements ToolHandlerPort {
@@ -182,7 +241,47 @@ export class CommonToolHandler implements ToolHandlerPort {
           ctx,
         );
       case "fetch_url":
-        return executeFetchUrl({ url: String(input["url"] ?? "") }, ctx);
+        return executeFetchUrl(
+          {
+            url: String(input["url"] ?? ""),
+            /**
+             * 【定】透传，不给默认值。
+             *
+             * 默认值住在工具里（`renderText`），不住在这里 —— 摸底考试的
+             * A 组修的正是「handler 只转发了三个参数，第四个被静默丢掉」
+             * 那一类：参数在 schema 里、在工具里都有，就是不过这一跳。
+             */
+            ...(input["as"] === undefined ? {} : { as: String(input["as"]) }),
+          },
+          ctx,
+        );
+      case "run_shell":
+        return executeRunShell(
+          {
+            command: String(input["command"] ?? ""),
+            ...(input["description"] === undefined
+              ? {}
+              : { description: String(input["description"]) }),
+            ...(input["timeout_ms"] === undefined
+              ? {}
+              : { timeout_ms: Number(input["timeout_ms"]) }),
+            /**
+             * 【定】只有**严格等于 true** 才放行网络。
+             *
+             * `validateAndNormalize()` 的 `typeof v !== prop.type` 已经会
+             * 挡下字符串 `"true"`，所以这一行**当前是冗余的**。留着是因为
+             * 它防的不是今天的模型，是明天的 schema：那个校验器是「极简子集」，
+             * 将来引入真 schema 库或加类型宽容时，`Boolean("false") === true`
+             * 会让一个默认关闭的网络开关自己打开，而没有任何东西会报错。
+             *
+             * 【定】判定同样写在 `ShellEffectResolver` 里一份（`=== true`）——
+             * 两处必须一致：一处决定沙箱开不开网，一处决定 Trace 上记不记
+             * 数据外发。不一致的后果是「网开了但审计说没开」。
+             */
+            allow_network: input["allow_network"] === true,
+          },
+          ctx,
+        );
       case "request_handoff":
         return executeRequestHandoff(
           {
@@ -191,6 +290,15 @@ export class CommonToolHandler implements ToolHandlerPort {
           },
           ctx,
           this.deps.handoff,
+        );
+      case "ask_user":
+        return executeAskUser(
+          {
+            question: String(input["question"] ?? ""),
+            options: String(input["options"] ?? ""),
+          },
+          ctx,
+          this.deps.question,
         );
       case "read_blob":
         return executeReadBlob(

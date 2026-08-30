@@ -53,12 +53,12 @@ RUNNING 敲一句话回车 = 插话；等审批时回车 = 应答；等接管时
 
 ---
 
-## 12 条验收脚本 / 86 条判据
+## 13 条验收脚本 / 115 条判据
 
 不写单测（D-25）。验收以**可运行脚本**交付，输出可读证据供人判断，与 Spike 0 的探针形态一致。
 
 ```bash
-npm run verify:all                 # 12 条脚本 / 86 条判据
+npm run verify:all                 # 13 条脚本 / 115 条判据
 ```
 
 | 脚本 | 挂了意味着 |
@@ -71,7 +71,8 @@ npm run verify:all                 # 12 条脚本 / 86 条判据
 | `verify:budget` | 八条预算轴有一条撞不到墙，或墙钟没扣掉等待 |
 | `verify:crash` | 三个崩溃窗口 × 三条恢复分支有缺口 |
 | `verify:drift` | 端点漂移检测或 resume 端点一致性闸门失效 |
-| `verify:tools` | 六条边界破了，或工具声明与实现对不上 |
+| `verify:tools` | 边界破了，或工具声明与实现对不上 |
+| `verify:shell` | `run_shell` 的两道闸门破了（只读判定放宽 / 沙箱失效） |
 | `verify:artifact` | 大结果外置取不回来，或产物验不出真假 |
 | `verify:progress` | 长任务被误杀、原地打转叫不停、人机通道不通 |
 | `verify:scenarios` | 三个场景不再共用同一套工具（过拟合警报） |
@@ -129,18 +130,18 @@ packages/testkit/            fake-endpoint-profile、fake-clock、crash-harness�
 eval/                        graders / suite / fixtures —— 只经 Facade
 adapters/shape-anthropic-messages/   唯一允许 import Provider SDK 的地方
 adapters/endpoint-profiles/  端点行为的**数据**形态，不是代码
-tools/common/                Case 无关的通用能力面（8 场景 ＋ 2 机制工具）
+tools/common/                Case 无关的通用能力面（9 场景 ＋ 3 机制工具）
 cases/micro-cases/           append_log 与 slow_write —— **测量工具**，不是能力
-apps/cli/                    Composition Root ＋ 入口 ＋ 12 条验收脚本 ＋ 一次性探针
+apps/cli/                    Composition Root ＋ 入口 ＋ 13 条验收脚本 ＋ 一次性探针
 ```
 
-默认装配 **12 个工具**（8 场景 ＋ 2 机制 ＋ 2 测量），固定开销起步价 ≈ 2160 token
+默认装配 **14 个工具**（9 场景 ＋ 3 机制 ＋ 2 测量），固定开销起步价 ≈ 2520 token
 （§16.1【定·实测】每工具约 180 token）。工具数是随时可读的过拟合警报。
 
-### 六条边界（有机械判据）
+### 边界 grep：编号 1…7、共 8 条规则（有机械判据）
 
 ```bash
-npm run verify:tools      # A 段机械跑这六条，别手工 grep
+npm run verify:tools      # A 段机械跑这 8 条，别手工 grep
 ```
 
 | # | 规则 |
@@ -151,11 +152,17 @@ npm run verify:tools      # A 段机械跑这六条，别手工 grep
 | 4 | Runtime Core 不 import 任何工具实现 |
 | 5 | `node:sqlite` 只在 `packages/store-sqlite/` |
 | 6 / 6b | Runtime 与适配器不得依赖工具包；**通用工具不得依赖任何 Case 包** |
+| 7 | ★阶段 3.5：沙箱与命令解析不得进 Runtime / 适配器 |
 
 前两条是研究问题「端点差异能否被完全挡在主循环之外」的机械判据。
 判据要区分**注释、类型定义与真实依赖** —— 这些文件里到处在引用规则本身，
 所以照抄原始 grep 命令会假红，权威形态是 `verify:tools` A 段（它过滤注释行，
 并对第 6b 条做 canary 注入实测）。
+
+第 7 条与第 4 / 6 条同源但形态不同：`run_shell` 的诱惑不是 import 工具包，
+而是把命令解析和沙箱 profile 生成搬进 `packages/harness-runtime/src/action/` ——
+那里本来就叫 effect-resolver。搬进去之后 Runtime 就认识 shell 了，
+而第 4 / 6 条**一条都抓不到**（它没有 import 任何工具包）。
 
 ---
 

@@ -29,6 +29,19 @@
  * 决 1（阶段 3 不建 cases/web-archive）就被从内部绕过去了 —— 而这件事
  * 三道 grep 闸门一条都拦不住，只有人读代码时守得住。
  * 工具只负责取回内容并如实上报类型与大小。
+ *
+ * ── 阶段 3.5：`as` 参数 ＋ ADR-0007 对上面这条的辨析 ──────────────────────
+ *
+ * 上面那条**仍然成立，一个字没改**。ADR-0007 划的是它内部的一条线：
+ *
+ *   语义挑选（哪块是正文）  —— 仍然不做，仍然是 Case 语义
+ *   结构转换（标签 → 语法）—— 可以内置，因为换个 Case 结论不变
+ *
+ * 触发它的是实测：本工具取回的 40311 字节 HTML 被外置成 blob
+ * （approxTokens 16114），模型**连调 3 次 `read_blob` 把它整个搬回上下文**
+ * （4363 → 20621 token）—— 外置在这条链路上净收益为零。
+ * 判据不在下游（read_blob 的分页做得对），在这里：**送进去的东西本身
+ * 有九成是标签**。见 `html-to-markdown.ts` 的文件头与 ADR-0007。
  */
 
 import type {
@@ -39,6 +52,7 @@ import type {
 } from "@workagent/harness-runtime";
 import { asId, makeError } from "@workagent/harness-runtime";
 import { assertPublicUrl } from "./url-guard.js";
+import { htmlToMarkdown } from "./html-to-markdown.js";
 
 /**
  * 重定向上限来自**平台默认**（undici 20 跳），不是我们自己定的数。
@@ -77,11 +91,26 @@ const TEXTUAL = ["text/", "application/json", "application/xml", "application/ja
 
 export const fetchUrlDefinition: ToolDefinition = {
   id: asId("tool_fetch_url"),
-  version: "1.0.0",
+  /**
+   * ── 【定】1.0.0 → 1.1.0（2026-08-30 评审 P2-1）─────────────────────────
+   *
+   * 阶段 3.5 给它加了 `as` 参数，并把 HTML 的**默认输出从 raw 改成 Markdown**。
+   * 版本不动的后果：一条阶段 3 的旧 Run，冻结的 ToolSnapshot 说自己用的是
+   * `fetch_url@1.0.0`，而 resume 时跑的是现在这份代码 —— 同一个 URL、
+   * 同一个工具版本、同一个 action identity，产出**不同的内容**。
+   *
+   * 恢复与 Replay 的可解释性全靠这个身份。行为变了而身份不变，
+   * 等于让「为什么这次结果不一样」变成一个查不出来的问题。
+   */
+  version: "1.1.0",
   name: "fetch_url",
   description:
     "对一个公开 URL 发 GET 请求并取回内容。只读，不发送任何凭证、不带 Cookie、不登录。" +
-    '返回 JSON：{"url","finalUrl","status","contentType","sizeBytes","isText","headers","content"}。' +
+    '返回 JSON：{"url","finalUrl","status","contentType","sizeBytes","isText","format","headers","content"}。' +
+    "**HTML 页面默认转成 Markdown 再返回**（标签占一个网页九成体积，" +
+    "原样进上下文是浪费）。转换只做结构转换，不挑正文 —— 导航、页脚也都还在，" +
+    "该留哪块由你判断。需要看原始 HTML（比如要抠某个 meta 标签或属性）时传 as=\"raw\"。" +
+    "非 HTML 的文本（JSON / 纯文本 / XML）不受影响，永远原样返回。" +
     "二进制响应（PDF / ZIP / 图片等）不返回正文，只返回元数据。" +
     "4xx / 5xx 与网络超时都返回结构化结果而不是异常 —— 看 status 字段判断。" +
     "拒绝私网地址与 localhost。" +
@@ -90,6 +119,11 @@ export const fetchUrlDefinition: ToolDefinition = {
     type: "object",
     properties: {
       url: { type: "string", description: "要取的 URL，必须是 http 或 https" },
+      as: {
+        type: "string",
+        description:
+          '"markdown"（默认，仅对 HTML 生效）或 "raw"（原始 HTML）。要读 meta / 属性 / 内联脚本时用 raw',
+      },
     },
     required: ["url"],
   },
@@ -131,7 +165,7 @@ export const fetchUrlDefinition: ToolDefinition = {
 };
 
 export async function executeFetchUrl(
-  input: { url: string },
+  input: { url: string; as?: string },
   ctx: ToolExecutionContext,
 ): Promise<ToolExecutionOutcome> {
   // 护栏 2（决 3 修订 2）：私网与 localhost 一律拒绝，防 SSRF。
@@ -226,12 +260,14 @@ export async function executeFetchUrl(
       ...(sizeBytes > MAX_BODY_BYTES
         ? {
             content: "",
+            format: "none",
             note: `响应体 ${sizeBytes} 字节，超过 ${MAX_BODY_BYTES} 的上限，未取回正文。`,
           }
         : isText
-          ? { content: buf.toString("utf8") }
+          ? renderText(buf.toString("utf8"), contentType, input.as)
           : {
               content: "",
+              format: "none",
               // 【定】二进制不进 Context，只回元数据。
               note: `响应是二进制（${contentType}），未按文本解码。正文没有进入上下文。`,
             }),
@@ -253,6 +289,77 @@ export async function executeFetchUrl(
       error: classifyFetchError(err, input.url),
     };
   }
+}
+
+/**
+ * 决定文本正文以什么形态进上下文。
+ *
+ * ── 【定】默认转换，不是默认原样 ──────────────────────────────────────
+ *
+ * 最自然的写法是 `as` 不传就返回原始 HTML，让模型想省 token 时自己传
+ * `as="markdown"`。**不能这么写**，理由是摸底考试题 3 那条教训：
+ * 模型的分析全对，但它没有调那个更贵的工具 —— 一个需要模型主动选择才生效
+ * 的优化，在真实运行里等于不存在。而这里的默认值一旦选错，代价是每次
+ * 抓网页多烧一万多 token，且没有任何东西会报警。
+ *
+ * 所以默认值放在**多数情况下正确**的那一侧：抓网页九成是为了读内容。
+ * 要读 meta / 属性 / 内联脚本的那一成，显式传 `as="raw"`。
+ *
+ * ── 【定】只对 HTML 生效 ──────────────────────────────────────────────
+ *
+ * JSON、纯文本、XML 一律原样返回。把一份 JSON 喂给 HTML 转换器，
+ * 出来的是一份**看起来像文本、但结构已经被破坏**的东西 ——
+ * 而模型没有办法看出它拿到的不是原文。
+ */
+/**
+ * 【定】export 是为了让 `verify:tools` 能直接调它。
+ *
+ * 不是洁癖问题：`url-guard` 拒绝私网与 localhost，所以 `fetch_url`
+ * **没法对着本地服务器测** —— 想在不联网的前提下验这个判定，
+ * 只能把判定函数本身暴露出来。D-25 之下验收脚本就是本项目唯一的仪器，
+ * 让仪器够得着被测对象比保持函数私有更重要。
+ */
+export function renderText(
+  text: string,
+  contentType: string,
+  as: string | undefined,
+): { content: string; format: string; note?: string } {
+  const isHtml = contentType.toLowerCase().includes("text/html");
+  if (!isHtml) return { content: text, format: "text" };
+  if (as === "raw") return { content: text, format: "html" };
+  /**
+   * 【定】`as` 只有两个合法值，写错必须**说出来**（2026-08-30 评审）。
+   *
+   * 极简 schema 校验器不支持 enum，所以拼错的 `"rwa"` / `"html"` / `"md"`
+   * 会一路走到这里。原来的写法是「不是 raw 就当 markdown」——
+   * 于是模型想要原文、传了 `as="html"`、拿到的却是 Markdown，
+   * **而它没有任何办法发现自己要的东西被悄悄换掉了**。
+   *
+   * 处置是**照常转换 ＋ 在 note 里点名**，不是报错：
+   * 转换是安全的那一侧（拿到的内容更少而不是更多），
+   * 而这次调用本身没必要作废。与 `ask_user` 对 options 报结构化错误
+   * 的差别在于：那边错了就问不成，这边错了只是拿到另一种格式。
+   */
+  const badAs = as !== undefined && as !== "markdown";
+
+  const converted = htmlToMarkdown(text);
+  if (!converted) {
+    // 【定】转不动就回原文并说明，不静默返回半成品（见 html-to-markdown.ts）。
+    return {
+      content: text,
+      format: "html",
+      note: "这份 HTML 转 Markdown 失败了，返回的是原始 HTML。",
+    };
+  }
+  return {
+    content: converted.markdown,
+    format: "markdown",
+    note:
+      (badAs ? `⚠️ as="${as}" 不是合法值（只有 "markdown" 与 "raw"），已按默认的 markdown 处理。` : "") +
+      `HTML 已转成 Markdown（${converted.beforeChars} → ${converted.afterChars} 字符）。` +
+      `转换只做结构转换、**没有挑正文** —— 导航与页脚也在里面，该留哪块你自己判断。` +
+      `需要原始 HTML 就用 as="raw" 再取一次。`,
+  };
 }
 
 /**

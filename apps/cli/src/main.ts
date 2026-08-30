@@ -28,7 +28,7 @@ import type {
 } from "@workagent/harness-runtime";
 import { NullTraceSink, asId, readRunFacts } from "@workagent/harness-runtime";
 import { SqliteRunStore, openDb } from "@workagent/store-sqlite";
-import { isInsideWorkspace, type HandoffChannel } from "@workagent/tools-common";
+import { isInsideWorkspace, type HandoffChannel, type QuestionChannel } from "@workagent/tools-common";
 import { compose, parseEndpointArg, REPO_ROOT, resolveDbPath, type EndpointChoice } from "./compose.js";
 import { FileTraceSink } from "./trace/file-sink.js";
 import { finishRendering, renderEvent } from "./render.js";
@@ -243,6 +243,32 @@ function interactiveApproval(
   const ask = async (a: PreparedAction, prefix: string): Promise<ApprovalDecision> => {
     const e = a.resolvedEffect;
     finishRendering();
+    /**
+     * ── PROCESS scope 必须把命令原文打出来（阶段 3.5）─────────────────────
+     *
+     * 【定】`scope.value` 对一条 shell 命令是**程序名集合**（`programs:zip,mkdir`），
+     * 因为 §12.4 要求「不以自由文本作为授权边界」。这条规则是对的，
+     * 但它有一个必须补上的代价：只打 `scope.value` 的话，人看到的是
+     *
+     *     是否允许 run_shell 执行 EXECUTE → programs:rm ？[y/N]
+     *
+     * —— 而 `rm -rf build` 与 `rm -rf /` 在这一行里长得**一模一样**。
+     * 那不是审批，那是盲批：一个看起来有闸门、实际什么都没拦住的闸门，
+     * 比没有闸门更糟，因为它还会让人以为自己确认过了。
+     *
+     * 按 `scope.kind` 判而不是按工具名判 —— 将来任何一个 PROCESS scope 的
+     * 工具都自动获得同样的展示，而这里一行都不用改。
+     */
+    if (e.scope.kind === "PROCESS") {
+      const input = a.normalizedInput as Record<string, unknown>;
+      const cmd = typeof input["command"] === "string" ? input["command"] : "(读不到命令原文)";
+      const desc = typeof input["description"] === "string" ? input["description"] : "";
+      console.log(`\n  \x1b[33m即将执行的命令\x1b[0m${desc ? `（${forTerminal(desc)}）` : ""}：`);
+      for (const l of forTerminal(cmd).split("\n")) console.log(`    \x1b[1m${l}\x1b[0m`);
+      console.log(`  沙箱：只能写 workspace；${
+        input["allow_network"] === true ? "\x1b[31m本次允许联网\x1b[0m" : "禁止联网"
+      }`);
+    }
     stdin.setMode("WAITING_FOR_APPROVAL");
     try {
       const line = await stdin.askLine(
@@ -410,6 +436,7 @@ async function main(): Promise<void> {
     endpoint: args.endpoint,
     // S10：接管通道是 stdin 三方复用里的第三方（语义在 S1 定死）。
     handoff: terminalHandoff(stdin, sigint.signal),
+    question: terminalQuestion(stdin, sigint.signal),
   });
   interjectInto = (runId, text) => composed.runtime.interject(asId<RunId>(runId), text);
   profileRef = `${composed.profile.id}@${composed.profile.observedAt}`;
@@ -592,6 +619,95 @@ function terminalHandoff(stdin: StdinChannel, signal: AbortSignal): HandoffChann
       }
     },
   };
+}
+
+/**
+ * `ask_user` 的终端实现（阶段 3.5）。
+ *
+ * 【定】与 `terminalHandoff` 共用同一个 `StdinChannel` 与同一个
+ * `WAITING_FOR_INTERACTION` 模式 —— **不新建 readline**。
+ * 见 stdin-channel.ts 的文件头：各建各的会让同一行被两个消费者抢，
+ * 而那类 bug 只在「恰好在等回答时敲了一句插话」时出现，最难复现。
+ *
+ * ── 【定】没人回答时返回 undefined，由工具处置成 NO_ANSWER ─────────────
+ *
+ * 这里不打印「失败」字样：没有人可问不是错误，是一个正常的降级路径
+ * （阶段 3.5 决 3）。措辞跟着语义走，否则读日志的人会以为出了问题。
+ */
+function terminalQuestion(stdin: StdinChannel, signal: AbortSignal): QuestionChannel {
+  return {
+    async ask(request) {
+      finishRendering();
+      console.log(`\n${"─".repeat(60)}`);
+      console.log(`\x1b[36m需要你定一下\x1b[0m`);
+      console.log(`\n${request.question.split("\n").join("\n  ")}`);
+      console.log();
+      request.options.forEach((o, i) => console.log(`  \x1b[1m${i + 1}\x1b[0m) ${o}`));
+      console.log(
+        `\n\x1b[2m（敲序号回车；也可以直接写别的答案。` +
+          `直接回车 = 让它自己定。）\x1b[0m`,
+      );
+      console.log("─".repeat(60));
+
+      stdin.setMode("WAITING_FOR_INTERACTION");
+      try {
+        const line = await stdin.askLine(`  选哪个（1-${request.options.length}）> `, signal);
+        if (line === undefined || line.length === 0) {
+          console.log(
+            stdin.isInteractive
+              ? "  \x1b[2m没有选择，交给它自己定\x1b[0m"
+              : "  \x1b[2m非交互环境，交给它自己定\x1b[0m",
+          );
+          return undefined;
+        }
+        /**
+         * 序号 → 选项原文。**越界或非数字一律当自由文本**，不报错。
+         *
+         * 【定】不因为「输入不合法」再问一遍：用户想写一个不在列表里的
+         * 答案是完全正当的（选项是模型给的，它未必想全了）。
+         * 把自由输入当错误，等于让工具的选项列表变成一道封闭题。
+         */
+        const n = Number(line);
+        const byIndex =
+          Number.isInteger(n) && n >= 1 && n <= request.options.length
+            ? request.options[n - 1]
+            : undefined;
+        return byIndex !== undefined
+          ? { choice: byIndex }
+          : { choice: line, note: "用户没有选列表里的选项，而是自己写了一个答案" };
+      } finally {
+        stdin.setMode("RUNNING");
+      }
+    },
+  };
+}
+
+/**
+ * 把**模型产出的文本**变成可以安全打进终端的形式（2026-08-30 评审 P1）。
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ * 审批提示是 EXECUTE 的**唯一**人工边界，而它要显示的东西
+ * （`command` / `description`）完全由模型给。原样 `console.log` 的后果：
+ *
+ *   一条命令可以在自己的注释里塞 ESC 序列，把上面几行**清掉再重画** ——
+ *   用户看到的是「ls -la」，真正批准的是别的东西。
+ *
+ * 【定】一个可以被展示内容本身伪造的边界，不再是边界。
+ * V05 §22.4（不可信内容）在这里的具体落点：模型输出流进终端渲染
+ * 本身就是一次渲染注入，而这条链路上模型是唯一的内容来源。
+ *
+ * 处置是**剥离**不是转义：这里不需要保留模型给的任何样式，
+ * 保留得越少可伪造面越小。三类各有理由：
+ *   · C0/C1 控制符 —— ESC 开头的 ANSI 序列能清屏、移光标、改标题；
+ *   · CR —— 把光标拉回行首覆盖已打印内容，不需要 ESC 就能骗人；
+ *   · 零宽与双向控制 —— 能让两条不同的命令渲染成**一模一样**。
+ * ══════════════════════════════════════════════════════════════════════
+ */
+function forTerminal(raw: string): string {
+  return raw
+    .replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "")
+    .replace(/\r/g, "")
+    .replace(/[\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff]/g, "");
 }
 
 /** 只取 host —— 完整 URL 的路径里有时带部署标识，而这一行会被贴进报告。 */

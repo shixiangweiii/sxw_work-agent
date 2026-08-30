@@ -94,18 +94,58 @@ export async function assertPublicUrl(raw: string): Promise<UrlGuardResult> {
  * 单独摊平 —— 它看起来是 IPv6，实际打到的是 IPv4 回环。
  */
 export function isPrivateAddress(addr: string): boolean {
-  const a = addr.toLowerCase();
+  let a = addr.toLowerCase();
 
-  // IPv4-mapped IPv6：::ffff:127.0.0.1
-  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(a);
-  if (mapped) return isPrivateAddress(mapped[1]!);
+  /**
+   * ── 【定】方括号必须先剥掉（2026-08-30 评审 P1 实测的绕过）───────────────
+   *
+   * `new URL("http://[::ffff:127.0.0.1]/x").hostname` 返回的是
+   * **`[::ffff:7f00:1]`** —— 带方括号、且已被规范化成十六进制。
+   * 原实现两处都对不上：正则要求点分十进制、`isIP()` 对带括号的串返回 0。
+   * 于是它两条分支都不进，掉到最后的 IPv4 解析里 `split(".")` 得到长度 1，
+   * 直接 `return false` —— **放行**。
+   *
+   * 实测（修复前）：`http://[::ffff:127.0.0.1]/x` 与 `http://[::ffff:7f00:1]/x`
+   * 都被放行，能打到本机回环端口。
+   */
+  const bare = a.startsWith("[") && a.endsWith("]") ? a.slice(1, -1) : a;
 
-  if (isIP(a) === 6) {
-    if (a === "::1" || a === "::") return true;
-    // fc00::/7 唯一本地地址；fe80::/10 链路本地
-    return a.startsWith("fc") || a.startsWith("fd") || a.startsWith("fe8") || a.startsWith("fe9") ||
-      a.startsWith("fea") || a.startsWith("feb");
+  /**
+   * IPv4-mapped IPv6，**两种写法都要认**：
+   *   点分十进制 `::ffff:127.0.0.1`（用户可能这么写）
+   *   十六进制   `::ffff:7f00:1`（URL 解析器规范化之后的样子）
+   *
+   * 【定】只认前者是本次绕过的直接成因 —— 而 URL 解析器**总是**产出后者。
+   * 也就是说那条规则从来没有在真实链路上生效过。
+   */
+  const mappedDotted = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(bare);
+  if (mappedDotted) return isPrivateAddress(mappedDotted[1]!);
+
+  const mappedHex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(bare);
+  if (mappedHex) {
+    const hi = Number.parseInt(mappedHex[1]!, 16);
+    const lo = Number.parseInt(mappedHex[2]!, 16);
+    return isPrivateAddress(
+      `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`,
+    );
   }
+
+  if (isIP(bare) === 6) {
+    if (bare === "::1" || bare === "::") return true;
+    // fc00::/7 唯一本地地址；fe80::/10 链路本地
+    return bare.startsWith("fc") || bare.startsWith("fd") || bare.startsWith("fe8") ||
+      bare.startsWith("fe9") || bare.startsWith("fea") || bare.startsWith("feb");
+  }
+
+  /**
+   * 【定】到这里还认不出来的 IPv6 一律**拒绝**，不落到下面的 IPv4 解析。
+   *
+   * 下面那段用 `split(".")` 判 IPv4，对任何含冒号的串都会得到「不是 4 段」
+   * 然后 `return false` —— 也就是**放行**。一个我们看不懂的 IPv6 形态
+   * 落进一条默认放行的路径，正是这次绕过的形状。
+   */
+  if (bare.includes(":")) return true;
+  a = bare;
 
   const p = a.split(".").map(Number);
   if (p.length !== 4 || p.some((n) => Number.isNaN(n))) return false;
