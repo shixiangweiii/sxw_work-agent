@@ -331,6 +331,16 @@ export function gitProvenance(): GitProvenance {
   };
 }
 
+/**
+ * 入口身份。**唯一**的取值来源，两个入口共用（终端 / 浏览器）。
+ *
+ * 【定】它落到两个地方，两处必须一致：`RunSpec.origin.kind`（进 SQLite）
+ * 与 trace header 的 `entry`（进 JSONL）。此前只有后者是对的 ——
+ * header 写着 `entry:"web"`，而同一个 Run 的 RunSpec 里写着 `CLI`。
+ * 两条轨道对同一件事各说各话，事后没有任何办法判断哪条可信。
+ */
+export type RunEntry = "CLI" | "WEB";
+
 export interface ComposeOptions {
   workspaceRoot: string;
   approvalDecider: ApprovalDecider;
@@ -428,7 +438,18 @@ export interface Composed {
    * 打印时只取 host，key 一个字都不出现。
    */
   endpointBaseUrl: string;
-  makeRunSpec(task: string): RunSpec;
+  /**
+   * 【定】第二个参数是**入口身份**，不给就是 CLI。
+   *
+   * 默认值在这里是安全的，但**只因为有一条判据在盯着它**：`verify:ui`
+   * 断言 Web 起的 Run 的 `origin.kind === "WEB"`。没有那条判据的话，
+   * 这个默认值就是它要修的那个 bug 本身 —— `workagent-service` 复用
+   * `makeRunSpec()` 拿到了一个写死的 `CLI`，整整一个阶段没人发现，
+   * 因为这个字段有一个生产者、零消费者。
+   *
+   * 验收脚本一律走默认（它们确实是命令行起的），不为它们加噪声。
+   */
+  makeRunSpec(task: string, entry?: RunEntry): RunSpec;
   notices: string[];
 }
 
@@ -596,9 +617,11 @@ export function compose(opts: ComposeOptions): Composed {
     currentEndpointProfile: profile,
   });
 
-  const makeRunSpec = (task: string): RunSpec => ({
+  const makeRunSpec = (task: string, entry: RunEntry = "CLI"): RunSpec => ({
     id: asId<RunSpecId>(ids.next("rs")),
-    origin: { kind: "CLI", invokedAt: clock.now() },
+    // 【定】不要写死。见 Composed.makeRunSpec 与 RunOrigin 的说明 ——
+    // 写死一个常量的后果不是「值不对」，是**没有任何东西能与它矛盾**。
+    origin: { kind: entry, invokedAt: clock.now() },
     correlationId: ids.next("corr"),
     input: { task },
     agentSpec: {

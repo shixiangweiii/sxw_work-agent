@@ -249,6 +249,16 @@ export interface UiPending {
     command?: string;
     description?: string;
     allowNetwork?: boolean;
+    /**
+     * 这条命令**自称**要交付什么（ADR-0010 的 `artifact_path` / `artifact_role`）。
+     *
+     * 【定】它必须出现在审批面上。ADR-0010 选「执行前按路径声明」而不是
+     * 「执行后扫 workspace」，一半理由就是这个：路径在命令入参里，
+     * 于是人批准的不只是「跑这条命令」，还有「它自称要交付这个文件」。
+     * 不显示的话那半个理由就没兑现 —— 又一个「声明与实现不符」。
+     */
+    artifactPath?: string;
+    artifactRole?: string;
     /** 自动放行档位下为什么没放行。 */
     why?: string;
   };
@@ -334,6 +344,12 @@ export interface UiRunDetail {
   budgetAxes: UiBudgetAxis[];
   spec: {
     runSpecId: string;
+    /**
+     * 这个 Run 是谁发起的（`RunOrigin.kind`）。
+     * 它与 trace header 的 `entry` 说的是同一件事，两处必须一致 ——
+     * 曾经不一致：header 写 `web`，RunSpec 写 `CLI`。
+     */
+    origin: string;
     endpointId: string;
     modelId: string;
     endpointProfileRef: string;
@@ -357,6 +373,15 @@ export interface UiRunDetail {
     summary?: string;
     incompleteItems: Array<{ what: string; why: string }>;
     recoveryItems: Array<{ what: string; sideEffectState: string }>;
+    /**
+     * Runtime **最终判定**的交付集合（二次评审 codex P2-3）。
+     *
+     * 【定】它与 `artifacts`（本 Run 登记过的**全部**产物）不是一回事，
+     * 界面必须能分开显示。此前只有 `artifacts`，于是「哪几份是 Runtime
+     * 认定交付了的」在白盒界面上**根本看不到** —— 而那正是
+     * §17 的结论本身，也是这个界面存在的理由。
+     */
+    deliveredArtifactIds: string[];
   };
   /** 投影时两条轨道各读到多少条。缺口一眼可见（比如 `--no-trace` 跑的 Run）。 */
   tracks: { transcriptEntries: number; events: number; traceFile?: string };

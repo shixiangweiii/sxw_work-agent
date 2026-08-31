@@ -56,8 +56,116 @@ import { resolve } from "node:path";
 import type {
   ArtifactCheckOutcome,
   ArtifactCheckerPort,
+  ArtifactContent,
   ArtifactRecord,
 } from "@workagent/harness-runtime";
+
+/**
+ * 扩展名 → 产物 kind。**唯一一份**（ADR-0010）。
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ * 【定】它住在检查器旁边，因为 kind 的**全部意义**就是决定跑哪些检查器。
+ *
+ * `write_file` 原本有一个私有的 `kindOf`，`run_shell` 需要同一件事。
+ * 抄第二份的后果很具体：两个工具对同一个扩展名给出不同 kind → 跑不同检查器
+ * → 而两边都是绿的。读黑名单已经栽过一次「唯一事实源在两个实现里各说各话」
+ * （沙箱那侧实现的正是 read-guard 明确否决过的语义）。
+ *
+ * 【定】未知扩展名默认 `text`。二进制落进 text 会在编码检查上**翻红** ——
+ * 失败方向是看得见的，比默认 `binary`（什么都不检查、静默通过）好。
+ * ══════════════════════════════════════════════════════════════════════
+ */
+
+/**
+ * 二进制扩展名 → 文件头魔数（**任一命中即算通过**，`at` 是字节偏移）。
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ * 【定】`binary` 这个 kind 由**这张表的键**推出，不再单独维护一张扩展名表。
+ *
+ * 这条约束是二次评审（zcode F1）抓出来的一次**回归**逼出来的，形态值得记：
+ * ADR-0010 那一批新增了一张 `BINARY_EXTENSIONS`，把 jpg/png/pdf 路由到
+ * `kind:"binary"` —— 而检查器对 binary **一项结构检查都没有**，只跑磁盘 hash。
+ * 于是同一个坏文件的处境**比改之前更差**：
+ *
+ *     改之前：`.jpg` 落 text → 编码检查 → **翻红**（看得见）
+ *     改之后：`.jpg` 落 binary → 只有 hash → **静默通过** ＋ 进 deliveredArtifactIds
+ *
+ * 而当时那段注释亲手写着「默认 binary（什么都不检查、静默通过）更糟」——
+ * **那句话恰好论证了它自己为已知扩展名移除掉的性质。**
+ * 原任务（`curl` 无 `--fail` 把 404 页存成 `image_NN.jpg`）正好落在这个洞里。
+ *
+ * 【定】所以两者必须绑死：**没有魔数的扩展名不算 binary**，它落回 text 并在
+ * 编码检查上翻红。加一个扩展名却给不出魔数时，你得到的是一个看得见的失败，
+ * 而不是一个什么都不查的 kind。
+ *
+ * 【定】魔数只证明「文件头像这个类型」，**不证明它能解码**。
+ * 判据文案与工具 description 都必须照这个强度写 —— 同一批里
+ * 「zip 能不能解开」那句过度承诺就是这么来的（二次评审 codex P1-5）。
+ * ══════════════════════════════════════════════════════════════════════
+ */
+interface MagicRule {
+  /** 期望的字节序列。字符串按 latin1 取字节。 */
+  bytes: string | number[];
+  /** 偏移，默认 0。 */
+  at?: number;
+}
+
+const BINARY_MAGIC: Record<string, MagicRule[]> = {
+  png: [{ bytes: [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a] }],
+  jpg: [{ bytes: [0xff, 0xd8, 0xff] }],
+  jpeg: [{ bytes: [0xff, 0xd8, 0xff] }],
+  gif: [{ bytes: "GIF87a" }, { bytes: "GIF89a" }],
+  // RIFF 容器：头 4 字节相同，靠偏移 8 的 form type 区分
+  webp: [{ bytes: "WEBP", at: 8 }],
+  wav: [{ bytes: "WAVE", at: 8 }],
+  avi: [{ bytes: "AVI ", at: 8 }],
+  bmp: [{ bytes: "BM" }],
+  ico: [{ bytes: [0x00, 0x00, 0x01, 0x00] }],
+  tiff: [{ bytes: [0x49, 0x49, 0x2a, 0x00] }, { bytes: [0x4d, 0x4d, 0x00, 0x2a] }],
+  pdf: [{ bytes: "%PDF-" }],
+  gz: [{ bytes: [0x1f, 0x8b] }],
+  tgz: [{ bytes: [0x1f, 0x8b] }],
+  bz2: [{ bytes: "BZh" }],
+  xz: [{ bytes: [0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00] }],
+  "7z": [{ bytes: [0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c] }],
+  rar: [{ bytes: "Rar!" }],
+  // POSIX tar 的 magic 在偏移 257，前面是文件名 —— 这是表里唯一的深偏移项
+  tar: [{ bytes: "ustar", at: 257 }],
+  mp4: [{ bytes: "ftyp", at: 4 }],
+  mov: [{ bytes: "ftyp", at: 4 }, { bytes: "moov", at: 4 }, { bytes: "mdat", at: 4 }],
+  webm: [{ bytes: [0x1a, 0x45, 0xdf, 0xa3] }],
+  mp3: [
+    { bytes: "ID3" },
+    // 无 ID3 标签时是 MPEG frame sync：11 个 1 bit，第二字节高位有多种合法组合
+    { bytes: [0xff, 0xfb] }, { bytes: [0xff, 0xf3] }, { bytes: [0xff, 0xf2] }, { bytes: [0xff, 0xfa] },
+  ],
+  woff: [{ bytes: "wOFF" }],
+  woff2: [{ bytes: "wOF2" }],
+  ttf: [{ bytes: [0x00, 0x01, 0x00, 0x00] }, { bytes: "true" }],
+  otf: [{ bytes: "OTTO" }],
+  wasm: [{ bytes: [0x00, 0x61, 0x73, 0x6d] }],
+  sqlite: [{ bytes: "SQLite format 3 " }],
+  db: [{ bytes: "SQLite format 3 " }],
+  // 可执行 / 动态库：三个平台各自的头
+  so: [{ bytes: [0x7f, 0x45, 0x4c, 0x46] }],
+  exe: [{ bytes: "MZ" }],
+  dll: [{ bytes: "MZ" }],
+  dylib: [
+    { bytes: [0xfe, 0xed, 0xfa, 0xce] }, { bytes: [0xce, 0xfa, 0xed, 0xfe] },
+    { bytes: [0xfe, 0xed, 0xfa, 0xcf] }, { bytes: [0xcf, 0xfa, 0xed, 0xfe] },
+    { bytes: [0xca, 0xfe, 0xba, 0xbe] },
+  ],
+};
+
+export function artifactKindOf(path: string): string {
+  const lower = path.toLowerCase();
+  const ext = lower.includes(".") ? lower.slice(lower.lastIndexOf(".") + 1) : "";
+  if (ext === "json") return "json";
+  if (ext === "zip") return "zip";
+  // 【定】有魔数才算 binary。见上面那段 —— 这两件事绑死是这次回归的处置本身。
+  if (Object.prototype.hasOwnProperty.call(BINARY_MAGIC, ext)) return "binary";
+  return "text";
+}
 
 export interface CommonArtifactCheckerOptions {
   /**
@@ -73,7 +181,7 @@ export interface CommonArtifactCheckerOptions {
 export class CommonArtifactChecker implements ArtifactCheckerPort {
   constructor(private readonly opts: CommonArtifactCheckerOptions) {}
 
-  async check(record: ArtifactRecord, content: string): Promise<ArtifactCheckOutcome> {
+  async check(record: ArtifactRecord, content: ArtifactContent): Promise<ArtifactCheckOutcome> {
     const checksRun: string[] = [];
     const failures: string[] = [];
 
@@ -90,7 +198,15 @@ export class CommonArtifactChecker implements ArtifactCheckerPort {
     // ── ② 文本编码合法（对所有会被当文本读的 kind 都跑）
     if (record.kind !== "zip" && record.kind !== "binary") {
       checksRun.push("text-encoding-valid");
-      const bad = invalidTextReason(content);
+      /**
+       * 【定】字节要用**非 fatal** 的解码器转成字符串再判。
+       *
+       * 一个声明成 text 的产物如果实际是二进制，非 fatal 解码会产出 U+FFFD，
+       * 正好被 `invalidTextReason` 抓住 —— 这是我们要的结果。
+       * 换成 `fatal: true` 会在这里抛异常，那条路径上产物既没通过也没失败，
+       * 而「没验过」在结算时会表现成「没问题」。
+       */
+      const bad = invalidTextReason(asText(content));
       if (bad) failures.push(bad);
     }
 
@@ -98,7 +214,7 @@ export class CommonArtifactChecker implements ArtifactCheckerPort {
     if (record.kind === "json") {
       checksRun.push("json-parses");
       try {
-        JSON.parse(content);
+        JSON.parse(asText(content));
       } catch (err) {
         failures.push(`JSON 解析失败：${String((err as Error).message).slice(0, 160)}`);
       }
@@ -108,6 +224,21 @@ export class CommonArtifactChecker implements ArtifactCheckerPort {
     if (record.kind === "zip") {
       checksRun.push("zip-opens");
       const bad = zipStructureReason(content);
+      if (bad) failures.push(bad);
+    }
+
+    /**
+     * ── ⑤ 二进制文件头与扩展名相符（二次评审 zcode F1）────────────────────
+     *
+     * 【定】没有这一项时 `kind:"binary"` **一项结构检查都不跑**，
+     * 只剩磁盘 hash —— 而 hash 只证明「登记的字节 == 磁盘字节」，
+     * 对「它是不是一张图」一无所知。原任务里那条
+     * `curl -s -L`（无 `--fail`）把 404 页存成 `image_NN.jpg` 的失败形态，
+     * 正好从这里静默通过并进 `deliveredArtifactIds`。
+     */
+    if (record.kind === "binary") {
+      checksRun.push("binary-magic");
+      const bad = magicReason(record.path ?? record.logicalId, content);
       if (bad) failures.push(bad);
     }
 
@@ -180,8 +311,64 @@ function invalidTextReason(content: string): string | undefined {
  * 不引入解压库是刻意的：运行期依赖只有两个（§工程基线），
  * 为一条首批检查加一个依赖不划算，而魔数判定已经能抓住主要失败形态。
  */
-function zipStructureReason(content: string): string | undefined {
-  const buf = Buffer.from(content, "binary");
+/**
+ * 内容 → 可读的文本。
+ *
+ * 【定】非 fatal 解码：无效字节变 U+FFFD，正好被 `invalidTextReason` 抓住。
+ * 见 check() 里 ② 那段 —— fatal 会抛，而抛出去的产物「既没通过也没失败」。
+ */
+function asText(content: ArtifactContent): string {
+  return typeof content === "string" ? content : new TextDecoder("utf-8").decode(content);
+}
+
+/**
+ * 文件头是不是这个扩展名该有的样子。
+ *
+ * 【定】它回答的是「像不像」，**不是「能不能解码」**。
+ * 判据文案要照这个强度写 —— 同一批里「zip 能不能解开」那句过度承诺
+ * （检查器只判 `PK` ＋ EOCD）就是把「像」说成「能」造出来的。
+ *
+ * 【定】表里没有的扩展名走不到这里：`artifactKindOf` 只把**有魔数的**
+ * 扩展名判成 binary，其余落 text 并在编码检查上翻红。
+ */
+function magicReason(path: string, content: ArtifactContent): string | undefined {
+  const lower = path.toLowerCase();
+  const ext = lower.includes(".") ? lower.slice(lower.lastIndexOf(".") + 1) : "";
+  const rules = BINARY_MAGIC[ext];
+  // 理论上到不了（kind 就是由这张表推的），留着是为了这条判定自洽而不是靠调用顺序。
+  if (!rules) return undefined;
+
+  const buf = typeof content === "string" ? Buffer.from(content, "binary") : Buffer.from(content);
+  for (const rule of rules) {
+    const at = rule.at ?? 0;
+    const want = typeof rule.bytes === "string" ? Buffer.from(rule.bytes, "latin1") : Buffer.from(rule.bytes);
+    if (buf.byteLength < at + want.byteLength) continue;
+    if (buf.subarray(at, at + want.byteLength).equals(want)) return undefined;
+  }
+
+  /**
+   * 【定】诊断里要给出**实际看到的头**。
+   *
+   * 「魔数不对」这句话本身修不了任何东西；而「开头是 `<!DOCTYPE html`」
+   * 会立刻告诉人这是一个错误页被存成了图片 —— 那正是本条要抓的形态。
+   */
+  const head = buf.subarray(0, 16);
+  const printable = head.toString("latin1").replace(/[^\x20-\x7e]/g, ".");
+  return (
+    `文件头与扩展名 .${ext} 不符：开头 16 字节是 ${head.toString("hex")}（"${printable}"）。` +
+    `常见成因是下载失败时把错误页 / 空响应存成了目标文件（curl 少了 --fail）`
+  );
+}
+
+function zipStructureReason(content: ArtifactContent): string | undefined {
+  /**
+   * 【定】字节这一档必须原样用，不能再经字符串（ADR-0010）。
+   *
+   * 字符串那一档保留 `"binary"`（latin1）是为了兼容既有调用：
+   * 它是唯一能让一个字符串按字节往返的编码。而真正的二进制现在走
+   * `Uint8Array`，一个字节都不会变。
+   */
+  const buf = typeof content === "string" ? Buffer.from(content, "binary") : Buffer.from(content);
   if (buf.byteLength < 22) return "ZIP 太短（不足 22 字节），不可能是一个完整归档";
   if (!(buf[0] === 0x50 && buf[1] === 0x4b)) {
     return "ZIP 缺少 PK 魔数 —— 这不是一个 ZIP 文件";

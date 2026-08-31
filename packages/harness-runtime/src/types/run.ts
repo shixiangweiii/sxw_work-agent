@@ -170,10 +170,27 @@ export interface ArtifactCheckFact {
 
 // ───────────────────────────────────────────────────────── RunSpec
 
+/**
+ * 这个 Run 是**谁发起的**。
+ *
+ * ── 【定】`WEB` 是阶段 4 之后补上的，补它的理由值得写下来 ───────────────
+ *
+ * 阶段 4 加了白盒界面之后，Web 起的 Run 在 RunSpec 里**一律被记成 `CLI`** ——
+ * 因为 `makeRunSpec()` 把 `kind: "CLI"` 写死了，而 `workagent-service` 直接
+ * 复用它。这个字段在全仓有**一个生产者、零消费者**，于是没有任何东西能与
+ * 它矛盾：一个恒定的常量与一个正确的值，在「没人读」的前提下不可区分。
+ *
+ * 它不影响任何执行事实，但会污染 Replay、归档与**正式评测的归因** ——
+ * 决 4 把评测推到开发完成之后，那批数据读入口身份读的正是这里。
+ *
+ * 【定】判据在 `verify:ui`：Web 起的 Run 的 `origin.kind` 必须是 `WEB`。
+ * 判据比枚举值本身重要 —— 补一个枚举值容易，让它不再退回常量要靠那条判据。
+ */
 export type RunOrigin =
   | { kind: "SESSION_MESSAGE"; sessionId: SessionId; messageId: string }
   | { kind: "EVAL"; caseId: string }
-  | { kind: "CLI"; invokedAt: Timestamp };
+  | { kind: "CLI"; invokedAt: Timestamp }
+  | { kind: "WEB"; invokedAt: Timestamp };
 
 export interface RunInput {
   task: string;

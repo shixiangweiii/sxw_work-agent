@@ -151,7 +151,23 @@ function splitArtifactChecks(facts: ArtifactCheckFact[]): {
 
   for (const f of facts) {
     if (f.ok) {
-      if (!delivered.includes(f.artifactId)) delivered.push(f.artifactId);
+      /**
+       * 【定】只有 `DELIVERABLE` 进 `deliveredArtifactIds`（二次评审 codex P2-3）。
+       *
+       * 原实现对任何 `ok` 的产物一律 push，于是一个显式声明为 `INTERMEDIATE`
+       * 的中间产物会出现在「交付物」清单里 —— 实测：`verify:artifact` E 段的
+       * `notes.txt`（INTERMEDIATE）就在里面。
+       *
+       * `INTERMEDIATE` 这个词的**全部含义**就是「它不是要交的东西」；
+       * 把它列进交付集合，等于让 role 在失败方向上有意义（检查失败时分流）、
+       * 在成功方向上没意义 —— 而 §17 的 Deliverable 语义两个方向都要成立。
+       *
+       * 【定】`RESULT` 也不进。它与 `INTERMEDIATE` 在失败分流上同档，
+       * 这里保持同一条线，别让第三个值有第三种行为。
+       */
+      if (f.role === "DELIVERABLE" && !delivered.includes(f.artifactId)) {
+        delivered.push(f.artifactId);
+      }
       continue;
     }
     const item: IncompleteItem = {

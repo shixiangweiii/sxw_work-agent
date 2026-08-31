@@ -34,12 +34,16 @@ import type {
   ToolSnapshot,
 } from "@workagent/harness-runtime";
 import { asId, makeError } from "@workagent/harness-runtime";
+import { artifactKindOf } from "../artifact-checks/index.js";
 import { classifyFsError, isInsideWorkspace, outsideWorkspaceError, resolveToolPath } from "./fs-common.js";
 
 export const writeFileDefinition: ToolDefinition = {
   id: asId("tool_write_file"),
-  version: "1.0.0",
+  version: "1.1.0",
   name: "write_file",
+  // 1.1.0：`kindOf` 改为共享的 `artifactKindOf`，`.png` 这类扩展名从
+  // `text` 变成 `binary` —— **跑的检查器变了**，是语义变化。
+  // 升版本的意义见 run-shell.ts 同一处的【定】（contentHash 目前零消费者）。
   description:
     "把一段文本写入文件，**覆盖**已有内容。path 相对于 workspace 根目录，" +
     "必须落在 workspace 内（写操作不允许越界）。父目录会自动创建。" +
@@ -123,13 +127,13 @@ export const writeFileDefinition: ToolDefinition = {
  * 【定】只认后缀，**不看内容**。看内容去猜类型的话，一份坏掉的 JSON
  * 会被判成 text 从而跳过 JSON 检查 —— 而那恰恰是最需要被抓住的情况：
  * 检查器会在最该报警的时候安静下来。
+ *
+ * 【定】实现搬去了 `artifact-checks/artifactKindOf`，这里只留转发（ADR-0010）。
+ * 搬家的理由：`run_shell` 也要推 kind，而这张表抄第二份的后果是
+ * 两个工具对同一个扩展名跑不同的检查器，**且两边都是绿的**。
+ * 它住在检查器旁边是因为 kind 的全部意义就是决定跑哪些检查器。
  */
-function kindOf(path: string): string {
-  const lower = path.toLowerCase();
-  if (lower.endsWith(".json")) return "json";
-  if (lower.endsWith(".zip")) return "zip";
-  return "text";
-}
+const kindOf = artifactKindOf;
 
 export async function executeWriteFile(
   input: { path: string; content: string; artifact_role?: string },

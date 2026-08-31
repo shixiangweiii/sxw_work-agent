@@ -222,14 +222,35 @@ function interactiveApproval(
       const desc = typeof input["description"] === "string" ? input["description"] : "";
       console.log(`\n  \x1b[33m即将执行的命令\x1b[0m${desc ? `（${forTerminal(desc)}）` : ""}：`);
       for (const l of forTerminal(cmd).split("\n")) console.log(`    \x1b[1m${l}\x1b[0m`);
-      console.log(`  沙箱：只能写 workspace；${
+      // 【定】这一行与 `run_shell` 的 description ①、Web 审批卡是**同一句话的三处**，
+      // 必须一起改。分叉过一次：description 承诺「系统临时目录」而实现只放行
+      // per-call 的 $TMPDIR，模型照着写 /tmp 白花一轮（见 run-shell.ts 的说明）。
+      console.log(`  沙箱：只能写 workspace 与本次调用的 $TMPDIR；${
         input["allow_network"] === true ? "\x1b[31m本次允许联网\x1b[0m" : "禁止联网"
       }`);
+      // 这条命令自称要交付什么（ADR-0010）。与 Web 审批卡同一份内容 ——
+      // 人批准的不只是「跑这条命令」，还有「它自称要交付这个文件」。
+      if (typeof input["artifact_path"] === "string" && input["artifact_path"] !== "") {
+        const role = input["artifact_role"] === "INTERMEDIATE" ? "INTERMEDIATE" : "DELIVERABLE";
+        console.log(`  声明的交付物：${forTerminal(String(input["artifact_path"]))}（${role}）`);
+      }
     }
     stdin.setMode("WAITING_FOR_APPROVAL");
     try {
+      /**
+       * 【定】`scope.value` 也要剥（二次评审 codex P2-5）。
+       *
+       * 上面的命令原文与描述早就走了 `forTerminal()`，而**真正等输入的这一行**
+       * 一直在直接插原始 `e.scope.value` —— 而它同样含模型给的内容：
+       * PROCESS scope 是切出来的程序名、FILE / DIRECTORY scope 是模型给的路径。
+       * 一个 ANSI 清屏或双向覆盖序列可以把上面刚打印的、剥过的命令整段盖掉，
+       * 于是「剥了三处、漏了最后一处」等于没剥 —— 人最后看到的就是这一行。
+       *
+       * Web 侧 `scopeValue` 从阶段 4 收口起就是剥过的；两个入口的安全语义
+       * 必须一致，否则「CLI 更不安全」这件事没有任何地方会说出来。
+       */
       const line = await stdin.askLine(
-        `${prefix}  是否允许 ${a.toolName} 执行 ${e.effectType} → ${e.scope.value} ？[y/N] `,
+        `${prefix}  是否允许 ${a.toolName} 执行 ${e.effectType} → ${forTerminal(e.scope.value)} ？[y/N] `,
         signal,
       );
       if (line === undefined) {

@@ -199,13 +199,62 @@ export function analyzeCommand(command: string): CommandAnalysis {
  * 写清这一条是因为一个「差不多能切对」的切分器很容易被后人误当成安全组件。
  */
 function extractPrograms(command: string): string[] {
-  const segments = command.split(/\|\||&&|[|&;\n\r()]/);
+  /**
+   * 【定】先把**引号内容**抹掉，再切分。
+   *
+   * 噪声的绝大部分来自这里：`-H "User-Agent: Mozilla/5.0 (Windows NT 10.0;
+   * Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) …"` 被按空白和 `()`
+   * 切开之后，`Win64` / `x64` / `KHTML,` / `AppleWebKit/537.36` 全部变成了
+   * 「程序名」，一条 curl 命令的审计串因此有十来项而其中只有一项是真的。
+   *
+   * 抹掉引号内容是**精确**的（引号内本来就不可能是程序名），
+   * 不是「差不多能切对」的启发式 —— 那类代码正是本仓不信任的一类。
+   * 代价：`"ls" -la` 这种把程序名括起来的写法会从审计串里消失。
+   * 那是**显示面**的损失，判定不受影响（见 couldBeProgramName 的说明）。
+   */
+  const unquoted = command.replace(/'[^']*'|"[^"]*"/g, " ");
+  const segments = unquoted.split(/\|\||&&|[|&;\n\r()]/);
   const found = new Set<string>();
   for (const seg of segments) {
     const tokens = seg.trim().split(/\s+/).filter(Boolean);
     // 跳过前置环境变量赋值，取第一个真正的词
     const prog = tokens.find((t) => !t.includes("="));
-    if (prog) found.add(prog);
+    if (prog !== undefined && couldBeProgramName(prog)) found.add(prog);
   }
   return [...found].sort();
+}
+
+/**
+ * 这个词有没有可能是一个程序名。
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ * 【定】它**只做减法，不改变任何判定** —— `analyzeCommand` 的只读判定走的是
+ * 「无元字符 ＋ argv[0] 在白名单」那条路径，从不读 `programs`（见上面那段）。
+ * 所以这里多丢一个词的代价是审计串少一项，**不可能**放松任何闸门。
+ * 这一条必须成立，否则这个过滤就不能加。
+ *
+ * ── 为什么要加（Run `run_75f0d6afafa6` 实测）────────────────────────────
+ *
+ * 一条下载 11 张图的命令，切分结果把**11 个完整 CDN URL** 当成了程序名，
+ * 原样写进 `ResolvedEffect.scope.value` → `ActionProposed` / `ApprovalRequested`
+ * → JSONL。而同一个 resolver 的 `dataMovement` 处有一条【定】写着：
+ * 「只记去向类别，不记命令原文 —— 抄进 Trace 等于让审计记录自己变成
+ * 第二个泄漏点」。**同一个文件里两条规则打架**，URL 从另一个口子全进去了。
+ *
+ * 今天泄漏的只是公开 URL，代价是审批串没法看；等 URL 带上签名或 token，
+ * 代价就变成凭证被持久化，而那时不会有任何征兆。
+ *
+ * 判据在 `verify:shell` A 段：effect 的 scope.value 里不得出现 `://`。
+ * ══════════════════════════════════════════════════════════════════════
+ */
+function couldBeProgramName(token: string): boolean {
+  // URL —— 最典型的一类，也是唯一会把敏感参数带进 Trace 的一类。
+  if (token.includes("://")) return false;
+  /**
+   * 纯标点碎片。`-H "User-Agent: …"` 与正则里的引号被空白切开之后，
+   * 会留下 `'`、`"`、`,` 这种单字符「程序名」。它们不是泄漏，只是噪声 ——
+   * 但噪声会稀释人对这一行的信任，而这一行是 EXECUTE 唯一的人工边界。
+   */
+  if (!/[A-Za-z0-9_]/.test(token)) return false;
+  return true;
 }

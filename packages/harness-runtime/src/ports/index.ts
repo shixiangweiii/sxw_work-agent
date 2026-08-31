@@ -228,15 +228,34 @@ export interface ToolExecutionOutcome {
   artifact?: ProducedArtifact;
 }
 
+/**
+ * 产物内容。
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ * 【定】`Uint8Array` 这一档是 ADR-0010 加的，理由不是「顺便支持一下二进制」。
+ *
+ * 在此之前它只有 `string`，后果是**整条产物通道在类型层就装不下二进制**：
+ * 一个 58MB 的 zip 交付物进不了 `artifacts` 表，于是
+ * `deliveredArtifactIds` 恒空、`kind:"zip"` 那个检查器**没有任何生产者**
+ * （实测 Run `run_75f0d6afafa6`：产物完全正确，而 Harness 手里零事实）。
+ *
+ * 【定】不要为了省事把二进制按字符串传。`artifact-store` 算的是
+ * `sha256(content, "utf8")`，而第二层检查读的是**磁盘上那一份**的字节 ——
+ * 二进制经一次 UTF-8 往返之后两者必然不等，`DELIVERABLE` 检查失败会按
+ * §1.2 第 3 条结算 `FAILED`：**一个把交付物做对了的 Run 会被判成失败。**
+ * ══════════════════════════════════════════════════════════════════════
+ */
+export type ArtifactContent = string | Uint8Array;
+
 /** 工具产出的交付物。Runtime 拿它去 `ArtifactStorePort.register()`。 */
 export interface ProducedArtifact {
   /** 逻辑身份，通常就是 workspace 内的相对路径。同一个 logicalId 形成版本链。 */
   logicalId: string;
   role: ArtifactRole;
-  /** 产物类型，决定跑哪些检查器（json / zip / text / …）。 */
+  /** 产物类型，决定跑哪些检查器（json / zip / binary / text / …）。 */
   kind: string;
   path?: string;
-  content: string;
+  content: ArtifactContent;
   derivedFrom?: string[];
 }
 
@@ -524,7 +543,8 @@ export interface ArtifactRegistration {
   kind: string;
   /** workspace 内的相对路径。不落盘的产物可以没有。 */
   path?: string;
-  content: string;
+  /** 【定】字节这一档见 `ArtifactContent` —— 按字符串传二进制会把 Run 判成 FAILED。 */
+  content: ArtifactContent;
   /** lineage：从哪些 artifact 派生而来。 */
   derivedFrom?: string[];
 }
@@ -604,7 +624,12 @@ export interface RuntimePorts {
  * 回归评测 §5.1 那次误判就是把逐 Run 变化的用户要求写死成硬门槛的现场。
  */
 export interface ArtifactCheckerPort {
-  check(record: ArtifactRecord, content: string): Promise<ArtifactCheckOutcome>;
+  /**
+   * 【定】`content` 是**工具交上来的那一份**，而第 ① 项检查读的是**磁盘上那一份**。
+   * 两次独立取数不一致就红 —— 这是这道闸门有判别力的全部来源，
+   * 不要改成拿 `content` 重算 hash 去比 `record.contentHash`（同源，恒真）。
+   */
+  check(record: ArtifactRecord, content: ArtifactContent): Promise<ArtifactCheckOutcome>;
 }
 
 export interface ArtifactCheckOutcome {

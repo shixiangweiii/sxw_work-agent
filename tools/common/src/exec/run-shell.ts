@@ -32,14 +32,18 @@ import { spawn } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
 import { tmpdir } from "node:os";
 import { mkdtempSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { readFile, stat } from "node:fs/promises";
+import { isAbsolute, join, normalize } from "node:path";
 import type {
+  ProducedArtifact,
   ToolDefinition,
   ToolExecutionContext,
   ToolExecutionOutcome,
   ToolSnapshot,
 } from "@workagent/harness-runtime";
 import { asId, makeError } from "@workagent/harness-runtime";
+import { artifactKindOf } from "../artifact-checks/index.js";
+import { isInsideWorkspace, resolveToolPath } from "../fs/fs-common.js";
 import { SHELL_RESOLVER_REF } from "./shell-effect-resolver.js";
 import { SANDBOX_EXEC, buildSandboxProfile, isSandboxAvailable } from "./sandbox.js";
 
@@ -103,17 +107,83 @@ const EXIT_SEMANTICS: Record<string, (code: number) => { isError: boolean; note?
 
 export const runShellDefinition: ToolDefinition = {
   id: asId("tool_run_shell"),
-  version: "1.0.0",
+  /**
+   * 1.1.0：新增 `artifact_path` / `artifact_role`，并改变了执行后的行为
+   * （读回字节登记产物、执行前拍快照）—— 入参与语义都变了，版本必须动。
+   *
+   * ⚠️ 【定】升它是**卫生**，不是修好了什么：`ToolSnapshot.contentHash`
+   * （= `name@version`）在 Runtime 里**零消费者**，全仓只有类型声明那一处。
+   * 也就是说今天没有任何东西会因为版本不变而漏报漂移 ——
+   * 二次评审说「旧 Run Resume/Replay 无法检测语义漂移」时假设了一个
+   * 并不存在的检测器。**真正的缺口是那个字段没接线**（S3-1 同族），
+   * 登记在 S5-8；在它接上之前，版本号只对读代码的人有意义。
+   */
+  version: "1.1.0",
   name: "run_shell",
+  /**
+   * ── 【定】① 这一条是**承诺**，必须与 `sandbox.ts` 放行的范围逐字对齐 ──
+   *
+   * 它原本写的是「只能写 workspace 目录和**系统临时目录**」，而 R-8
+   * （阶段 3.5 收口）把 tmp 收窄成了 per-call 的 `mkdtemp` 目录并把
+   * `TMPDIR` 指过去 —— **这句话没有跟着改**。真实端点实跑撞出来的
+   * （Run `run_75f0d6afafa6` 第 7 轮）：模型照着这句话写
+   *
+   *     curl -s … -o /tmp/bili_article.html ; wc -c /tmp/bili_article.html
+   *
+   * 沙箱拒了写，`curl -s` 把错误吞掉，模型只看到「文件不存在」，
+   * 白花一轮才换到 workspace。**模型是按文档办事的，错的是文档。**
+   *
+   * 这是本仓反复猎杀的「声明与实现不符」的又一个形态：上一次藏在
+   * `MAX_TIMEOUT_MS` 与 `timeoutPolicy` 两个常量之间，这次藏在一次
+   * 正确的收窄修复留下的一句旧承诺里 —— 收窄的人不会想到去改文案，
+   * 而模型是这句话唯一的读者。
+   *
+   * 判据在 `verify:shell` B7，**双侧**：`$TMPDIR` 写得进、`/tmp` 写不进。
+   * 只验一侧不行 —— 见 `sandbox.ts` 文件头那条（一个拒绝一切的沙箱与一个
+   * 正确的沙箱，在「越界写被拦」那条判据下不可区分）。
+   *
+   * ── 「批量操作请让它能失败」那两句：**故意没有机械判据** ────────────────
+   *
+   * 它补的是同一次实测里的另一半（Run `run_75f0d6afafa6` 第 12 轮）：
+   * 11 张图的下载循环用 `curl -s -L`，没有 `--fail`、没有 `set -euo pipefail`、
+   * 没有「恰好 11 项」的断言。那次 11 个 URL 恰好全有效，**是侥幸不是机制**。
+   * 同一条轨迹里已经有判别样本：第 6 轮 `grep -P` 报错，末端的 `sort` 把
+   * 管道退出码变成 0，工具如实报了 `exitCode:0`。
+   *
+   * 【定】不要为这两句加「description 里必须出现某个词」的判据。
+   * 摸底考试 B 组已经拒绝过那类判据：它测的是措辞在不在，而**要改变的是
+   * 模型的行为**，两者之间没有机械关系。这两句只能靠 live 复跑验证
+   * （同一道题跑几次，看下载循环里有没有 `--fail` / `pipefail`）。
+   *
+   * 也不要把它挪到 Runtime 里去「替模型加上 set -e」—— 那是替用户改写他
+   * 已经审批过的命令，审批看到的与真正执行的从此不是同一条。
+   *
+   * ── `artifact_path` 的措辞：**不要把「像」说成「能」**（二次评审 codex P1-5）──
+   *
+   * 它第一版写的是「按类型做结构检查（**zip 能不能解开**、…）」，而
+   * `artifact-checks` 自己的【定】写着「只做**结构**判定，不真的解压」——
+   * 实际只判 `PK` 魔数与末尾 66KiB 内的 EOCD。
+   *
+   * 【定】这是上面 M1 那一类（声明与实现不符）**在同一批里被我自己复制了一遍**，
+   * 而读者同样是模型。检查器的强度是什么，这里就写什么：
+   * 头尾结构完整、能解析、文件头相符 —— 一条都不等于「内容是对的」。
+   */
   description:
     "在受限沙箱里执行一条 shell 命令（bash -c）。用它来打包/解包（zip、tar）、" +
     "创建或删除文件与目录、跑构建与测试、以及任何没有专用工具的操作。" +
     "沙箱规则（都由内核强制，绕不过去，请照着规划命令）：" +
-    "① 只能写 workspace 目录和系统临时目录，往别处写会失败；" +
+    "① 只能写两个地方：workspace 目录，以及本次调用私有的临时目录 —— " +
+    "要用临时目录就写 $TMPDIR（它已指向那个目录），**不要写 /tmp 或 /var/tmp**，" +
+    "那里写不进去，而 curl -o、tee 这类程序失败时往往不出声；" +
+    "临时目录每次调用都是新的，不跨调用保留，要跨步骤留东西就写在 workspace 里；" +
     "② 读不到凭证文件（.env、.ssh、.aws 等）；" +
     "③ 默认禁止联网，需要联网必须显式传 allow_network=true；" +
     "④ 工作目录固定是 workspace 根，且不跨调用保留 —— 上一次的 cd 对这一次无效，" +
     "要换目录就在同一条命令里写 cd。" +
+    "批量操作（下载/转换/打包一组文件）请让它**能失败**：开头写 set -euo pipefail，" +
+    "curl 加 --fail，结尾断言产出数量与预期一致。" +
+    "管道的退出码只取决于**最后**一条命令，前面的失败会被吞掉 —— " +
+    "不这么写的话，某一项失败时命令照样退出 0，你会把一个不完整的结果当成完成。" +
     '返回 JSON：{"exitCode","stdout","stderr","truncated","durationMs","note"}。' +
     "命令返回非零退出码不算工具故障，看 exitCode 字段判断。",
   inputSchema: {
@@ -131,6 +201,24 @@ export const runShellDefinition: ToolDefinition = {
       allow_network: {
         type: "boolean",
         description: "是否允许这条命令联网。默认 false。开启后本次调用会被记为数据外发",
+      },
+      artifact_path: {
+        type: "string",
+        description:
+          "这条命令要产出的交付物路径（相对 workspace 根）。声明了它，命令成功后系统会" +
+          "登记这个文件并按类型做结构检查（zip 的头尾结构完整、JSON 能解析、" +
+          "图片等二进制的文件头与扩展名相符、登记内容与磁盘一致），" +
+          "检查通过才会计入本次任务的交付物。**打包、导出、生成文件这类任务请填它** —— " +
+          "不填的话系统无法证明你交付的东西是好的，只能相信你的自述。" +
+          "注意这些是**结构**检查，不解压也不解码 —— 内容对不对仍然由你负责。",
+      },
+      // 【定】取值写进 description，不写 `enum` —— `JsonSchemaProperty` 里没有那个字段，
+      // 与 write_file 的 artifact_role 保持同一种写法（两处措辞是成对的）。
+      artifact_role: {
+        type: "string",
+        description:
+          'artifact_path 的角色："DELIVERABLE"（用户要的最终交付物，检查不通过会判任务失败）' +
+          '或 "INTERMEDIATE"（中间产物）。不填按 DELIVERABLE 处理',
       },
     },
     required: ["command"],
@@ -197,8 +285,27 @@ export const runShellDefinition: ToolDefinition = {
   recoveryObservation: { kind: "TARGET_EXISTS", requiresPreFingerprint: true },
 };
 
+/**
+ * 一次登记最多读多大的文件进内存（ADR-0010 接受的代价）。
+ *
+ * 【定】超过就**不登记 ＋ 显式说明**，不是静默跳过。
+ * 静默跳过的后果 S3-27 已经写过一次：「未登记时 trace 里没有任何
+ * 『跳过了检查』的信号 —— 静默 = 通过」。
+ *
+ * 这个数字是拍的，没有证据。要支持更大的产物得改成从磁盘流式算 hash，
+ * 而那要先解决「存储层不认识 workspaceRoot」（ADR-0010 方案 C）。
+ */
+const MAX_ARTIFACT_BYTES = 256 * 1024 * 1024;
+
 export async function executeRunShell(
-  input: { command: string; description?: string; timeout_ms?: number; allow_network?: boolean },
+  input: {
+    command: string;
+    description?: string;
+    timeout_ms?: number;
+    allow_network?: boolean;
+    artifact_path?: string;
+    artifact_role?: string;
+  },
   ctx: ToolExecutionContext,
 ): Promise<ToolExecutionOutcome> {
   /**
@@ -229,6 +336,27 @@ export async function executeRunShell(
 
   const timeoutMs = clampTimeout(input.timeout_ms);
   const allowNetwork = input.allow_network === true;
+
+  /**
+   * ── 【定】声明了产物就先拍一张**执行前**的快照（二次评审 codex P1-2）────
+   *
+   * 没有它的话，`collectDeclaredArtifact` 只能看到「命令跑完之后那个路径上
+   * 有个文件」，而分不出两件完全不同的事：
+   *
+   *   这次生成的        ← 真交付物
+   *   本来就在那，命令根本没碰它  ← **冒认**
+   *
+   * 后者不是假想：workspace 里留着上一次任务的 `images.zip`，这次的命令
+   * 前半段失败而整体退出码是 0（管道 / 无 `set -e`，正是 M5 那条），
+   * 旧 zip 就会被登记、验证、并作为本 Run 的交付物交出去 —— 而它连
+   * 结构检查都能过，因为它本来就是个好 zip。
+   *
+   * 【定】指纹用 `mtimeMs + size`，**不是**仓里 `FileFingerprint` 那个内容 hash。
+   * 这里不是偷懒：要答的是「命令碰没碰它」，而内容 hash 会把
+   * 「重新生成出逐字节相同的产物」误判成「没生成」—— 那是错的方向。
+   * 顺带也避免了为拍快照去读一个可能很大的旧文件。
+   */
+  const preSnapshot = await snapshotForArtifact(input.artifact_path, ctx.workspaceRoot);
 
   // per-run 临时目录：zip / tar / git 这类工具不能写 tmp 就直接失败。
   const tmpDir = mkdtempSync(join(tmpdir(), "wa-shell-"));
@@ -384,6 +512,7 @@ export async function executeRunShell(
     });
 
     child.on("close", (code, signal) => {
+      void (async () => {
       const durationMs = Date.now() - started;
 
       if (killedBy) {
@@ -436,6 +565,18 @@ export async function executeRunShell(
       const exitCode = code ?? -1;
       const semantics = semanticsFor(input.command, exitCode);
 
+      /**
+       * ── 声明的交付物：读回字节交给 Runtime 登记（ADR-0010）────────────
+       *
+       * 【定】路径是**执行前**声明的（在命令入参里，人在审批时就看得见），
+       * Runtime 仍然不扫 workspace、不从 output 里猜 —— §17 语义 1 不松动。
+       *
+       * 【定】拿不到产物的四种情形**都要说话**，一条都不能静默跳过。
+       * S3-27 已经记过一次这个形态：「未登记时 trace 里没有任何『跳过了检查』
+       * 的信号 —— 静默 = 通过」。所以下面每条分支都产出 `artifactNote`。
+       */
+      const declared = await collectDeclaredArtifact(input, ctx, exitCode, preSnapshot);
+
       const body = {
         exitCode,
         ...(signal ? { signal } : {}),
@@ -445,6 +586,7 @@ export async function executeRunShell(
         ...(truncated ? { truncatedNote: `单流输出超过 ${MAX_STREAM_CHARS} 字符，已截断。` } : {}),
         durationMs,
         ...(semantics.note ? { note: semantics.note } : {}),
+        ...(declared.note ? { artifactNote: declared.note } : {}),
       };
 
       /**
@@ -463,9 +605,154 @@ export async function executeRunShell(
          * 「命令失败了所以没有副作用」是错的：`rm a b c` 删了 a 才在 b 上失败。
          */
         sideEffectState: "APPLIED",
+        ...(declared.artifact ? { artifact: declared.artifact } : {}),
       });
+      })();
     });
   });
+}
+
+/**
+ * 把声明的交付物读回成字节。
+ *
+ * 【定】读的是**磁盘上那一份**，而第二层检查会再独立读一次去比 hash
+ * （`artifact-checks` 第 ① 项）。两次取数之间文件被改过就会红 ——
+ * 这道闸门的判别力全部来自「两次独立取数」，不要改成让工具自报 hash。
+ */
+async function collectDeclaredArtifact(
+  input: { artifact_path?: string; artifact_role?: string },
+  ctx: ToolExecutionContext,
+  exitCode: number,
+  pre: PreSnapshot | undefined,
+): Promise<{ artifact?: ProducedArtifact; note?: string }> {
+  const rel = normalizeArtifactPath(input.artifact_path);
+  if (rel === "") return {};
+
+  // 【定】只认 DELIVERABLE / INTERMEDIATE，与 write_file 同一条纪律。
+  // 不填按 DELIVERABLE —— 会专门去声明产物路径的人要的就是交付物，
+  // 而把它降级成 INTERMEDIATE 会顺带把「检查失败判 FAILED」这条强制力也降掉。
+  const role = input.artifact_role === "INTERMEDIATE" ? "INTERMEDIATE" : "DELIVERABLE";
+
+  if (exitCode !== 0) {
+    return { note: `声明了交付物 ${rel}，但命令以 exitCode=${exitCode} 结束，未登记。` };
+  }
+
+  const abs = resolveToolPath(ctx.workspaceRoot, rel);
+  if (!isInsideWorkspace(ctx.workspaceRoot, abs)) {
+    return { note: `声明的交付物 ${rel} 不在 workspace 内，未登记。` };
+  }
+
+  let bytes: Buffer;
+  try {
+    const info = await stat(abs);
+    if (!info.isFile()) return { note: `声明的交付物 ${rel} 不是一个普通文件，未登记。` };
+    /**
+     * 【定】命令没碰过它 ⇒ **不登记**（二次评审 codex P1-2）。
+     *
+     * 判据是执行前后的 `mtimeMs + size` 完全没变，而它执行前就存在 ——
+     * 那说明这个文件不是本次产出的，登记它等于把上一次任务留下的旧产物
+     * 冒认成本 Run 的交付物。它甚至能通过全部结构检查，**因为它本来就是好的**。
+     *
+     * 失败方向定在「拒绝 ＋ 说清楚」这一侧：模型看到这句话可以去重新生成，
+     * 或者承认自己那条命令什么都没做。反过来（默默登记）没有任何东西会说话。
+     */
+    if (pre?.existed === true && pre.size === info.size && pre.mtimeMs === info.mtimeMs) {
+      return {
+        note:
+          `声明的交付物 ${rel} 在命令执行前就存在，且执行前后大小与修改时间完全没变 —— ` +
+          `这条命令没有产出它，未登记。要交付它就先真的生成一次；` +
+          `如果它确实是上一步产出的，请在产出它的那条命令上声明。`,
+      };
+    }
+    if (info.size > MAX_ARTIFACT_BYTES) {
+      return {
+        note:
+          `声明的交付物 ${rel} 有 ${info.size} 字节，超过登记上限 ${MAX_ARTIFACT_BYTES}，未登记。` +
+          `文件本身还在，只是这次没有产物级检查。`,
+      };
+    }
+    bytes = await readFile(abs);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code ?? "未知错误";
+    /**
+     * 【定】这一条最值得说清楚：命令**成功了**，而它声称要产出的东西不在。
+     * 那多半意味着命令做的事和它自己描述的不是一回事 —— 模型需要看到这句话，
+     * 而不是看到一个干干净净的成功。
+     */
+    return { note: `命令成功了，但声明的交付物 ${rel} 读不到（${code}），未登记。` };
+  }
+
+  return {
+    // 覆盖掉一个已存在的文件是合法的（重新打包），但它值得在审计里留一句 ——
+    // 「产物是新建的」与「产物盖掉了别人的东西」对事后追查不是一回事。
+    ...(pre?.existed === true
+      ? { note: `交付物 ${rel} 覆盖了执行前就存在的同名文件（${pre.size} 字节 → ${bytes.byteLength} 字节）。` }
+      : {}),
+    artifact: {
+      // logicalId 用相对路径：同一个文件被改两次形成版本链（与 write_file 同口径）。
+      logicalId: rel,
+      role,
+      kind: artifactKindOf(rel),
+      path: rel,
+      content: bytes,
+    },
+  };
+}
+
+/** 执行前那一眼。见 `executeRunShell` 里 `preSnapshot` 那段的【定】。 */
+interface PreSnapshot {
+  existed: boolean;
+  size: number;
+  mtimeMs: number;
+}
+
+/**
+ * 执行**前**给声明的产物路径拍一张快照。
+ *
+ * 【定】任何失败都返回 `undefined`（＝「没拍到」），不抛也不猜。
+ * 拍不到时 `collectDeclaredArtifact` 会退回到「只要文件在就登记」的老行为 ——
+ * 那是**放松**的方向，所以这里的失败必须是可解释的：越界路径在下游还会
+ * 被 `isInsideWorkspace` 拦一次，其余情形（权限、竞态）拍不到就是拍不到。
+ */
+async function snapshotForArtifact(
+  artifactPath: string | undefined,
+  workspaceRoot: string,
+): Promise<PreSnapshot | undefined> {
+  const rel = normalizeArtifactPath(artifactPath);
+  if (rel === "") return undefined;
+  try {
+    const abs = resolveToolPath(workspaceRoot, rel);
+    const info = await stat(abs);
+    if (!info.isFile()) return undefined;
+    return { existed: true, size: info.size, mtimeMs: info.mtimeMs };
+  } catch (err) {
+    // 【定】ENOENT 是一个**有效**的起始状态（「本来没有」），与 snapshotFile 同口径。
+    // 它正是最常见、也最该被记下来的那一种：产物确实是这次新建的。
+    if ((err as NodeJS.ErrnoException)?.code === "ENOENT") {
+      return { existed: false, size: 0, mtimeMs: 0 };
+    }
+    return undefined;
+  }
+}
+
+/**
+ * 归一化声明的产物路径（二次评审 zcode F4）。
+ *
+ * 【定】`logicalId` 是版本链的身份。不归一化的话，`images.zip`、
+ * `./images.zip`、`images/../images.zip` 会形成**三条互不相干的版本链**，
+ * 指向同一个文件 —— 而「同一个文件被改了两次」正是版本链存在的理由。
+ *
+ * 【定】只做无歧义的化简（`./`、`a/../b`、重复斜杠），**不做**把绝对路径
+ * 折成相对这种猜测：越界与否交给下游的 `isInsideWorkspace` 用 realpath 判，
+ * 这里猜一次等于多一道口径不同的边界判定。
+ */
+function normalizeArtifactPath(raw: string | undefined): string {
+  const s = typeof raw === "string" ? raw.trim() : "";
+  if (s === "") return "";
+  if (isAbsolute(s)) return s;
+  const normalized = normalize(s);
+  // `normalize` 会留下 `./` 前缀之外的形态，这里再削一次开头的 `./`
+  return normalized.startsWith("./") ? normalized.slice(2) : normalized;
 }
 
 /**

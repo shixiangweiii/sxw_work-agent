@@ -197,6 +197,17 @@ export class PendingHub {
                   ? { description: show(input["description"]) }
                   : {}),
                 allowNetwork: input["allow_network"] === true,
+                /**
+                 * 这条命令自称要交付什么（ADR-0010）。剥控制字符 ——
+                 * 它和 command 一样完全由模型给，同一条理由。
+                 */
+                ...(typeof input["artifact_path"] === "string"
+                  ? {
+                      artifactPath: show(input["artifact_path"]),
+                      artifactRole:
+                        input["artifact_role"] === "INTERMEDIATE" ? "INTERMEDIATE" : "DELIVERABLE",
+                    }
+                  : {}),
               }
             : {}),
         },

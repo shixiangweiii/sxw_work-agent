@@ -243,6 +243,72 @@ async function main(): Promise<void> {
       : "两条不同命令的 digest 相同：Progress Guard 分不出「换参数重试」与「原地打转」",
   );
 
+  /**
+   * ── effect 的 scope.value 不得把命令内容抄进去 ────────────────────────
+   *
+   * ══════════════════════════════════════════════════════════════════════
+   * 【定】判据是「不出现 `://`」，测的是一条**已经发生过**的泄漏路径。
+   *
+   * 实测（Run `run_75f0d6afafa6`，真实端点）：一条下载 11 张图的命令，
+   * `extractPrograms` 把 **11 个完整 CDN URL** 当成程序名，原样进了
+   * `scope.value` → `ActionProposed` / `ApprovalRequested` → JSONL。
+   *
+   * 而同一个 resolver 的 `dataMovement` 处有一条【定】写着「只记去向类别，
+   * 不记命令原文 —— 抄进 Trace 等于让审计记录自己变成第二个泄漏点」。
+   * **同一个文件里两条规则打架**，URL 从另一个口子全进去了。
+   *
+   * 今天泄的是公开 URL，代价只是审批串没法看；等 URL 带上签名或 token，
+   * 代价变成凭证被持久化 —— 而那时不会有任何征兆，因为这条路径「一直是这样的」。
+   * ══════════════════════════════════════════════════════════════════════
+   */
+  /**
+   * ── 【定】用例必须**逐道过滤各一条**，这是注入实测逼出来的 ──────────────
+   *
+   * ══════════════════════════════════════════════════════════════════════
+   * 这条判据我写错过**两次**，两次都是注入实测当场拆掉的，值得原样记下来。
+   *
+   * 第一版：只写了真实运行里那条命令的形态（带引号的 URL 独占一行）。
+   *   摘掉 `://` 过滤 → **不红**；摘掉引号抹除 → **也不红**。
+   *   两道过滤对那一个形态互相遮蔽，任一道单独就够，于是判据对**两道**都无感知。
+   *
+   * 第二版：加了「裸 URL 数组」，以为能隔离 `://` 过滤。仍然不红 ——
+   *   那条 URL 里带 `?sig=`，而 `extractPrograms` 早就有一句
+   *   「跳过前置环境变量赋值」（`t.includes("=")`），它先把整个 token 吃掉了。
+   *   **判据实际被一条与本次修复无关的老逻辑挡绿了。**
+   *
+   * 共同形态还是那一条：判据测的不是它声称在测的东西。
+   * 而这次两次都不是因为断言写错，是因为**用例落在了守卫的重叠区**。
+   *
+   * 下面两条是实测出来的、各自只被一道过滤挡住的形态：
+   *   裸 URL 且**不含 `=`**        → 只有 `://` 过滤能挡（老的 `=` 跳过够不着）
+   *   引号内含 `;` 与 `()`          → 只有引号抹除能挡（内容里没有 `://`）
+   * 真实运行里那条（引号 URL 独占行）两道都挡得住，所以它**不适合做判据**。
+   * ══════════════════════════════════════════════════════════════════════
+   */
+  const bareUrlLeak =
+    "urls=(\nhttps://cdn.example.com/a-SECRET456.jpg\n)\ncurl -s -o out.jpg";
+  const quotedLeak = 'curl -s -H "User-Agent: Mozilla (X; SECRET123)" -o out.jpg';
+  const scopeOf = (c: string): string =>
+    resolver.resolve({ command: c, allow_network: true } as never, "/tmp/ws").scope.value;
+  const bareScope = scopeOf(bareUrlLeak);
+  const quotedScope = scopeOf(quotedLeak);
+  fact("裸 URL（无 =，只有 :// 过滤挡得住）→ scope.value", bareScope);
+  fact("引号内含 ; 与 ()（只有引号抹除挡得住）→ scope.value", quotedScope);
+  const clean = (s: string): boolean => !s.includes("://") && !/SECRET\d/.test(s);
+  const noLeak = clean(bareScope) && clean(quotedScope);
+  // 顺带钉住「不是靠把它清空来通过的」—— 真程序名必须还在，否则审批串没了意义。
+  const stillUseful = bareScope.includes("curl") && quotedScope.includes("curl");
+  verdict(
+    noLeak && stillUseful,
+    noLeak && stillUseful
+      ? "两种形态的 scope.value 里都没有 URL、也没有引号内的内容，而真程序名（curl）都还在 —— " +
+          "两条用例**各自只被一道过滤挡住**（实测确认过），单写一条时两道会互相遮蔽；" +
+          "「真程序名仍在」那一半同样不能省：一个恒空的 scope.value 也能通过前半条"
+      : !noLeak
+        ? `scope.value 抄进了命令内容：裸 URL 形态=${bareScope}｜引号形态=${quotedScope}`
+        : `scope.value 把真程序名也一起丢了（${bareScope}｜${quotedScope}）—— 审批与审计那一行会变成空壳`,
+  );
+
   // ══════════════════════════════════════════════════ B 段：沙箱是真的
   section("B. 沙箱 —— 这一段的每条都必须是「真的跑了、内核真的拒了」");
 
@@ -443,6 +509,72 @@ async function main(): Promise<void> {
     quoteRejected
       ? '含引号的 workspace 路径被拒绝而不是静默转义 —— 猜错一次转义会把 subpath 截短成更宽的授权范围'
       : "含引号的路径被静默接受：sandbox profile 可能被截断成更宽的授权范围",
+  );
+
+  /**
+   * B7 临时目录：**description ① 承诺的那一条，双侧实测**。
+   *
+   * ══════════════════════════════════════════════════════════════════════
+   * 【定】这条判据是为一个真实端点上撞出来的缺陷加的（Run `run_75f0d6afafa6`）。
+   *
+   * description ① 曾经写着「只能写 workspace 目录和**系统临时目录**」，
+   * 而 R-8 把 tmp 收窄成了 per-call `mkdtemp` ＋ `TMPDIR` 指过去。模型照着
+   * 那句话写 `/tmp/xxx`，沙箱拒了，`curl -s` 把错误吞掉，模型只看到
+   * 「文件不存在」—— 白花一轮。**没有任何判据会说话**：B1 验的是 workspace
+   * 内可写、B2 验的是 $HOME 下不可写，`/tmp` 这一档两边都不覆盖。
+   *
+   * 所以这里必须是**双侧**，理由与 sandbox.ts 文件头那条一模一样：
+   *   只验 `/tmp` 被拒 → 与「沙箱把临时目录整个拒了」不可区分（能力其实没了）；
+   *   只验 `$TMPDIR` 可写 → 与「沙箱根本没收窄」不可区分（承诺其实是真的）。
+   * 两条都在，才能把「收窄了，且收窄的边界与文案一致」这件事钉住。
+   * ══════════════════════════════════════════════════════════════════════
+   */
+  const tmpProbeName = `wa-verify-SHOULD-NOT-EXIST-${process.pid}-${Date.now()}`;
+  const tmpProbeAbs = `/tmp/${tmpProbeName}`;
+  if (existsSync(tmpProbeAbs)) {
+    verdict(false, `探针目标 ${tmpProbeAbs} 事前就存在，这次测量无效`);
+    ws.cleanup();
+    return;
+  }
+  // 左侧：$TMPDIR 必须真的写得进（它是 description 给模型的唯一临时目录出口）
+  const tmpdirWrite = await executeRunShell(
+    { command: 'echo tmpok > "$TMPDIR/probe.txt" && cat "$TMPDIR/probe.txt"' },
+    ctx,
+  );
+  const tmpdirBody = tmpdirWrite.ok ? JSON.parse(tmpdirWrite.output) : {};
+  const tmpdirOk =
+    tmpdirWrite.ok && tmpdirBody.exitCode === 0 && String(tmpdirBody.stdout).includes("tmpok");
+  // 右侧：/tmp 必须写不进，且文件真的没生成
+  const slashTmpWrite = await executeRunShell({ command: `touch ${tmpProbeAbs}` }, ctx);
+  const slashTmpBody = slashTmpWrite.ok ? JSON.parse(slashTmpWrite.output) : {};
+  const slashTmpBlocked = slashTmpBody.exitCode !== 0 && !existsSync(tmpProbeAbs);
+  fact("$TMPDIR 写 + 读回", `exit=${tmpdirBody.exitCode} stdout=${JSON.stringify(tmpdirBody.stdout)}`);
+  fact("/tmp 写", `exit=${slashTmpBody.exitCode} 文件存在=${existsSync(tmpProbeAbs) ? "是 ← 没拦住" : "否"}`);
+  verdict(
+    tmpdirOk && slashTmpBlocked,
+    tmpdirOk && slashTmpBlocked
+      ? "临时目录的边界与 description ① 一致：$TMPDIR 写得进、/tmp 写不进 —— " +
+          "两侧都验了，单侧与「整个拒掉」或「根本没收窄」不可区分"
+      : `临时目录边界与文案不一致：$TMPDIR 可写=${tmpdirOk}，/tmp 被拦=${slashTmpBlocked}`,
+  );
+  // 仪器不得在被测系统之外留痕（见 B2）——万一真建出来了，当场清掉。
+  rmSync(tmpProbeAbs, { force: true });
+
+  /**
+   * B8 description 必须点名 `$TMPDIR`。
+   *
+   * 【定】这不是「description 里必须出现某个词」那类装饰判据（摸底考试 B 组
+   * 明确拒绝过的那种）。区别在于它钉的**不是引导措辞，是一个事实**：
+   * per-call 临时目录的路径**只**经由 `$TMPDIR` 暴露，模型没有第二种办法
+   * 知道它在哪。这个词从 description 里消失，`run_shell` 的临时目录能力
+   * 对模型就等于不存在，而沙箱那一侧不会有任何提示。
+   */
+  const mentionsTmpdir = runShellDefinition.description.includes("$TMPDIR");
+  verdict(
+    mentionsTmpdir,
+    mentionsTmpdir
+      ? "description 点名了 $TMPDIR —— 那是 per-call 临时目录**唯一**的对外出口，不写出来等于这个能力不存在"
+      : "description 没提 $TMPDIR：模型无从知道可写的临时目录在哪，只会去试 /tmp 并静默失败",
   );
 
   // ══════════════════════════════════════════════════ C 段：执行语义

@@ -690,6 +690,47 @@ async function main(): Promise<void> {
           "「Trace 按段分组、每段可审计」对 Web 段成立",
       );
 
+      /**
+       * ══════════════════════════════════════════════════════════════
+       * 运行身份：**三条轨道必须说同一件事**（评审 codex P2-3）。
+       *
+       * 实测过的分叉（Run `run_75f0d6afafa6`，真实端点、Web 入口）：
+       *
+       *   trace header   entry="web"     task="(未知)"     ← task 错
+       *   RunSpec        origin.kind="CLI"                 ← 入口错
+       *   SQLite runs    task=真实任务                      ← 对
+       *
+       * 两个成因各自独立：`makeRunSpec()` 把 `kind:"CLI"` 写死；
+       * `taskCache.set()` 排在 `await drive(gen)` 之后，而 header 是
+       * **第一个事件**到达时生成的 —— 那时 drive 还没返回。
+       *
+       * 【定】它不影响任何执行事实，所以只能靠判据守。而它一旦退回去，
+       * 影响的是 Replay、归档与**正式评测的归因**（决 4 那批数据读的就是这里），
+       * 那时已经没有办法回头判断某个样本到底是从哪个入口跑的。
+       * ══════════════════════════════════════════════════════════════
+       */
+      const detailG = await call(svcG, `/api/runs/${gid}`);
+      const specOrigin = String((detailG.body["spec"] as Record<string, unknown>)?.["origin"] ?? "");
+      const headerTask = String(header?.["task"] ?? "");
+      const headerEntry = String(header?.["entry"] ?? "");
+      fact("RunSpec.origin.kind", specOrigin || "（缺）");
+      fact("trace header 的 entry / task", `${headerEntry} / ${JSON.stringify(headerTask)}`);
+      fact("SQLite 里的 task", JSON.stringify(String(detailG.body["task"] ?? "")));
+      const identityOk =
+        specOrigin === "WEB" &&
+        headerEntry === "web" &&
+        headerTask === "G 段夹具" &&
+        String(detailG.body["task"] ?? "") === "G 段夹具";
+      verdict(
+        identityOk,
+        identityOk
+          ? "运行身份三条轨道一致：RunSpec.origin=WEB、header.entry=web、header.task 与 SQLite 的 task 逐字相同 —— " +
+              "此前 origin 写死 CLI（一个生产者、零消费者，没有东西能与它矛盾），" +
+              "且 header 在 task 登记之前就生成，永远写「(未知)」"
+          : `运行身份分叉：origin=${specOrigin || "(缺)"}、entry=${headerEntry || "(缺)"}、` +
+              `header.task=${JSON.stringify(headerTask)}、db.task=${JSON.stringify(String(detailG.body["task"] ?? ""))}`,
+      );
+
       const rejected = await call(svcG, `/api/runs/${gid}/resume`, { method: "POST", body: {} });
       const after = await call(svcG, `/api/runs/${gid}`);
       fact("对终态 Run 点 resume", `HTTP ${rejected.status}`);

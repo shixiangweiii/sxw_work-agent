@@ -47,8 +47,18 @@ export class SqliteArtifactStore implements ArtifactStorePort {
   constructor(private readonly db: Db) {}
 
   async register(input: ArtifactRegistration): Promise<ArtifactRecord> {
-    const hash = sha256(input.content);
-    const size = Buffer.byteLength(input.content, "utf8");
+    /**
+     * 【定】hash 与 size 都按**真实字节**算（ADR-0010）。
+     *
+     * 原来是 `sha256(content, "utf8")` ＋ `Buffer.byteLength(content, "utf8")`，
+     * 那对字符串是对的，对二进制是错的 —— 而错的方向很隐蔽：
+     * 登记下来的 hash 会与磁盘上那份字节不等，于是 `artifact-checks` 的第 ①
+     * 项（磁盘复核）必红，`DELIVERABLE` 按 §1.2 第 3 条结算 `FAILED`。
+     * **一个把交付物做对了的 Run 会因为登记侧的编码口径被判成失败。**
+     */
+    const bytes = toBytes(input.content);
+    const hash = sha256Bytes(bytes);
+    const size = bytes.byteLength;
     const now = Date.now();
 
     return inTransaction(this.db, () => {
@@ -64,8 +74,34 @@ export class SqliteArtifactStore implements ArtifactStorePort {
        * 【定】但**验证结果不重置** —— 内容没变，上次验过的结论仍然成立。
        * 重置会让「登记一次就得重验一次」，而验证是要花时间的（ZIP 解压、
        * JSON 解析），在一个循环里反复登记就会反复付费。
+       *
+       * ══════════════════════════════════════════════════════════════════
+       * 【定】去重必须**同时**同 Run、同 role（二次评审 codex P1-4）。
+       *
+       * 原判定只比 `content_hash`，而查询本身也没有按 runId 过滤
+       * （`WHERE logical_id = ?` 取最新一版）。于是旧记录会**连同它的
+       * `run_id` 与 `role` 一起**被当成本次登记的结果返回。两个后果：
+       *
+       *   跨 Run：Run B 产出逐字节相同的 `images.zip` → 拿到 Run A 的
+       *           artifactId → `listByRun(B)` 查不到它、界面拒绝预览，
+       *           而 `deliveredArtifactIds` 里躺着一个不属于本 Run 的 id；
+       *   同 Run role 晋升（**更容易撞上**）：先按 INTERMEDIATE 登记、
+       *           后按 DELIVERABLE 登记同一份内容 → 永远停在 INTERMEDIATE
+       *           → §1.2 第 3 条「DELIVERABLE 检查失败判 FAILED」那条
+       *           **强制力被静默降档**，而盘上看不出来。
+       *
+       * 「内容相同」是 blob 层的事，「这是谁的、什么角色的产物」是 Artifact
+       * 层的 provenance —— 两件事不能用一个 hash 合并掉。
+       * 判据在 `verify:artifact` I 段，两条各做过注入实测。
+       * ══════════════════════════════════════════════════════════════════
        */
-      if (latest && latest.content_hash === hash && latest.tombstoned_at === null) {
+      if (
+        latest &&
+        latest.content_hash === hash &&
+        latest.tombstoned_at === null &&
+        latest.run_id === String(input.runId) &&
+        latest.role === input.role
+      ) {
         return toRecord(latest);
       }
 
@@ -158,6 +194,17 @@ function toRecord(r: Row): ArtifactRecord {
   };
 }
 
-function sha256(s: string): string {
-  return createHash("sha256").update(s, "utf8").digest("hex");
+/**
+ * 内容 → 字节。字符串按 UTF-8，字节原样。
+ *
+ * 【定】字符串那一档必须**保持** UTF-8 —— 换成别的编码会让所有已登记的
+ * text / json 产物 hash 全变，等于把版本链（语义 ②「内容一样不开新版本」）
+ * 在一次升级里整个作废，而盘上看不出来。
+ */
+function toBytes(content: string | Uint8Array): Buffer {
+  return typeof content === "string" ? Buffer.from(content, "utf8") : Buffer.from(content);
+}
+
+function sha256Bytes(b: Buffer): string {
+  return createHash("sha256").update(b).digest("hex");
 }

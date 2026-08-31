@@ -32,8 +32,10 @@
  * ══════════════════════════════════════════════════════════════════════
  */
 
+import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { createServer, type Server } from "node:http";
-import { writeFileSync } from "node:fs";
+import { readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   CollectingTraceSink,
@@ -52,7 +54,7 @@ import {
   type ToolExecutionOutcome,
   type ToolHandlerPort,
 } from "@workagent/harness-runtime";
-import { CommonToolHandler } from "@workagent/tools-common";
+import { CommonToolHandler, isSandboxAvailable } from "@workagent/tools-common";
 import { compose } from "../compose.js";
 import {
   ScriptedModelPort,
@@ -186,10 +188,15 @@ async function runScript(
   toolsOverride?: ToolHandlerPort,
   /** A 段用它注入会看上一轮结果的翻页模型。见 BlobPagingModelPort 的说明。 */
   modelOverride?: ModelPort,
+  /**
+   * I 段用它让**两个 Run 共用一个库** —— 跨 Run 的 Artifact 去重语义只有在
+   * 同一个库里才谈得上。默认仍是 `:memory:`（每次 compose 一份干净的）。
+   */
+  dbPath = ":memory:",
 ): Promise<RunResult> {
   const trace = new CollectingTraceSink();
   const composed = compose({
-    dbPath: ":memory:",
+    dbPath,
     workspaceRoot,
     approvalDecider: async () => ({ approved: true }),
     trace,
@@ -245,6 +252,518 @@ async function main(): Promise<void> {
   await sectionBlobRoundTrip();
   await sectionFetchTrust();
   await sectionArtifacts();
+  await sectionBinaryArtifacts();
+  await sectionArtifactIdentity();
+}
+
+/**
+ * I 段：Artifact 的 **identity** 与内容去重是两件事（二次评审 codex P1-4）。
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ * 原实现的去重只比 `content_hash`，查询也不按 runId 过滤 —— 于是旧记录会
+ * **连同它的 `run_id` 与 `role`** 被当作本次登记的结果返回。
+ *
+ * 「内容相同」是 blob 层的事；「这是谁的、什么角色的产物」是 Artifact 层的
+ * provenance。用一个 hash 把两件事合并掉，代价在下面两条上各现一次。
+ * ══════════════════════════════════════════════════════════════════════
+ */
+async function sectionArtifactIdentity(): Promise<void> {
+  section("I. Artifact identity：内容去重不得吃掉 run / role 的 provenance");
+
+  // ── I1：同一个 Run 内的 role 晋升（**最容易撞上的那条**）
+  const ws = tempWorkspace();
+  let composed: RunResult["composed"] | undefined;
+  try {
+    const same = "同一份内容\n";
+    const r = await runScript(ws.root, [
+      {
+        text: "先当中间产物写一次",
+        toolCalls: [
+          { toolCallId: "i1a", name: "write_file", input: { path: "r.txt", content: same, artifact_role: "INTERMEDIATE" } },
+        ],
+      },
+      {
+        text: "再把同一份内容认成交付物",
+        toolCalls: [
+          { toolCallId: "i1b", name: "write_file", input: { path: "r.txt", content: same, artifact_role: "DELIVERABLE" } },
+        ],
+      },
+    ]);
+    composed = r.composed;
+    const stored = (await r.composed.ports.artifacts.listByRun(r.runId as RunId)).filter(
+      (a) => a.logicalId === "r.txt",
+    );
+    for (const a of stored) console.log(`     · r.txt v${a.version} role=${a.role}`);
+    const deliveredIds = r.outcome?.deliveredArtifactIds ?? [];
+    const promoted = stored.find((a) => a.role === "DELIVERABLE");
+    fact("r.txt 的版本 / role", stored.map((a) => `v${a.version}:${a.role}`).join(" → ") || "（没有）");
+    fact("交付集合", JSON.stringify(deliveredIds));
+
+    /**
+     * 【定】判据钉的是「晋升真的发生了」，不是「有两条记录」。
+     *
+     * 去重吃掉 role 时的现象是：第二次登记**返回第一条**（role 还是
+     * INTERMEDIATE），于是 §1.2 第 3 条那条「DELIVERABLE 检查失败判 FAILED」
+     * 的强制力被静默降档 —— 盘上、事件上都看不出来。
+     */
+    const i1Ok =
+      promoted !== undefined &&
+      deliveredIds.includes(promoted.artifactId) &&
+      stored.some((a) => a.role === "INTERMEDIATE");
+    verdict(
+      i1Ok,
+      i1Ok
+        ? "同内容从 INTERMEDIATE 晋升为 DELIVERABLE 时开出了新版本，交付集合里是**晋升后**那一条 —— " +
+            "只比 content_hash 去重会把第二次登记折回第一条，role 永远停在 INTERMEDIATE，" +
+            "而「DELIVERABLE 检查失败判 FAILED」那条强制力就被静默降了档"
+        : `role 晋升没有发生：${stored.map((a) => `v${a.version}:${a.role}`).join(" → ") || "（没有记录）"}，` +
+            `交付集合 ${JSON.stringify(deliveredIds)}`,
+    );
+  } finally {
+    composed?.db.close();
+    ws.cleanup();
+  }
+
+  // ── I2：两个 Run 共用一个库、产出逐字节相同的内容
+  const ws2 = tempWorkspace();
+  const sharedDb = join(ws2.root, "shared-artifacts.db");
+  let cA: RunResult["composed"] | undefined;
+  let cB: RunResult["composed"] | undefined;
+  try {
+    const body = "两个 Run 会产出一模一样的这份内容\n";
+    const turns = [
+      {
+        text: "产出交付物",
+        toolCalls: [
+          { toolCallId: "x", name: "write_file", input: { path: "same.txt", content: body, artifact_role: "DELIVERABLE" } },
+        ],
+      },
+    ];
+    const rA = await runScript(ws2.root, turns, undefined, undefined, sharedDb);
+    cA = rA.composed;
+    const rB = await runScript(ws2.root, turns, undefined, undefined, sharedDb);
+    cB = rB.composed;
+
+    const ownedByB = await rB.composed.ports.artifacts.listByRun(rB.runId as RunId);
+    const deliveredB = rB.outcome?.deliveredArtifactIds ?? [];
+    fact("Run A / Run B", `${rA.runId} / ${rB.runId}`);
+    fact("Run B 名下的产物数", ownedByB.length);
+    fact("Run B 的交付集合", JSON.stringify(deliveredB));
+
+    /**
+     * 【定】两半都要。
+     *
+     * 只验「listByRun 查得到」的话，一个从不去重的实现也满足它；
+     * 只验「交付集合非空」的话，里面躺着 Run A 的 artifactId 也算通过 ——
+     * 而那正是这条 bug 的形态：界面按 runId 找不到它，于是拒绝预览，
+     * 同时 outcome 里却写着「已交付」。
+     */
+    const i2Ok =
+      rA.runId !== rB.runId &&
+      ownedByB.length === 1 &&
+      deliveredB.length === 1 &&
+      ownedByB[0] !== undefined &&
+      deliveredB[0] === ownedByB[0].artifactId;
+    verdict(
+      i2Ok,
+      i2Ok
+        ? "两个 Run 产出逐字节相同的交付物时各自拥有自己的 Artifact 记录，" +
+            "且 Run B 的交付集合指向的是 **Run B 名下**那一条 —— " +
+            "内容可以按 hash 去重，provenance 不能"
+        : `跨 Run identity 不成立：Run B 名下 ${ownedByB.length} 条，交付集合 ${JSON.stringify(deliveredB)}`,
+    );
+  } finally {
+    cA?.db.close();
+    cB?.db.close();
+    ws2.cleanup();
+  }
+}
+
+/**
+ * H 段：二进制交付物的整条链（ADR-0010）。
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ * 它测的是一条**在此之前不可能存在**的链路。实测背景（Run `run_75f0d6afafa6`）：
+ * 一个 58MB 的 zip 交付物完全正确地产生了，而 `artifacts` 表 0 行、
+ * 13 次 Verification 全 SKIPPED、`deliveredArtifactIds` 空、结算 SUCCESS ——
+ * 「东西做对了」与「Harness 知道东西做对了」之间没有任何纽带。
+ *
+ * 根因不在 shell 工具，在类型签名：`ProducedArtifact.content` 是 `string`，
+ * 二进制在类型层就进不去，连仓里那个 ZIP 结构检查器都**没有任何生产者**。
+ * ══════════════════════════════════════════════════════════════════════
+ */
+async function sectionBinaryArtifacts(): Promise<void> {
+  section("H. 二进制交付物：run_shell 产出的 zip 进得了产物链吗（ADR-0010）");
+
+  if (!isSandboxAvailable()) {
+    // 【定】红，不是静默跳过。verify:shell 同一处理 ——
+    // 一条测不了的判据判成绿，与「测了并通过」事后不可区分。
+    verdict(false, `本机没有可用的 seatbelt 沙箱（platform=${process.platform}），H 段无法验收`);
+    return;
+  }
+
+  const ws = tempWorkspace();
+  let composed: RunResult["composed"] | undefined;
+  try {
+    const r = await runScript(ws.root, [
+      {
+        text: "打包并声明交付物",
+        toolCalls: [
+          {
+            toolCallId: "h1",
+            name: "run_shell",
+            input: {
+              command: "mkdir -p pack && printf 'hello\\n' > pack/a.txt && cd pack && zip -q -r ../out.zip a.txt",
+              description: "造一个真 zip",
+              artifact_path: "out.zip",
+              artifact_role: "DELIVERABLE",
+            },
+          },
+        ],
+      },
+    ]);
+    composed = r.composed;
+
+    const registered = r.trace.byType("ArtifactRegistered").map((e) => e.payload);
+    const verified = r.trace.byType("ArtifactVerified").map((e) => e.payload);
+    const stored = await r.composed.ports.artifacts.listByRun(r.runId as RunId);
+
+    for (const a of registered) console.log(`     · 登记 ${a.logicalId} v${a.version} (${a.role}/${a.kind})`);
+    for (const v of verified) console.log(`     · 检查 ${v.artifactId}: ok=${v.ok} [${v.checksRun.join(", ")}]`);
+
+    /**
+     * 【定】size / hash 要拿**磁盘上那份的真实字节**独立算一遍来比。
+     *
+     * 这是本段判别力的核心。ADR-0010 排掉的那个「错误修法」（把二进制
+     * 按字符串传）在下面这两条上必然翻车：UTF-8 往返会改变字节数与 hash，
+     * 而登记值来自工具交上来的内容 —— 两者不等，说明通道把内容改坏了。
+     * 只看「登记成功了」是看不出来的：那条路径照样会写进一行。
+     */
+    const zipAbs = join(ws.root, "out.zip");
+    const realBytes = readFileSync(zipAbs);
+    const realHash = createHash("sha256").update(realBytes).digest("hex");
+    const rec = stored[0];
+    fact("磁盘上 out.zip 的真实字节数", statSync(zipAbs).size);
+    fact("登记的 sizeBytes", rec?.sizeBytes ?? "（没有登记）");
+    fact("磁盘字节的 sha256（前 16）", realHash.slice(0, 16));
+    fact("登记的 contentHash（前 16）", rec?.contentHash.slice(0, 16) ?? "（没有登记）");
+    fact("outcome.kind", r.outcome?.kind ?? "未结算");
+    fact("deliveredArtifactIds", JSON.stringify(r.outcome?.deliveredArtifactIds ?? []));
+
+    const checks = verified[0]?.checksRun ?? [];
+    const hOk =
+      registered.length === 1 &&
+      registered[0]?.kind === "zip" &&
+      verified.length === 1 &&
+      verified[0]?.ok === true &&
+      checks.includes("zip-opens") &&
+      checks.includes("hash-matches-registration") &&
+      rec?.sizeBytes === realBytes.byteLength &&
+      rec?.contentHash === realHash &&
+      (r.outcome?.deliveredArtifactIds.length ?? 0) === 1 &&
+      r.outcome?.kind === "SUCCESS";
+
+    verdict(
+      hOk,
+      hOk
+        ? "run_shell 产出的二进制 zip 走完了整条链：登记（kind=zip）→ zip-opens ＋ 磁盘 hash 复核 → " +
+            "计入 deliveredArtifactIds → SUCCESS。而且**登记的 size 与 hash 与磁盘上的真实字节逐位相同** —— " +
+            "这一条排掉了「按字符串传二进制」那个修法（UTF-8 往返会改变字节，进而让磁盘复核必红、把做对了的 Run 判 FAILED）"
+        : `二进制产物链不完整：登记 ${registered.length}（kind ${registered[0]?.kind ?? "—"}）、` +
+            `检查 ${verified.length}（ok ${verified[0]?.ok}, [${checks.join(", ")}]）、` +
+            `size ${rec?.sizeBytes} vs 磁盘 ${realBytes.byteLength}、hash 一致=${rec?.contentHash === realHash}、` +
+            `delivered ${r.outcome?.deliveredArtifactIds.length ?? 0}、kind ${r.outcome?.kind}`,
+    );
+  } finally {
+    composed?.db.close();
+    ws.cleanup();
+  }
+
+  // ── H2：声明了却没产出 —— 必须说话，不能静默通过
+  const ws2 = tempWorkspace();
+  let composed2: RunResult["composed"] | undefined;
+  try {
+    const r = await runScript(ws2.root, [
+      {
+        text: "命令成功但不产出声明的东西",
+        toolCalls: [
+          {
+            toolCallId: "h2",
+            name: "run_shell",
+            input: {
+              command: "echo 我什么都没打包",
+              description: "空转",
+              artifact_path: "never-made.zip",
+              artifact_role: "DELIVERABLE",
+            },
+          },
+        ],
+      },
+    ]);
+    composed2 = r.composed;
+
+    const registered = r.trace.byType("ArtifactRegistered");
+    const note = String(parse(r.results.get("h2")?.content)["artifactNote"] ?? "");
+    fact("命令 exitCode", String(parse(r.results.get("h2")?.content)["exitCode"] ?? "?"));
+    fact("登记数", registered.length);
+    fact("artifactNote", note || "（空 ← 静默了）");
+
+    /**
+     * 【定】判据的两半都不能少。
+     *
+     * 「没登记」那一半单独成立没有意义 —— 一个从不登记的实现也满足它。
+     * 关键是**它得说出来**：S3-27 记过这个形态「未登记时 trace 里没有任何
+     * 『跳过了检查』的信号 —— 静默 = 通过」。模型收到的必须是一句
+     * 「你说要产出 X，命令成功了而 X 不在」，而不是一个干干净净的成功。
+     */
+    const h2Ok = registered.length === 0 && note.includes("never-made.zip") && note.includes("读不到");
+    verdict(
+      h2Ok,
+      h2Ok
+        ? "声明了交付物而命令没产出它：不登记，**且在工具结果里明说**「命令成功了但它读不到」—— " +
+            "两半都要，只有「不登记」的话，静默与「检查通过」在事实链上不可区分"
+        : `声明落空的处置不对：登记数 ${registered.length}，artifactNote=${JSON.stringify(note)}`,
+    );
+  } finally {
+    composed2?.db.close();
+    ws2.cleanup();
+  }
+
+  await sectionBinaryMagic();
+  await sectionPreExisting();
+}
+
+/**
+ * H4：执行前就存在、且命令根本没碰它的文件，**不得**被冒认成本 Run 的产物
+ * （二次评审 codex P1-2）。
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ * 夹具刻意用一个**真的、结构完好的 zip**：这样在没有执行前快照的实现下，
+ * 它会一路登记 → 通过 zip-opens → 进 deliveredArtifactIds → SUCCESS，
+ * 也就是说**所有既有判据都拦不住它**。这正是这条 bug 的危险之处 ——
+ * 它不是一个坏产物，它是一个**别人的**好产物。
+ *
+ * 【定】两侧都要：不碰它要拒（上），真的重新生成要放行（下）。
+ * 只做上半条的话，一个「凡是执行前存在就拒绝」的实现也全绿 ——
+ * 而那会让「重新打包一次 images.zip」这种最正常的操作交不出产物。
+ * ══════════════════════════════════════════════════════════════════════
+ */
+async function sectionPreExisting(): Promise<void> {
+  if (!isSandboxAvailable()) return;
+  section("H4. 执行前就在那的文件不得冒认为本 Run 的产物");
+
+  /** 在 Run 开始**之前**造一个真 zip —— 模拟上一次任务留下的残留。 */
+  const seedStaleZip = (root: string): void => {
+    writeFileSync(join(root, "seed.txt"), "上一次任务留下的内容\n", "utf8");
+    execFileSync("zip", ["-q", "-j", join(root, "stale.zip"), join(root, "seed.txt")]);
+  };
+
+  // ── 上半条：命令没碰它 → 拒绝登记
+  const wsA = tempWorkspace();
+  let cA: RunResult["composed"] | undefined;
+  try {
+    seedStaleZip(wsA.root);
+    const before = statSync(join(wsA.root, "stale.zip"));
+    const r = await runScript(wsA.root, [
+      {
+        text: "什么都不做，但声称交付了那个 zip",
+        toolCalls: [
+          {
+            toolCallId: "h4a",
+            name: "run_shell",
+            input: {
+              command: "echo 我没有生成任何东西",
+              description: "空转",
+              artifact_path: "stale.zip",
+              artifact_role: "DELIVERABLE",
+            },
+          },
+        ],
+      },
+    ]);
+    cA = r.composed;
+    const registered = r.trace.byType("ArtifactRegistered");
+    const note = String(parse(r.results.get("h4a")?.content)["artifactNote"] ?? "");
+    fact("夹具 zip 是不是结构完好的", zipLooksReal(join(wsA.root, "stale.zip")) ? "是（没有它这条判据没意义）" : "否 ← 夹具坏了");
+    fact("执行前后 mtime 变没变", statSync(join(wsA.root, "stale.zip")).mtimeMs === before.mtimeMs ? "没变" : "变了");
+    fact("登记数", registered.length);
+    fact("artifactNote", note || "（空 ← 静默了）");
+    const okA =
+      zipLooksReal(join(wsA.root, "stale.zip")) &&
+      registered.length === 0 &&
+      note.includes("执行前就存在") &&
+      (r.outcome?.deliveredArtifactIds.length ?? 0) === 0;
+    verdict(
+      okA,
+      okA
+        ? "一个**结构完好**的旧 zip，命令没碰它 → 不登记、不进交付集合，并明说「这条命令没有产出它」—— " +
+            "夹具用真 zip 是关键：坏产物会被 zip-opens 拦住，而这条 bug 交出去的是**别人的好产物**，" +
+            "既有判据一条都拦不住"
+        : `旧文件被冒认了：登记 ${registered.length}，交付 ${r.outcome?.deliveredArtifactIds.length ?? 0}，note=${JSON.stringify(note)}`,
+    );
+  } finally {
+    cA?.db.close();
+    wsA.cleanup();
+  }
+
+  // ── 下半条：真的重新生成 → 必须放行，并留下「覆盖了旧文件」的记录
+  const wsB = tempWorkspace();
+  let cB: RunResult["composed"] | undefined;
+  try {
+    seedStaleZip(wsB.root);
+    const r = await runScript(wsB.root, [
+      {
+        text: "重新打包一次",
+        toolCalls: [
+          {
+            toolCallId: "h4b",
+            name: "run_shell",
+            input: {
+              command: "printf '新的内容\\n' > fresh.txt && zip -q -j stale.zip fresh.txt",
+              description: "重新生成同名 zip",
+              artifact_path: "stale.zip",
+              artifact_role: "DELIVERABLE",
+            },
+          },
+        ],
+      },
+    ]);
+    cB = r.composed;
+    const registered = r.trace.byType("ArtifactRegistered");
+    const note = String(parse(r.results.get("h4b")?.content)["artifactNote"] ?? "");
+    fact("登记数 / outcome", `${registered.length} / ${r.outcome?.kind ?? "未结算"}`);
+    fact("artifactNote", note || "（空）");
+    const okB =
+      registered.length === 1 &&
+      note.includes("覆盖") &&
+      r.outcome?.kind === "SUCCESS" &&
+      (r.outcome?.deliveredArtifactIds.length ?? 0) === 1;
+    verdict(
+      okB,
+      okB
+        ? "真的重新生成同名产物时照常登记并计入交付，同时留下「覆盖了执行前就存在的同名文件」的记录 —— " +
+            "没有这一半，一个「凡是执行前存在就拒绝」的实现也能通过上半条，而重新打包是最正常的操作"
+        : `正当的覆盖被误伤：登记 ${registered.length}，kind=${r.outcome?.kind}，note=${JSON.stringify(note)}`,
+    );
+  } finally {
+    cB?.db.close();
+    wsB.cleanup();
+  }
+}
+
+/** 夹具自检：这个文件是不是一个结构完好的 zip（PK 头 ＋ EOCD）。 */
+function zipLooksReal(abs: string): boolean {
+  const buf = readFileSync(abs);
+  if (buf.byteLength < 22 || buf[0] !== 0x50 || buf[1] !== 0x4b) return false;
+  return buf.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06])) !== -1;
+}
+
+/**
+ * H3：二进制文件头检查 —— **一次回归的处置**（二次评审 zcode F1）。
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ * ADR-0010 那一批新增了 `BINARY_EXTENSIONS`，把 jpg/png/pdf 路由到
+ * `kind:"binary"`，而检查器对 binary **一项结构检查都没有**。后果是
+ * 同一个坏文件的处境**比改之前更差**：
+ *
+ *     改之前：`.jpg` 落 text → 编码检查 → **翻红**（看得见）
+ *     改之后：`.jpg` 落 binary → 只有 hash → **静默通过** ＋ 进 deliveredArtifactIds
+ *
+ * 反例用的就是原任务的真实失败形态：`curl` 少了 `--fail`，
+ * 把一个 404 错误页存成了 `image_01.jpg`。
+ *
+ * 【定】两侧都要。只验反例的话，一个「一律拒绝二进制」的检查器也全绿；
+ * 只验正例的话，回归本身（什么都不查）照样全绿。
+ * ══════════════════════════════════════════════════════════════════════
+ */
+async function sectionBinaryMagic(): Promise<void> {
+  if (!isSandboxAvailable()) return; // 上面已经为整段红过一次，不重复报
+
+  // ── H3 正例：文件头正确的 PNG 必须通过
+  const wsA = tempWorkspace();
+  let composedA: RunResult["composed"] | undefined;
+  try {
+    const r = await runScript(wsA.root, [
+      {
+        text: "产出一个文件头正确的 png",
+        toolCalls: [
+          {
+            toolCallId: "h3a",
+            name: "run_shell",
+            // 真 PNG 签名：89 50 4E 47 0D 0A 1A 0A ＋ 一段 IHDR 开头
+            input: {
+              command: "printf '\\211PNG\\r\\n\\032\\n\\000\\000\\000\\015IHDR' > shot.png",
+              description: "写一个 PNG 头",
+              artifact_path: "shot.png",
+              artifact_role: "DELIVERABLE",
+            },
+          },
+        ],
+      },
+    ]);
+    composedA = r.composed;
+    const v = r.trace.byType("ArtifactVerified").map((e) => e.payload)[0];
+    fact("PNG 头的检查项", v ? v.checksRun.join(", ") : "（没有检查）");
+    fact("PNG 头的结论 / outcome", `${v?.ok} / ${r.outcome?.kind ?? "未结算"}`);
+    const okPos =
+      v?.ok === true &&
+      (v.checksRun as string[]).includes("binary-magic") &&
+      r.outcome?.kind === "SUCCESS" &&
+      (r.outcome?.deliveredArtifactIds.length ?? 0) === 1;
+    verdict(
+      okPos,
+      okPos
+        ? "文件头正确的 .png 通过 binary-magic 并计入交付 —— 这一半排掉「一律拒绝二进制」那种假绿"
+        : `正常二进制被误判：ok=${v?.ok}，checksRun=[${v?.checksRun?.join(", ")}]，kind=${r.outcome?.kind}`,
+    );
+  } finally {
+    composedA?.db.close();
+    wsA.cleanup();
+  }
+
+  // ── H3 反例：404 错误页被存成 image_01.jpg（原任务的真实失败形态）
+  const wsB = tempWorkspace();
+  let composedB: RunResult["composed"] | undefined;
+  try {
+    const r = await runScript(wsB.root, [
+      {
+        text: "把错误页存成图片",
+        toolCalls: [
+          {
+            toolCallId: "h3b",
+            name: "write_file",
+            input: {
+              path: "image_01.jpg",
+              content: "<!DOCTYPE html><html><head><title>404 Not Found</title></head></html>",
+              artifact_role: "DELIVERABLE",
+            },
+          },
+        ],
+      },
+    ]);
+    composedB = r.composed;
+    const v = r.trace.byType("ArtifactVerified").map((e) => e.payload)[0];
+    fact("错误页伪装成 .jpg 的检查项", v ? v.checksRun.join(", ") : "（没有检查）");
+    fact("结论 / outcome", `${v?.ok} / ${r.outcome?.kind ?? "未结算"}`);
+    fact("诊断", String(v?.detail ?? "").slice(0, 120));
+    const okNeg =
+      v?.ok === false &&
+      (v.checksRun as string[]).includes("binary-magic") &&
+      String(v.detail).includes("DOCTYPE") &&
+      r.outcome?.kind === "FAILED" &&
+      (r.outcome?.deliveredArtifactIds.length ?? 0) === 0;
+    verdict(
+      okNeg,
+      okNeg
+        ? "404 错误页被存成 image_01.jpg → binary-magic 抓住、DELIVERABLE 结算 FAILED、不进交付集合；" +
+            "**诊断里给出了实际看到的文件头**（`<!DOCTYPE`），而不是一句「魔数不对」—— " +
+            "这正是原任务里 curl 少 --fail 的那个失败形态"
+        : `错误页伪装成图片没被抓住：ok=${v?.ok}，checksRun=[${v?.checksRun?.join(", ")}]，kind=${r.outcome?.kind}`,
+    );
+  } finally {
+    composedB?.db.close();
+    wsB.cleanup();
+  }
 }
 
 /** A ＋ B 段：外置 → stub → read_blob 逐字取回；配对与协议不被破坏。 */
@@ -644,22 +1163,46 @@ async function sectionArtifacts(): Promise<void> {
     fact("outcome.kind", r.outcome?.kind ?? "未结算");
     fact("deliveredArtifactIds", JSON.stringify(r.outcome?.deliveredArtifactIds ?? []));
 
+    /**
+     * ── 【定】判据是**按 role 分**，不是数个数（二次评审 codex P2-3）─────────
+     *
+     * 这条原来写的是 `deliveredArtifactIds.length === 2` —— 而那两个里有一个
+     * 是显式声明为 `INTERMEDIATE` 的 `notes.txt`。也就是说旧判据把
+     * 「中间产物也算交付物」这个**错误语义写死进了绿灯**：修对之后它会翻红，
+     * 而修错（比如把 role 判定删掉）它反而是绿的。
+     *
+     * `INTERMEDIATE` 这个词的全部含义就是「它不是要交的东西」。所以这里
+     * 直接断言集合内容：DELIVERABLE 在里面、INTERMEDIATE 不在里面 ——
+     * 数字对不上时看不出是哪一类错了，而集合关系看得出。
+     */
+    const deliveredIds = r.outcome?.deliveredArtifactIds ?? [];
+    const idOf = (logicalId: string): string | undefined =>
+      stored.find((a) => a.logicalId === logicalId)?.artifactId;
+    const jsonId = idOf("report.json");
+    const notesId = idOf("notes.txt");
+    fact("report.json（DELIVERABLE）在交付集合里", jsonId && deliveredIds.includes(jsonId) ? "是（对）" : "否（错）");
+    fact("notes.txt（INTERMEDIATE）在交付集合里", notesId && deliveredIds.includes(notesId) ? "是（错）" : "否（对）");
+
     const eOk =
       registered.length === 2 &&
       verified.length === 2 &&
       verified.every((v) => v.ok) &&
       verified.every((v) => v.checksRun.length > 0) &&
       !registered.some((a) => a.logicalId === "draft.txt") &&
-      (r.outcome?.deliveredArtifactIds.length ?? 0) === 2 &&
+      jsonId !== undefined &&
+      deliveredIds.includes(jsonId) &&
+      notesId !== undefined &&
+      !deliveredIds.includes(notesId) &&
       r.outcome?.kind === "SUCCESS";
 
     verdict(
       eOk,
       eOk
-        ? "两个声明了 role 的产物被登记并各自跑了检查（checksRun 非空），" +
-          "没声明的没有被登记，deliveredArtifactIds 接上了（不再恒空）"
+        ? "两个声明了 role 的产物被登记并各自跑了检查（checksRun 非空），没声明的没有被登记；" +
+          "**交付集合里只有 DELIVERABLE，INTERMEDIATE 不在里面** —— " +
+          "role 在失败方向（分流 FAILED / COMPLETED_WITH_LIMITS）与成功方向（算不算交付）都要成立"
         : `登记 / 检查 / 结算链路不完整（登记 ${registered.length}、检查 ${verified.length}、` +
-          `delivered ${r.outcome?.deliveredArtifactIds.length ?? 0}、kind ${r.outcome?.kind}）`,
+          `delivered ${JSON.stringify(deliveredIds)}、kind ${r.outcome?.kind}）`,
     );
 
     // ── G 段先做（它是 F 段的反面，放一起读更清楚）

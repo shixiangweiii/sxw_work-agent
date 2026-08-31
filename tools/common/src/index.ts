@@ -279,6 +279,20 @@ export class CommonToolHandler implements ToolHandlerPort {
              * 数据外发。不一致的后果是「网开了但审计说没开」。
              */
             allow_network: input["allow_network"] === true,
+            /**
+             * 【定】这两个必须在这里透传（ADR-0010）。
+             *
+             * 它们在 schema 里、在工具里都有，**只差这一跳**就整个失效 ——
+             * 而失效的样子是「模型声明了交付物，产物表照样空的，
+             * 没有任何报错」。摸底考试 A 组修的 `read_blob.line_offset`
+             * 就是同一处、同一个形态：handler 只转发了一部分参数。
+             */
+            ...(input["artifact_path"] === undefined
+              ? {}
+              : { artifact_path: String(input["artifact_path"]) }),
+            ...(input["artifact_role"] === undefined
+              ? {}
+              : { artifact_role: String(input["artifact_role"]) }),
           },
           ctx,
         );

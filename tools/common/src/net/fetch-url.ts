@@ -208,22 +208,50 @@ export async function executeFetchUrl(
      * 【定】只在**发出前**检查是不够的：`https://example.com/r` 可以 302 到
      * `http://127.0.0.1:8080/…`，而 `redirect: "follow"` 会老老实实跟过去。
      * 这是 SSRF 最常见的绕过形态 —— 护栏必须在终点再判一次。
+     *
+     * ══════════════════════════════════════════════════════════════════
+     * ⚠️ 【定】**它挡住的是「结果进不进上下文」，不是「请求发不发得出去」。**
+     *
+     * 这段注释原来只写到上面那句为止，读起来像是把 SSRF 关掉了。二次评审
+     * （codex P1-6）指出它照不到的两种形态，回源确认成立：
+     *
+     *   public → private            内网 GET **已经发生**，这里拒绝只是不给结果；
+     *   public → private → public   终点是公网，这一判**完全看不见**中间那一跳。
+     *
+     * 真正关掉它要 `redirect: "manual"` 逐跳判 ＋ 把校验过的 IP 与实际连接
+     * 绑定。那条路被 S3-13 明确否决过（「每一跳都要重过护栏，复杂度不抵收益」），
+     * 残余风险登记在 S3-24。**这里不改行为，但注释不许再声称它够。**
+     * 一段过度声称的注释比没有注释更糟：它让下一个人以为这里不用再看。
+     * ══════════════════════════════════════════════════════════════════
      */
     const finalGuard = await assertPublicUrl(res.url || input.url);
     if (!finalGuard.ok) {
       return {
         ok: false,
         output: "",
-        sideEffectState: "NO_EFFECT",
+        /**
+         * 【定】`UNKNOWN`，不是 `NO_EFFECT`（二次评审 codex P1-6）。
+         *
+         * 走到这里意味着 `fetch` 已经把请求**发出去过**了 —— 可能还跟着
+         * 重定向发了不止一次。报 `NO_EFFECT` 是在事实表里写假话，
+         * 与 `run_shell` 被 SIGKILL 时那条「报 NO_EFFECT 是在撒谎」同源：
+         * 这个字段是 §18.2 恢复分支与 `recoveryItems` 的依据，
+         * 写成「没发生」会让「有一次外发状态未知」从结算里整个消失。
+         */
+        sideEffectState: "UNKNOWN",
         error: makeError({
           code: "TOOL_URL_DENIED",
           source: "POLICY",
           category: "AUTHORIZATION",
           retryability: "NEVER",
-          sideEffectState: "NO_EFFECT",
+          // 【定】与上面那个字段保持同一个值。两处不一致时，结算读的是
+          // outcome 上那个、而人看的是 error 里这个 —— 一个自相矛盾的事实
+          // 比一个错误的事实更难查。
+          sideEffectState: "UNKNOWN",
           safeMessage:
             `"${input.url}" 重定向到了 "${res.url}"，而终点${finalGuard.why}。` +
-            `重定向到内网是 SSRF 最常见的绕过形态，已拒绝。`,
+            `重定向到内网是 SSRF 最常见的绕过形态，已拒绝返回内容。` +
+            `**注意请求本身已经发出去过**（跟随重定向发生在校验之前），所以副作用状态是 UNKNOWN 而不是 NO_EFFECT。`,
         }),
       };
     }

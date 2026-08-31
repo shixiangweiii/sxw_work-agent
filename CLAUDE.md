@@ -26,7 +26,7 @@ npm run ui        # → http://127.0.0.1:<随机端口>/?t=<会话 Token>
 `apps/workagent-service`（Layer 2）＋ `apps/workagent-ui`（Layer 1）。
 六个视图：时间线 / 逐轮解剖 / 预算 / 产物 / Trace / 恢复；审批 · 提问 · 接管三条通道
 在浏览器里应答，用的是**与 CLI 同一批注入点**（`ApprovalDecider` / `HandoffChannel` /
-`QuestionChannel` 接口一个字没改）。左上角可以**选目录、新建 / 切换 workspace**。`verify:all` 涨到 **14 条脚本 / 151 条判据**，
+`QuestionChannel` 接口一个字没改）。左上角可以**选目录、新建 / 切换 workspace**。`verify:all` 涨到 **14 条脚本 / 163 条判据**（阶段 4 交付时是 151，2026-08-31 图片打包任务评审批 +6，二次评审批 +6），
 边界 grep 扩到 **12 条**（编号到 11）。**Case 02 不在本批**（决 1）。
 
 > ### 【定】研究问题的答案是「几乎能，差一处」，那一处比一屏绿判据重要
@@ -155,7 +155,7 @@ npm run ui        # → http://127.0.0.1:<随机端口>/?t=<会话 Token>
 > **范围在开工前被决 1 改写过**：原计划是「Case 01 网页归档」，改成**通用能力面**，
 > 网页归档移出本阶段（Case 是尺子，不是模具）。评测与 Eval 按决 4 统一推到开发完成之后。
 
-- **13 条验收脚本 115 条判据全绿**（**那是当时的数**；阶段 4 后是 14 条 / 151 条，见本文件开头），`tsc --noEmit` 干净
+- **13 条验收脚本 115 条判据全绿**（**那是当时的数**；阶段 4 后是 14 条 / 163 条，见本文件开头），`tsc --noEmit` 干净
   （摸底考试 bugfix 批后 86 → 91；阶段 3.5 累计 +24：`verify:shell` 19、
   `verify:progress` +3、`verify:tools` +1、`verify:pairing` +1）
 - 新增 `tools/` 层，默认装配 **14 个工具**（9 场景 ＋ 3 机制 ＋ 2 测量）；固定开销起步价 ≈ 2520 token
@@ -179,6 +179,127 @@ Planner / Memory / Sub-agent（决 6）、通用 Completion Gate（论据被探�
 > ⚠️ **一条新登记的欠账**：`requiredCapabilities` **逐工具零消费** ——
 > 14 个工具全都声明了它，无人读。已在每个声明处留注释，走 bugfix 阶段。
 > 见[存量清单 §0.6](sxw_aicoding/存量BUG/存量问题清单_V20260824.md) 的 S3-1。
+
+### 图片打包任务实测评审的处置（2026-08-31，M1…M5）
+
+真实端点 ＋ Web 入口跑「把 B 站 opus 页的图片下载下来打包成 images.zip」
+（Run `run_75f0d6afafa6`）。**产物完全正确**（11 项、CRC 通过、与页面内容图逐字节匹配），
+问题全在「Harness 知不知道它是对的」这一侧。两份评审（zcode / codex）＋ 逐条回源复核，
+修 5 项、新登记 5 项，见[存量清单 §0.15](sxw_aicoding/存量BUG/存量问题清单_V20260824.md)。
+`verify:all` **151 → 157 条**，新增 6 条**每条都做过注入实测**。
+**二次评审又修 8 项、登记 8 项，157 → 163 条**，见[存量清单 §0.16](sxw_aicoding/存量BUG/存量问题清单_V20260824.md)。
+
+> ### 【定】最重要的发现是一条**收益为零的处方**，不是任何一个 bug
+>
+> 一份评审说「只读管道被迫审批是因为 `extractPrograms` 把引号碎片当成了程序名，
+> 清干净噪声就能少问几次」。回源：**`analyzeCommand` 的只读判定从不读 `programs`**
+> —— 那个文件自己就写着「只服务展示与审计，不服务任何判定」。
+> 真因是元字符 `|`，而 10 条 shell 命令**每条都含元字符**。
+>
+> 噪声最后确实清了（M4），但理由换成了「泄漏面」，**并明确写了它减不掉任何一次审批**。
+> 一条不成立的因果比一个没修的 bug 更贵：它导出的处方做完之后没有人会回头量。
+>
+> 同批还推翻两条：「心跳在下载期间持续可见」（实测三条 `ToolProgress` 全落在命令结束**之后**）、
+> 「`/tmp` 失败是跨调用 TMPDIR 隔离」（curl 与 wc 在**同一条命令**里，解释不了）。
+
+> ### 【定】M1：模型是按文档办事的，错的是文档
+>
+> `run_shell` 的 description 写着「只能写 workspace 和**系统临时目录**」，
+> 而 R-8 早已把 tmp 收窄成 per-call `mkdtemp` ＋ `TMPDIR` 指过去 —— **那句话没跟着改**。
+> 模型照着写 `/tmp`，沙箱拒、`curl -s` 吞掉错误，白花一轮。
+>
+> 这是「声明与实现不符」的又一形态：上次藏在 `MAX_TIMEOUT_MS` 与 `timeoutPolicy`
+> 两个常量之间，这次藏在**一次正确的收窄修复留下的一句旧承诺**里 ——
+> 收窄的人不会想到去改文案，而模型是这句话唯一的读者。
+> 四处口径（description / 沙箱 / CLI 审批 / Web 审批卡）已统一。
+
+> ### 【定】M2：省事的那个修法会**把做对了的 Run 判成 FAILED**
+>
+> 详见 [ADR-0010](sxw_aicoding/ADR/0010-二进制交付物走字节通道与按路径声明.md)。
+> 根因不在 shell 工具，在类型签名：`ProducedArtifact.content` 是 `string`，
+> 二进制在类型层就进不去 —— 连带**`kind:"zip"` 那个检查器从上线起没有任何生产者**。
+>
+> 「给 `run_shell` 加个 artifact 字段、内容按字符串传」的注入实测原始输出：
+>
+> ```text
+> 磁盘上 out.zip 的真实字节数   166
+> 登记的 sizeBytes            184      ← UTF-8 往返
+> outcome.kind                FAILED   ← zip 其实完全正确
+> ```
+>
+> 因为登记侧算 `sha256(content,"utf8")`，而第二层检查读的是**磁盘字节**。
+> 处置：`content` 放宽为 `string | Uint8Array`，hash/size 按真实字节算；
+> `run_shell` 新增 `artifact_path` ＋ `artifact_role`（**执行前**声明，进审批面 ——
+> 人批准的不只是「跑这条命令」，还有「它自称要交付这个文件」）。
+
+> ### 【定】M4 的判据我写错了**两次**，两次都是注入实测拆掉的
+>
+> 第一版用真实运行里那条命令的形态 —— 摘掉任一道守卫**都不红**（两道互相遮蔽）；
+> 第二版换了形态，仍然不红 —— 那条 URL 带 `?sig=`，被一句**与本次修复无关的老逻辑**
+> （跳过含 `=` 的 token）先吃掉了。最终用两条实测确认过「各自只被一道守卫挡住」的形态。
+>
+> 形态还是那条「判据测的不是它声称在测的东西」，但这次不是断言写错，
+> 是**用例落在了守卫的重叠区** —— 读代码看不出来，只能靠注入。
+
+> ⚠️ **M5（下载不 fail-closed）故意没有机械判据**：落点在 `run_shell` 的引导面，
+> 只能靠 live 复跑验证。不加「description 里必须出现某个词」的判据（B 组已拒绝过），
+> 也**不在 Runtime 里替模型加 `set -e`** —— 那是替用户改写他已经审批过的命令，
+> 审批看到的与真正执行的从此不是同一条。
+
+### 上一批的二次代码评审处置（2026-08-31，R1…R8）
+
+两份评审（zcode / codex），**codex 给的是 NO-GO**。逐条回源后：修 8 项、登记 8 项，
+`verify:all` **157 → 163 条**，见[存量清单 §0.16](sxw_aicoding/存量BUG/存量问题清单_V20260824.md)。
+
+> ### 【定】最值钱的两条是**上一批我自己引入的回归**，两份评审各抓到一条
+>
+> **R1 —— 一次「改进」把失败方向从看得见翻成了静默通过。** ADR-0010 那批加了
+> `BINARY_EXTENSIONS`，把 jpg/png/pdf 路由到 `kind:"binary"`，而检查器对 binary
+> **一项结构检查都没有**：
+>
+> | | `.jpg` 的处境 |
+> |---|---|
+> | 改之前 | 落 `text` → 编码检查 → **翻红**（看得见） |
+> | 改之后 | 落 `binary` → 只有 hash → **静默通过** ＋ 进 `deliveredArtifactIds` |
+>
+> 而当时那段注释亲手写着「默认 binary（什么都不检查、静默通过）更糟」——
+> **那句话恰好论证了它自己为已知扩展名移除掉的性质。**
+> 处置把两件事绑死：`binary` 由**魔数表的键**推出，没有魔数的扩展名不算 binary。
+>
+> **R2 —— 我在修「声明与实现不符」的同一批里造了一个新实例。**
+> `artifact_path` 的 description 我写的是「zip **能不能解开**」，而检查器自己的
+> 【定】写着「只做结构判定，不真的解压」。形态与 M1 一字不差，读者同样是模型。
+
+> ### 【定】R3：内容去重不得吃掉 provenance
+>
+> `ArtifactStore` 的去重只比 `content_hash`，查询也不按 runId 过滤 ——
+> 旧记录会**连同它的 `run_id` 与 `role`**被当成本次登记的结果返回。
+> 最容易撞上的不是跨 Run，是**同 Run 内 role 晋升**：先 INTERMEDIATE
+> 后 DELIVERABLE 登记同一份内容 → 永远停在 INTERMEDIATE，于是
+> §1.2 第 3 条「DELIVERABLE 检查失败判 FAILED」那条**强制力被静默降档**。
+> 注入实测两半各自独立翻红，其中一半原样复现了「Run B 名下 0 条、
+> 交付集合里躺着 Run A 的 artifactId」。
+
+> ### 【定】R6 的夹具刻意用一个**结构完好**的真 zip
+>
+> 「把执行前就在那的旧文件冒认成本 Run 产物」交出去的不是坏产物，
+> 是**别人的好产物** —— 它能过 zip-opens、能过磁盘 hash、能进交付集合，
+> **既有判据一条都拦不住**。处置是执行前拍 `mtimeMs + size` 快照。
+> 指纹**不用**仓里 `FileFingerprint` 的内容 hash：要答的是「命令碰没碰它」，
+> 而内容 hash 会把「重新生成出逐字节相同的产物」误判成「没生成」。
+
+> ### 【定】一条被推翻的机制判断，值得与被采纳的并排记
+>
+> 评审说「工具版本未升 → 旧 Run Resume/Replay **无法检测语义漂移**」。
+> 回源：`ToolSnapshot.contentHash` 在 Runtime 里**零消费者** ——
+> 根本没有那个检测器可被打败。版本仍然升了（免费），但**真正的缺口是
+> 那个字段没接线**（S3-1 同族，登记 S5-8）。
+> 同批还有两条后果被高估（zip 深度校验、timeout 生命周期），逐条见 §0.16。
+
+> ⚠️ **一条成立但不能当 bug 修的**：「不声明 `artifact_path` 就没有交付物、
+> 仍结算 SUCCESS」。它的退出条件「RunSpec 表达『必须交付 Artifact』的契约」
+> **就是通用 Completion Gate**，而仓里记着它论据被探针推翻。
+> 登记为 S5-7，**要一份重开那个决定的 ADR，不是补丁**。
 
 ### 阶段 3.5：内置 shell 执行（2026-08-30）
 
@@ -454,12 +575,15 @@ npm run verify:crash               # 三个崩溃窗口 × 三条恢复分支（
 npm run verify:drift               # 端点漂移检测 ＋ 对照端点装配 ＋ resume 端点一致性闸门（U-1 / U-6 / P1-1）
 npm run verify:tools               # 批 1：边界 grep（1…7 共 8 条） ＋ 两类声明 ＋ 分页非截断 ＋ 组合器三方法路由 ＋ 读黑名单
 npm run verify:artifact            # 批 2：外置与逐字取回 ＋ URL 护栏 ＋ 产物登记与第二层验证 ＋ role 分流
+                                   #   ＋ ★H 段：run_shell 产出的**二进制** zip 走完整条产物链（ADR-0010）
+                                   #   ＋ ★H3 文件头魔数（404 页伪装成 .jpg）／H4 旧文件不得冒认／I 段 identity
 npm run verify:progress            # 批 3：进展 ＋ 无进展 ＋ 真实慢工具取消 ＋ 人工接管三条状态闭合
 npm run verify:scenarios           # S13：三场景 smoke（决 7 的判据）＋ 三条护栏在场性总校验
 npm run verify:shell               # ★阶段 3.5：两道闸门 ＋ 沙箱实测 ＋ 分支三 ＋ 边界 7
+                                   #   ＋ ★$TMPDIR/tmp 双侧 ＋ effect 不得抄进 URL
 npm run verify:ui                  # ★阶段 4：边界判别力 ＋ 投影幂等 ＋ 三条等人通道走 HTTP ＋ 自动放行正分支
                                    #   ＋ 失败 resume ＋ 恢复项可见 ＋ **跨 workspace 闸门** ＋ workspace 隔离 ＋ §22.6 ＋ SSE 游标
-npm run verify:all                 # 14 条脚本 / 151 条判据
+npm run verify:all                 # 14 条脚本 / 163 条判据
 ```
 
 > **【定】`verify:ui` 必须真的起 HTTP 服务**，不能直接调 `PendingHub` 的方法测。
@@ -723,12 +847,16 @@ tools/common/                ★阶段 3。Case 无关的通用能力面（@work
   src/mech/                  read_blob / request_handoff / ask_user（★3.5）—— 机制工具，声明义务不同
                              【定】request_handoff 与 ask_user 的 description 是**成对**的，
                              只改一边会让模型在两者之间随机选（ADR-0008）
-  src/exec/                  ★阶段 3.5。run_shell ＋ 两道闸门，职责不得合并：
+  src/exec/                  ★阶段 3.5。run_shell（＋ ADR-0010 的 artifact_path 声明）
+                             ＋ 两道闸门，职责不得合并：
                              command-analysis.ts 判「要不要问人」（判错＝多问一次）
                              sandbox.ts          判「能碰到什么」（判错＝没有边界）
                              shell-effect-resolver.ts 住这里而不是 Runtime 的 action/
                              —— 边界 7 抓的就是这一条
   src/artifact-checks/       JSON / ZIP / 编码 / hash 四项。**不做「Markdown 可解析」**（恒绿）
+                             【定】`artifactKindOf`（扩展名 → kind）**唯一一份**住在这里 ——
+                             kind 的全部意义就是决定跑哪些检查器；抄第二份的后果是
+                             两个工具对同一个扩展名跑不同检查器，而两边都是绿的（ADR-0010）
 cases/micro-cases/           只剩 append_log 与 slow_write —— **测量工具**，不是能力
 apps/cli/                    Composition Root（compose.ts）＋ 终端入口 ＋ 14 条验收脚本 ＋ 一次性探针
   src/composite.ts           ★阶段 3。工具包组合器。【定】必须路由 Verifier 的**三个**方法
@@ -785,7 +913,7 @@ apps/workagent-ui/public/    ★阶段 4。Layer 1。**没有 src/、没有构�
 | [探针记录](sxw_aicoding/WorkAgent调研/探针记录/) | 花钱探针的**原始输出**。`probe-requirement-extraction` 推翻了回归评测 §5.1 的归因 |
 | `WorkAgent调研/ProviderProtocolFacts_*.md` | Spike 0 三轮实测事实（75 份证据 / 4 个端点） |
 | `代码评审/` | 按日期分目录。`2026-08-24/` 两份阶段 1 评审；`2026-08-25/` 一份 Bugfix 批次评审 |
-| `ADR/` | 决策记录。阶段 2 三份（[0001](sxw_aicoding/ADR/0001-outcome-kind-不区分是谁没做成.md) / [0002](sxw_aicoding/ADR/0002-恢复可观测性改为-action-级事实.md) / [0003](sxw_aicoding/ADR/0003-受信时间事实冻结到执行段.md)）＋ 阶段 3 三份（[0004 工具归属](sxw_aicoding/ADR/0004-通用工具归属与两类分拣标准.md) / [0005 lease 不做](sxw_aicoding/ADR/0005-PARKED-lease-不做的理由.md) / [0006 读放开的护栏](sxw_aicoding/ADR/0006-读放开的护栏边界.md)）＋ **阶段 3.5 两份**（[0007 结构转换 vs 语义挑选](sxw_aicoding/ADR/0007-html-结构转换可内置语义挑选不可.md) / [0008 ask_user 与 handoff 是两个洞](sxw_aicoding/ADR/0008-ask-user-与-request-handoff-是两个洞.md)）＋ **阶段 4 一份**（[0009 UI 不引入前端框架与 Electron](sxw_aicoding/ADR/0009-阶段4-UI-不引入前端框架与-Electron.md)）；**阶段 1 的四份欠了三个阶段了** |
+| `ADR/` | 决策记录。阶段 2 三份（[0001](sxw_aicoding/ADR/0001-outcome-kind-不区分是谁没做成.md) / [0002](sxw_aicoding/ADR/0002-恢复可观测性改为-action-级事实.md) / [0003](sxw_aicoding/ADR/0003-受信时间事实冻结到执行段.md)）＋ 阶段 3 三份（[0004 工具归属](sxw_aicoding/ADR/0004-通用工具归属与两类分拣标准.md) / [0005 lease 不做](sxw_aicoding/ADR/0005-PARKED-lease-不做的理由.md) / [0006 读放开的护栏](sxw_aicoding/ADR/0006-读放开的护栏边界.md)）＋ **阶段 3.5 两份**（[0007 结构转换 vs 语义挑选](sxw_aicoding/ADR/0007-html-结构转换可内置语义挑选不可.md) / [0008 ask_user 与 handoff 是两个洞](sxw_aicoding/ADR/0008-ask-user-与-request-handoff-是两个洞.md)）＋ **阶段 4 一份**（[0009 UI 不引入前端框架与 Electron](sxw_aicoding/ADR/0009-阶段4-UI-不引入前端框架与-Electron.md)）＋ **2026-08-31 一份**（[0010 二进制交付物走字节通道与按路径声明](sxw_aicoding/ADR/0010-二进制交付物走字节通道与按路径声明.md)）；**阶段 1 的四份欠了三个阶段了** |
 | `spikes/s0-provider-protocol/` | 一次性探针，已完成，不进主干依赖（`tsconfig.json` 已 exclude） |
 
 V04 及更早的架构设计、`V03_Spike0回填清单.md` **不再作为实现依据**，只作过程记录。

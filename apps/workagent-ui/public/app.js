@@ -639,6 +639,13 @@ function renderBudget(view, d) {
   view.appendChild(
     el("p", { class: "mono", text: d.spec.approvalPolicy.requiresApprovalFor.join(", ") || "（无）" }),
   );
+  /**
+   * 入口身份。它在这里不是为了好看 —— `RunSpec.origin` 曾经有一个生产者
+   * （写死 CLI）、零消费者，于是「Web 起的 Run 自称 CLI」整整一个阶段
+   * 没有任何东西能与它矛盾。**把它显示出来就是给它一个消费者。**
+   */
+  view.appendChild(el("h4", { text: "入口（RunSpec.origin）" }));
+  view.appendChild(el("p", { class: "mono", text: d.spec.origin || "（未知）" }));
 }
 
 function fmt(n, unit) {
@@ -649,6 +656,25 @@ function fmt(n, unit) {
 // ── 产物
 
 function renderArtifacts(view, d) {
+  /**
+   * 【定】「登记过的产物」与「Runtime 判定交付了的产物」是两件事，必须分开显示。
+   *
+   * 此前界面只有前者，于是 `deliveredArtifactIds`（§17 的结论本身）
+   * 在白盒界面上**根本看不到** —— 而这个界面存在的理由就是把结论摆出来。
+   * 一个 INTERMEDIATE 产物和一个真正的交付物，在旧界面上长得一模一样。
+   */
+  const delivered = new Set((d.outcome && d.outcome.deliveredArtifactIds) || []);
+  view.appendChild(el("h4", { text: "Runtime 判定的交付集合（deliveredArtifactIds）" }));
+  view.appendChild(
+    el("p", {
+      class: delivered.size ? "mono" : "muted",
+      text: delivered.size
+        ? [...delivered].join("、")
+        : d.outcome
+          ? "（空 —— 这个 Run 没有任何通过检查的 DELIVERABLE）"
+          : "（还没结算）",
+    }),
+  );
   if (d.artifacts.length === 0) {
     view.appendChild(el("p", { class: "muted", text: "（这个 Run 没有登记过产物）" }));
     return;
@@ -658,6 +684,7 @@ function renderArtifacts(view, d) {
       el("span", { class: "toolname", text: a.logicalId }),
       el("span", { class: "chip", text: "v" + a.version }),
       el("span", { class: "chip", text: a.role }),
+      delivered.has(a.artifactId) ? el("span", { class: "chip ok", text: "已交付" }) : null,
       el("span", { class: "chip", text: a.kind }),
       el("span", { class: "chip", text: a.sizeBytes + " 字节" }),
       a.tombstonedAt ? el("span", { class: "chip bad", text: "已 Tombstone" }) : null,
@@ -888,9 +915,23 @@ function approvalCard(p) {
     card.appendChild(
       el("div", {
         class: a.allowNetwork ? "kv bad" : "kv",
-        text: "沙箱：只能写 workspace；" + (a.allowNetwork ? "本次允许联网" : "禁止联网"),
+        // 与 CLI 的 main.ts、run_shell 的 description ① 是同一句话的三处；
+        // 分叉过一次（description 承诺「系统临时目录」而实现只放行 per-call $TMPDIR）。
+        text:
+          "沙箱：只能写 workspace 与本次调用的 $TMPDIR；" +
+          (a.allowNetwork ? "本次允许联网" : "禁止联网"),
       }),
     );
+    /**
+     * 这条命令自称要交付什么（ADR-0010）。人批准的不只是「跑这条命令」，
+     * 还有「它自称要交付这个文件」—— 那是选「执行前声明」而不是
+     * 「执行后扫 workspace」的一半理由，不显示等于没兑现。
+     */
+    if (a.artifactPath) {
+      card.appendChild(
+        el("div", { class: "kv", text: "声明的交付物：" + a.artifactPath + "（" + a.artifactRole + "）" }),
+      );
+    }
   }
   card.appendChild(
     el("div", { class: "row" }, [

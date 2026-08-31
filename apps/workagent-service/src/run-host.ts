@@ -122,6 +122,11 @@ export class RunHost {
   /** runId → 任务原文，供 trace header 用（RunSpec 在库里，但 header 要同步写）。 */
   private readonly taskCache = new Map<string, string>();
   /**
+   * 「已开始、还不知道 runId」那个窗口里的任务原文。见 `startRun` 的说明。
+   * 单槽的前提是前台槽位保证同时只有一个 Run 处在这个窗口里。
+   */
+  private pendingTask: string | undefined;
+  /**
    * 【定】同时只跑一个 Run（§6.4「v0.1 一个 Session 同时只允许一个
    * Foreground Active Run」，D-09）。
    *
@@ -310,6 +315,14 @@ export class RunHost {
       }),
       spec: {
         runSpecId: String(spec.id),
+        /**
+         * 【定】把 `origin` 送到界面上，是为了给它**第一个消费者**。
+         *
+         * 它此前有一个生产者（`makeRunSpec` 写死 `CLI`）、零消费者 ——
+         * 于是 Web 起的 Run 自称 CLI 这件事整整一个阶段没有任何东西能与它矛盾。
+         * 补一个枚举值容易，让它不再退回常量靠的是「有人读」＋ `verify:ui` 的判据。
+         */
+        origin: spec.origin.kind,
         endpointId: String(spec.agentSpec.model.endpointId),
         modelId: spec.agentSpec.model.modelId,
         endpointProfileRef: spec.agentSpec.model.endpointProfileRef,
@@ -344,6 +357,9 @@ export class RunHost {
                 what: i.what,
                 sideEffectState: i.sideEffectState,
               })),
+              // 【定】原样转述 Runtime 的判定，不在这里重算（决 5 / 边界 9）。
+              // 它与 `artifacts`（登记过的全部产物）是两件事，见 api-types 的说明。
+              deliveredArtifactIds: [...outcome.deliveredArtifactIds],
             },
           }
         : {}),
@@ -480,8 +496,26 @@ export class RunHost {
   async startRun(task: string): Promise<{ runId: string }> {
     // 【定】同步占位再 await —— 见 claimForeground 的 TOCTOU 说明。
     this.claimForeground(STARTING);
+    /**
+     * ══════════════════════════════════════════════════════════════════
+     * 【定】task 必须在**第一个事件之前**登记，否则 trace header 写的是「(未知)」。
+     *
+     * 原来 `taskCache.set()` 排在 `await this.drive(gen)` **之后**，而
+     * header 是第一个事件到达时由 `sinkFor()` 生成的 —— 那时 drive 还没返回。
+     * 于是纯 Web 起跑的 Run，JSONL 第一行永远是 `task:"(未知)"`，而下一行
+     * `RunStarted` 与 SQLite 里都有正确任务：**同一个文件里前后矛盾**。
+     *
+     * 但 runId 要等第一个事件才知道，所以这里只能先挂在一个「在途」槽位上。
+     * 它不需要是 Map —— 前台槽位（`claimForeground`）保证同时只有一个 Run
+     * 处在「已开始、还不知道 runId」的窗口里。**这条不变量成立才允许用单槽**，
+     * 将来放开并发（S4-4）时这里要跟着改成按 correlationId 索引。
+     * ══════════════════════════════════════════════════════════════════
+     */
+    this.pendingTask = task;
     try {
-      const spec: RunSpec = this.composed.makeRunSpec(task);
+      // 【定】入口身份从这里传进去。此前 makeRunSpec 写死 CLI，
+      // 于是 Web 起的 Run 在 RunSpec 里自称 CLI，而 trace header 写着 web。
+      const spec: RunSpec = this.composed.makeRunSpec(task, "WEB");
       const gen = this.composed.runtime.start(spec);
       const r = await this.drive(gen);
       this.taskCache.set(r.runId, task);
@@ -489,6 +523,9 @@ export class RunHost {
     } catch (err) {
       this.releaseForeground(STARTING);
       throw err;
+    } finally {
+      // 认领完就清 —— 留着它会让下一个 Run 在 runId 未知的窗口里读到上一个的任务。
+      this.pendingTask = undefined;
     }
   }
 
@@ -887,9 +924,14 @@ export class RunHost {
     }
   }
 
-  /** 任务原文。取不到就如实写 unknown —— header 是审计用的，不要猜。 */
+  /**
+   * 任务原文。取不到就如实写 unknown —— header 是审计用的，不要猜。
+   *
+   * 【定】`pendingTask` 是第二档而不是第一档：runId 已经登记过的，
+   * 以登记的那一份为准。反过来的话，一个 resume 段会被在途的新任务串味。
+   */
   private taskOf(runId: string): string {
-    return this.taskCache.get(runId) ?? "(未知)";
+    return this.taskCache.get(runId) ?? this.pendingTask ?? "(未知)";
   }
 
   /**
