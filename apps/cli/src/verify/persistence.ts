@@ -215,32 +215,117 @@ async function main(): Promise<void> {
     results.push({ seg: "C", ok: cOk });
 
     // ─────────────────────────────────────────────────────────── D
-    section("D. §18.5：schemaVersion 不兼容时逐条降级，不是整份失效");
-    const db = openDb({ path: dbPath });
-    const store = new SqliteTranscriptStore(db);
-    const before = (await store.rebuildMessages(runId)).length;
-    await store.append({
-      runId,
-      schemaVersion: 999,
-      kind: "MESSAGE",
-      message: { role: "user", turn: 99, content: [{ type: "text", text: "来自未来的格式" }] },
-      createdAt: Date.now(),
-    });
-    const after = (await store.rebuildMessages(runId)).length;
-    const stillThere = (await store.readAll(runId)).some((e) => e.schemaVersion === 999);
-    db.close();
+    /**
+     * ══════════════════════════════════════════════════════════════════
+     * 【定】这一段**换了被测对象**（2026-08-31 current-only 清理）。
+     *
+     * 它原本测的是「transcript 逐行 `schemaVersion` 不兼容时逐条降级」——
+     * 而那套前向兼容挡的是一种**不可能存在的数据**：全仓只有一个生产者、
+     * 只写常量 1，判据自己得手工插一条 999 才能触发。判据在为一个
+     * 不存在的场景维护证据。
+     *
+     * 现在测的是取代它的那条规则：**没有 migration，schema 不符就 fail-fast
+     * 并提示删库**。造一个缺列的库，`openDb()` 必须抛，且错误里要说清怎么办。
+     *
+     * 为什么这条有判别力：换成 `CREATE TABLE IF NOT EXISTS` 静默跳过之后
+     * 它会翻红 —— 而那正是这条闸门最容易被顺手写成的样子（旧表还在，
+     * 建表整个跳过，直到某个 SELECT 报 no such column）。
+     * ══════════════════════════════════════════════════════════════════
+     */
+    section("D. 没有 migration：库形状不符必须 fail-fast，并说清楚怎么办");
+    /**
+     * 【定】用 `openDb` 建好当前 schema 再改坏，**不 import `node:sqlite`**。
+     * 直接 `new DatabaseSync()` 会踩边界 5（只允许 packages/store-sqlite 命中），
+     * 而那条边界是对的：判据脚本绕过 Port 去直连数据库，测的就不再是
+     * 生产代码走的那条路。第一次写这段时它当场翻红。
+     */
+    const openStale = (name: string, damage: (db: ReturnType<typeof openDb>) => void): string => {
+      const path = join(tmp, name);
+      const seed = openDb({ path });
+      damage(seed);
+      seed.close();
+      try {
+        openDb({ path }).close();
+        return "";
+      } catch (err) {
+        return (err as Error).message;
+      }
+    };
 
-    fact("插入 schemaVersion=999 前", `${before} 条消息`);
-    fact("插入后重建", `${after} 条消息`);
-    fact("该条目仍在 readAll 里", stillThere ? "是" : "否");
-    const dOk = after === before && stillThere;
+    // ① 缺列 ＋ 缺索引 —— 一个旧版本留下的库就长这样。
+    const missingErr = openStale("stale-missing.db", (db) => {
+      db.exec("DROP INDEX idx_runs_updated");
+      db.exec("ALTER TABLE runs DROP COLUMN updated_at");
+    });
+    /**
+     * ② **多余的旧表**。
+     *
+     * 【定】这一条不能省。断言若只遍历「期望的表」，一张上一版留下的
+     * `schema_migrations` 永远不会被看见 —— 而它恰恰是「这个库来自另一个
+     * 版本」最直接的证据。少了这条判据，一个只比列的实现也能全绿。
+     */
+    const extraErr = openStale("stale-extra.db", (db) => {
+      db.exec("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY)");
+    });
+
+    fact("缺列 ＋ 缺索引的旧库", missingErr ? "抛错" : "静默放行 ← 危险");
+    fact("  报出缺列", /runs：缺 updated_at/.test(missingErr) ? "是" : "否");
+    fact("  报出缺索引", /索引：缺 idx_runs_updated/.test(missingErr) ? "是" : "否");
+    fact("多出 schema_migrations 的旧库", extraErr ? "抛错" : "静默放行 ← 危险");
+    fact("  点名多出的表", /表集合：多出 schema_migrations/.test(extraErr) ? "是" : "否");
+    fact("两条都给出删库命令", missingErr.includes("rm ") && extraErr.includes("rm ") ? "是" : "否");
+
+    const dOk =
+      /runs：缺 updated_at/.test(missingErr) &&
+      /索引：缺 idx_runs_updated/.test(missingErr) &&
+      /表集合：多出 schema_migrations/.test(extraErr) &&
+      missingErr.includes("rm ") &&
+      extraErr.includes("rm ");
     verdict(
       dOk,
       dOk
-        ? "未来格式的条目被重建器跳过，而不是让整份 transcript 失效；同时它仍留在 readAll 里供 Trace 与 Replay 看见 —— 这正是日志方案相对 Snapshot 的收益"
-        : "schemaVersion 逐条降级语义不成立",
+        ? "缺列 / 缺索引 / 多余旧表三种形态都在**动库之前**被挡下，" +
+            "各自点名到具体对象 ＋ 给出删库命令 —— 而不是靠 `IF NOT EXISTS` 先把缺的补上再检查"
+        : `旧库没有被完整挡住：\n  缺列库 → ${missingErr.slice(0, 120) || "（没抛）"}` +
+            `\n  多表库 → ${extraErr.slice(0, 120) || "（没抛）"}`,
     );
     results.push({ seg: "D", ok: dOk });
+
+    /**
+     * ── D2：坏 payload 必须抛，不许退化成「这些事实从未存在」──────────────
+     *
+     * 【定】它与 D 是同一条纪律的两面：D 说「库的形状不对就别开」，
+     * 这里说「行的内容读不出来就别装作读到了」。
+     *
+     * 被静默吞掉的可能是 RUN_META（预算、验证事实、恢复项、序号下界一起归零）
+     * 或 ACTION_FACT（执行前指纹消失 → §18.2 换一条分支走）——
+     * 而两者都不会报错，只会让 resume 相信那些事实从未发生过。
+     */
+    const badPath = join(tmp, "bad-payload.db");
+    const badDb = openDb({ path: badPath });
+    badDb.exec(
+      `INSERT INTO transcript_entries (run_id, sequence, kind, payload_json, created_at)
+       VALUES ('run_bad', 1, 'RUN_META', '{ 这不是 JSON', 0)`,
+    );
+    let badErr = "";
+    try {
+      await new SqliteTranscriptStore(badDb).readAll(asId<RunId>("run_bad"));
+    } catch (err) {
+      badErr = (err as Error).message;
+    }
+    badDb.close();
+
+    fact("读一条 payload 损坏的 RUN_META", badErr ? "抛错" : "静默返回空 payload ← 危险");
+    fact("错误里点名 run / sequence / kind", /run_bad/.test(badErr) && /sequence=1/.test(badErr) && /RUN_META/.test(badErr) ? "是" : "否");
+    const d2Ok = /run_bad/.test(badErr) && /sequence=1/.test(badErr) && /RUN_META/.test(badErr);
+    verdict(
+      d2Ok,
+      d2Ok
+        ? "坏行当场抛错并点名 run/sequence/kind —— 而不是退化成一条空 payload 的条目，" +
+            "让 resume 把预算、恢复项与执行前指纹当成「从未存在」"
+        : `坏 payload 被静默吞掉，或错误里说不出是哪一条：${badErr.slice(0, 140) || "（没抛）"}`,
+    );
+    results.push({ seg: "D2", ok: d2Ok });
 
     // ─────────────────────────────────────────────────────────── E
     section("E. M-4：RunSpec 能原样读回 ＋ 深冻结逐层生效");

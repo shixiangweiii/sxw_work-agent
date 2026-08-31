@@ -31,29 +31,29 @@ import type { BudgetUsage, RunBudgets } from "../types/run.js";
  * 在两个独立探针中复现。
  */
 export const DEFAULT_CONTEXT_POLICY: ContextBudgetPolicy = {
-  modelWindowTokens: 128_000,
   reservedOutputTokens: 8_192,
   softInputLimitTokens: 60_000,
   hardInputLimitTokens: 100_000,
   compactTargetTokens: 40_000,
   inlineToolResultLimitTokens: 8_000,
-  retrievalPageLimitTokens: 4_000,
 };
 
 /**
- * ── R-1 只修了一半，这里补齐另一半 ────────────────────────────────────────
+ * ── R-1 只修了一半，补齐的那一半也值得记 ──────────────────────────────────
  *
  * R-1 当初的症状是「八条轴里五条有声明、无读取点」。读取点后来接上了
- * （就是下面的 `checkBudgets`），但 `maxInputTokens` / `maxOutputTokens` /
- * `maxTotalWallClockMs` 在 `RunBudgets` 里是**可选**的，这份默认值一个都没给
- * —— `limit === undefined` 就 `continue`，于是**生产装配里八条轴只有五条活着**。
+ * （就是下面的 `checkBudgets`），但两条 token 轴与 `maxTotalWallClockMs`
+ * 在 `RunBudgets` 里是**可选**的，这份默认值一个都没给 ——
+ * `limit === undefined` 就 `continue`，于是**生产装配里八条轴只有五条活着**。
  *
  * 而 `verify:budget` 是逐轴注入 `Partial` 覆盖来撞墙的，它证明的是读取点能用，
  * 不是这条轴在真实 Run 里开着。两件事被同一段绿字掩盖了一个阶段。
  *
  * 代价是实测的：2026-08-28 摸底考试题 1 单次 run 烧掉 420,784 billed input token
- * 与 46,563 output token，八条轴一条都没拦，唯一的后备是那堵当时还拦不住
- * 在途调用的墙钟。
+ * 与 46,563 output token，八条轴一条都没拦。
+ *
+ * 【定】`handoffReserveTokens` 已删。它是同一批里**唯一没被补上读取点**的那条，
+ * 而上面这段话读起来像是全都补齐了 —— 一个自称已修复的缺口比一个登记着的缺口更贵。
  */
 export const DEFAULT_BUDGETS: RunBudgets = {
   maxTurns: 20,
@@ -68,7 +68,7 @@ export const DEFAULT_BUDGETS: RunBudgets = {
    * 【验】这两个数要在前缀缓存断点前移之后复测再定档 —— 缓存修好后
    * billed 会大幅下降，届时可以收紧。
    */
-  maxInputTokens: 1_500_000,
+  maxBilledInputTokens: 1_500_000,
   maxOutputTokens: 200_000,
   /**
    * ── 【定】`maxTotalWallClockMs` 故意留空，不要「顺手补全」它 ─────────────
@@ -88,7 +88,6 @@ export const DEFAULT_BUDGETS: RunBudgets = {
    */
   maxConsecutiveFailures: 3,
   softLimitRatio: 0.8,
-  handoffReserveTokens: 2_000,
 };
 
 // ═══════════════════════════════════════════════════════════ 判定
@@ -100,7 +99,8 @@ export type BudgetAxis =
   | "totalWallClockMs"
   | "modelCalls"
   | "toolCalls"
-  | "inputTokens"
+  /** 【定】名字带 billed —— 它读的是 `billedInputTokens`（含缓存两项）。 */
+  | "billedInputTokens"
   | "outputTokens"
   | "consecutiveFailures";
 
@@ -173,11 +173,9 @@ export interface BudgetAxisReading {
  *
  * 【定】因为它拼不对，而且**错了不会有任何征兆**。
  *
- * 看 `inputTokens` 这一行：它读的是 `usage.billedInputTokens`，不是
- * `usage.inputTokens`。任何一个照着字段名拼表的人都会拼成后者 —— 于是界面上
- * 显示「输入 token 用了 3 万」，而真正会撞墙的那个数是 42 万。
- * 这正是主循环里那条【定】记过的坑（「只读 inputTokens 在命中缓存时低估达 85%」，
- * 摸底考试 14/14 个 run 打出 1482% 假漂移）—— 换个地方再犯一次。
+ * 「哪条轴读哪个字段、配哪个限额」是 Runtime 知识：`billedInputTokens`
+ * 含缓存读写两项，只读 `inputTokens` 在命中时低估达 85%
+ * （摸底考试 14/14 个 run 因此打出 1482% 假漂移）。
  *
  * 【定】所以提出来的是**读数**，不是判定：`checkBudgets` 仍然是唯一的判官，
  * Layer 2 拿到的是它用的同一张表。§5.2「合法状态迁移不由 UI 拥有」不因此松动。
@@ -201,12 +199,13 @@ export function readBudgetAxes(input: CheckBudgetsInput): BudgetAxisReading[] {
     },
     { axis: "modelCalls", used: usage.modelCalls, limit: budgets.maxModelCalls, unit: "count" },
     { axis: "toolCalls", used: usage.toolCalls, limit: budgets.maxToolCalls, unit: "count" },
-    // 【定】billed，不是 inputTokens。见上面那段的说明 —— 这一行是整张表里
-    // 唯一一个「字段名与读数不同名」的地方，也正是抄表的人会抄错的那一行。
+    // 【定】轴名、读数、限额名**三者同名**（本批统一）。此前轴叫 inputTokens、
+    // 读的却是 billed、限额叫 maxInputTokens —— 靠一行注释维持，而注释拦不住
+    // 下一个照字面配置的人（缓存命中时两者差 5 倍以上）。
     {
-      axis: "inputTokens",
+      axis: "billedInputTokens",
       used: usage.billedInputTokens,
-      limit: budgets.maxInputTokens,
+      limit: budgets.maxBilledInputTokens,
       unit: "token",
     },
     {

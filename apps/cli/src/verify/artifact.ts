@@ -39,7 +39,6 @@ import { readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   CollectingTraceSink,
-  DEFAULT_CONTEXT_POLICY,
   findOrphanResults,
   findUnpairedToolUses,
   type ContextMessage,
@@ -974,6 +973,20 @@ async function sectionFetchTrust(): Promise<void> {
           { toolCallId: "c2", name: "fetch_url", input: { url: "http://localhost/x" } },
           { toolCallId: "c3", name: "fetch_url", input: { url: "http://169.254.169.254/latest/meta-data/" } },
           { toolCallId: "c4", name: "fetch_url", input: { url: "file:///etc/passwd" } },
+          /**
+           * 【定】c5 是**带 query 的外发**样本，而且刻意选一个仍然会被
+           * url-guard 拒掉的目标（169.254 是链路本地地址）。
+           *
+           * 两件事要同时成立：① `ActionProposed` 必须带出三条 riskFact
+           * ＋ dataMovement（effect 解析在执行之前，拒不拒都会发）；
+           * ② 判据不许真的发出一个网络请求 —— 一个会连外网的验收脚本
+           * 在没网的机器上是红的，那种红说明不了任何事。
+           */
+          {
+            toolCallId: "c_query",
+            name: "fetch_url",
+            input: { url: "http://169.254.169.254/latest/meta-data/?token=SECRET-VALUE" },
+          },
           { toolCallId: "c5", name: "read_file", input: { path: "note.txt" } },
         ],
       },
@@ -1038,7 +1051,7 @@ async function sectionFetchTrust(): Promise<void> {
         "   它们的价值是让「这次调用把数据发去了哪里」在 Trace 上可审计。\n",
     );
 
-    const denied = ["c1", "c2", "c3", "c4"].map((id) => ({
+    const denied = ["c1", "c2", "c3", "c4", "c_query"].map((id) => ({
       id,
       res: r.results.get(id),
     }));
@@ -1058,51 +1071,57 @@ async function sectionFetchTrust(): Promise<void> {
     const networkEffect = urlProposals.every((p) => p.payload.effect.startsWith("NETWORK "));
 
     verdict(
-      allDenied && networkEffect && urlProposals.length === 4,
+      allDenied && networkEffect && urlProposals.length === 5,
       allDenied && networkEffect
-        ? `私网(169.254)、localhost、127.0.0.1 与 file:// 四条全部被拒；` +
+        ? `私网(169.254，含带 query 的那条)、localhost、127.0.0.1 与 file:// 五条全部被拒；` +
           `URL scope 的 effect 如实标成 NETWORK（不是 READ）—— 数据流出在 Trace 上看得见`
         : !allDenied
           ? "有 URL 没被护栏挡住"
           : "URL scope 的 effectType 没有标成 NETWORK",
     );
 
-    // riskFact 与 dataMovement 直接对 Resolver 验一次 —— 事件载荷里只带了摘要。
-    const eff = r.composed.ports.effects.resolve(
-      {
-        kind: "DECLARATIVE",
-        version: "1.0.0",
-        rules: [
-          {
-            pointer: "/url",
-            effectType: "NETWORK",
-            scopeKind: "URL",
-            reversibility: "REVERSIBLE",
-            operation: "fetch",
-          },
-        ],
-      },
-      { url: "https://example.com/collect?d=SECRET&k=2" },
-      ws.root,
-    );
-    fact("riskFacts", eff.riskFacts.join(", ") || "（空）");
-    fact("dataMovement.destination", eff.dataMovement?.destination ?? "（未填）");
-    fact("dataMovement.scope", eff.dataMovement?.scope ?? "（未填）");
+    /**
+     * ══════════════════════════════════════════════════════════════════
+     * 【定】从**事件流**里读，不再直接调 Resolver。
+     *
+     * 这一段原本是 `ports.effects.resolve(...)` 拿返回值验，注释还写着
+     * 「事件载荷里只带了摘要」—— 也就是说：判据知道这条链路是断的，
+     * 却绕过它去验了源头。而 `policy.ts` 把「让外发在 **Trace 上**可审计」
+     * 列为「越界读放行」的三条护栏之一。
+     *
+     * 判据测的不是它声称在测的东西 —— 而这次被绕过的那一段，正是那句
+     * 依据的全部内容。现在读 `ActionProposed`，它经过的是生产路径本身。
+     * ══════════════════════════════════════════════════════════════════
+     */
+    const proposed = r.trace
+      .byType("ActionProposed")
+      .find((e) => e.payload.toolCallId === "c_query");
+    const riskFacts = proposed?.payload.riskFacts ?? [];
+    const movement = proposed?.payload.dataMovement;
+
+    fact("带 dataMovement 的 ActionProposed", proposed ? "有" : "没有 ← 事件里查不到外发");
+    fact("riskFacts（来自事件）", riskFacts.join(", ") || "（空）");
+    fact("dataMovement.destination", movement?.destination ?? "（未填）");
+    fact("dataMovement.scope", movement?.scope ?? "（未填）");
 
     const movementOk =
-      eff.riskFacts.includes("EXTERNAL_ENDPOINT") &&
-      eff.riskFacts.includes("URL_CARRIES_QUERY") &&
-      eff.riskFacts.includes("DATA_LEAVES_HOST") &&
-      eff.dataMovement?.destination === "example.com" &&
+      riskFacts.includes("EXTERNAL_ENDPOINT") &&
+      riskFacts.includes("URL_CARRIES_QUERY") &&
+      riskFacts.includes("DATA_LEAVES_HOST") &&
+      movement?.destination === "169.254.169.254" &&
       // 【定】记参数名不记参数值 —— 否则这条审计记录自己会变成第二个泄漏点。
-      !JSON.stringify(eff.dataMovement).includes("SECRET");
+      // 参数**名** token 要在，参数**值** SECRET-VALUE 不许在。
+      JSON.stringify(movement).includes("token") &&
+      !JSON.stringify(movement).includes("SECRET");
 
     verdict(
       movementOk,
       movementOk
-        ? "带 query 的外发被标出三条 riskFact，dataMovement 记下了目的地 host 与参数名，" +
-          "且**参数值没有被抄进审计记录**"
-        : "URL scope 的 riskFact / dataMovement 不完整，或把参数值也记进了日志",
+        ? "带 query 的外发在 **ActionProposed 事件上**带出三条 riskFact ＋ dataMovement，" +
+          "记下了目的地 host 与参数名，且**参数值没有被抄进审计记录** —— " +
+          "护栏 3 声称的「Trace 上可审计」这次是在 Trace 上验的"
+        : "riskFacts / dataMovement 没有进事件，或把参数值也记进了日志 —— " +
+          "policy.ts 的护栏 3 是「越界读放行」的依据之一，它不成立时那个放行也不成立",
     );
   } finally {
     composed?.db.close();

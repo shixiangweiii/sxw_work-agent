@@ -24,6 +24,7 @@ import {
   assertProfileMatchesEndpoint,
   loadProfileFromFile,
 } from "@workagent/harness-runtime";
+import { createAnthropicProtocol } from "@workagent/shape-anthropic-messages";
 import { fakeProfile, strictFakeProfile } from "@workagent/testkit";
 import { compose, REPO_ROOT, readEndpointConfig, loadEnv } from "../compose.js";
 import {
@@ -36,6 +37,12 @@ import {
   tempWorkspace,
   verdict,
 } from "./harness.js";
+
+/** 走真实形状适配器把裸错误归一化 —— 与生产路径同一条链路。 */
+function classifyWith(profile: Parameters<typeof createAnthropicProtocol>[0]["profile"], err: unknown) {
+  return createAnthropicProtocol({ profile, tools: [], systemPrompt: "", maxOutputTokens: 1024 })
+    .classifyError(err);
+}
 
 async function main(): Promise<void> {
   banner(
@@ -59,8 +66,17 @@ async function main(): Promise<void> {
   const lenient = fakeProfile();
   const d2 = new DriftDetector(lenient);
 
-  const r2 = d2.observePairingError(400, "messages.1: unexpected tool_result block");
-  const r2none = d1.observePairingError(400, "messages.1: unexpected tool_result block");
+  /**
+   * 【定】用 **`classifyError` 的真实产物**喂它，不手搓一个 RuntimeErrorRecord。
+   *
+   * 本批把这条规则的判别式从 `(httpStatus, message)` 换成了归一化后的
+   * `RuntimeErrorRecord` —— 换的理由就是主循环拿不到裸 status，
+   * 于是它此前**生产路径零调用**。判据要走同一条链路才证得了这件事。
+   */
+  const pairing400 = { status: 400, message: "messages.1: unexpected tool_result block" };
+  const classify = (p: typeof strict): ReturnType<typeof classifyWith> => classifyWith(p, pairing400);
+  const r2 = d2.observePairingError(classify(lenient));
+  const r2none = d1.observePairingError(classify(strict));
   fact("声明不校验 ＋ 收到配对 400", r2 ? `报漂移（${r2.disposition}）` : "未报");
   fact("声明会校验 ＋ 收到配对 400", r2none ? "报漂移" : "未报（正确：声明与实际一致）");
 
@@ -381,7 +397,7 @@ async function main(): Promise<void> {
     startedWith.db.close();
 
     // 同一个库、同一条 transcript，两次 resume 只差 compose 时的那份声明。
-    const tryResume = async (profile: typeof lenient, label: string): Promise<string> => {
+    const tryResume = async (profile: typeof lenient): Promise<string> => {
       const c = compose({
         dbPath,
         workspaceRoot: wsE.root,
@@ -410,9 +426,9 @@ async function main(): Promise<void> {
       protocol: { ...lenient.protocol, validatesToolResultPairing: !lenient.protocol.validatesToolResultPairing },
     };
 
-    const same = await tryResume(lenient, "同一份声明");
-    const changedModel = await tryResume(otherModel, "换了模型");
-    const changedBehavior = await tryResume(editedBehavior, "声明被改过");
+    const same = await tryResume(lenient);
+    const changedModel = await tryResume(otherModel);
+    const changedBehavior = await tryResume(editedBehavior);
 
     fact("同一份声明 resume", same);
     fact("换了 modelId 再 resume", changedModel);

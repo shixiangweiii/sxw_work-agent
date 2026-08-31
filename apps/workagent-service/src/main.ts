@@ -3,7 +3,7 @@
  *
  *   npm run ui
  *   npm run ui -- --port 7788 --endpoint deepseek
- *   npm run ui -- --workspace ./somewhere --db ./somewhere/runs.db
+ *   npm run ui -- --workspace ./somewhere
  *
  * 【定】它与 `npm run dev` 是**同一套装配**（同一个 `compose()`、同一份工具集、
  * 同一个自动放行档位、同一个库、同一个 trace 目录）。两个入口的差别只有一个：
@@ -12,7 +12,7 @@
 
 import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
-import { parseEndpointArg, REPO_ROOT, resolveDbPath } from "../../cli/src/compose.js";
+import { parseEndpointArg, REPO_ROOT, DEFAULT_STATE_DIR } from "../../cli/src/compose.js";
 import { startService } from "./server.js";
 
 function arg(argv: string[], name: string): string | undefined {
@@ -23,18 +23,15 @@ function arg(argv: string[], name: string): string | undefined {
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   const workspaceRoot = resolve(arg(argv, "workspace") ?? resolve(REPO_ROOT, ".workagent-workspace"));
-  const dbPath = resolveDbPath(arg(argv, "db"));
-  const traceDir = resolve(arg(argv, "trace-dir") ?? resolve(REPO_ROOT, ".workagent-runs"));
   const endpoint = parseEndpointArg(argv);
   const portArg = arg(argv, "port");
 
+  // 【定】没有 `--db` / `--trace-dir`：存储位置由 workspace 唯一推出
+  // （`workspaceStorage()`），CLI 与界面同一条规则。
   mkdirSync(workspaceRoot, { recursive: true });
-  mkdirSync(traceDir, { recursive: true });
 
   const svc = await startService({
     workspaceRoot,
-    dbPath,
-    traceDir,
     endpoint,
     /**
      * 【定】注册表放在 `.workagent-state/` 而不是某个 workspace 里面。
@@ -43,7 +40,7 @@ async function main(): Promise<void> {
      * 放进其中一个 workspace 的话，切到别的目录之后就找不着这张表了
      * （而那正是「切换」这个功能要解决的问题）。
      */
-    registryFile: resolve(REPO_ROOT, ".workagent-state", "workspaces.json"),
+    registryFile: resolve(REPO_ROOT, DEFAULT_STATE_DIR, "workspaces.json"),
     // 【定】默认随机端口（§22.6）。`--port` 是给「我要把它固定在书签里」的人用的，
     // 代价是端口可预测 —— 但 Token 与 Origin/Host 校验仍然在，那才是边界。
     ...(portArg ? { port: Number(portArg) } : {}),

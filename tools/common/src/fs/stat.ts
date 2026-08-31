@@ -45,29 +45,22 @@ export const statDefinition: ToolDefinition = {
     },
     required: ["path"],
   },
-  // 【定】本字段当前零消费，授权层推到 bugfix 阶段（阶段 3 方案 S12）。
-  requiredCapabilities: ["fs.read"],
   effectResolution: {
     kind: "DECLARATIVE",
-    version: "1.0.0",
-    rules: [
-      {
-        pointer: "/path",
-        effectType: "READ",
-        scopeKind: "FILE",
-        reversibility: "REVERSIBLE",
-        operation: "stat",
-      },
-    ],
+    rule: {
+      pointer: "/path",
+      effectType: "READ",
+      scopeKind: "FILE",
+      reversibility: "REVERSIBLE",
+      operation: "stat",
+    },
   },
   redaction: { profile: "STANDARD" },
-  retryPolicy: { maxAttempts: 2, backoffMs: 100 },
   idempotency: { isIdempotent: true, isReadOnly: true },
   timeoutPolicy: { timeoutMs: 5_000 },
-  cancellation: { cooperative: true },
   progressReporting: { mode: "NONE" },
-  verification: { mode: "NONE", requiredForSuccess: false, observationCost: "LOW" },
-  recoveryObservation: { kind: "TARGET_EXISTS", requiresPreFingerprint: false },
+  verification: { mode: "NONE", requiredForSuccess: false },
+  recoveryObservation: { requiresPreFingerprint: false },
 };
 
 export async function executeStat(
@@ -143,6 +136,5 @@ export async function executeStat(
 export const statSnapshot: ToolSnapshot = {
   toolId: statDefinition.id,
   version: statDefinition.version,
-  contentHash: `${statDefinition.name}@${statDefinition.version}`,
   definition: statDefinition,
 };

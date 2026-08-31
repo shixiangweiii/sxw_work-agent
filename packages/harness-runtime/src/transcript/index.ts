@@ -9,7 +9,6 @@
  */
 
 import type { ContextMessage, TranscriptEntry } from "../types/transcript.js";
-import { TRANSCRIPT_SCHEMA_VERSION } from "../types/transcript.js";
 import type { ResumableRunFacts } from "../types/run.js";
 import type { RunId } from "../types/ids.js";
 
@@ -39,16 +38,11 @@ export function rebuildFromEntries(entries: TranscriptEntry[]): ContextMessage[]
   for (let i = startIdx; i < sorted.length; i++) {
     const e = sorted[i]!;
     if (e.kind !== "MESSAGE" || !e.message) continue;
-    // schemaVersion 不兼容时跳过单条而不是整个 transcript 失效 ——
-    // 这是日志方案相对 Snapshot 方案最实在的收益：Snapshot 是全有或全无。
-    if (e.schemaVersion > CURRENT_SUPPORTED_SCHEMA) continue;
     messages.push(e.message);
   }
 
   return messages;
 }
-
-export const CURRENT_SUPPORTED_SCHEMA = 1;
 
 // ══════════════════════════════════════════════ 累计事实的落盘与读回
 
@@ -70,20 +64,18 @@ export function makeRunFactsEntry(
 ): Omit<TranscriptEntry, "sequence"> {
   return {
     runId,
-    schemaVersion: TRANSCRIPT_SCHEMA_VERSION,
     kind: "RUN_META",
     meta: { metaKind: RUN_FACTS_META_KIND, facts },
     createdAt,
   };
 }
 
-/** 读回最后一条累计事实。没有（首次运行、或旧 schema）时返回 undefined。 */
+/** 读回最后一条累计事实。首次运行时返回 undefined。 */
 export function readRunFacts(entries: TranscriptEntry[]): ResumableRunFacts | undefined {
   const sorted = [...entries].sort((a, b) => a.sequence - b.sequence);
   for (let i = sorted.length - 1; i >= 0; i--) {
     const e = sorted[i]!;
     if (e.kind !== "RUN_META") continue;
-    if (e.schemaVersion > CURRENT_SUPPORTED_SCHEMA) continue;
     if (e.meta?.["metaKind"] !== RUN_FACTS_META_KIND) continue;
     return e.meta["facts"] as ResumableRunFacts;
   }
@@ -109,7 +101,6 @@ export function makeActionFactEntry(
 ): Omit<TranscriptEntry, "sequence"> {
   return {
     runId,
-    schemaVersion: TRANSCRIPT_SCHEMA_VERSION,
     kind: "ACTION_FACT",
     meta: { metaKind: ACTION_PRE_FINGERPRINT_KIND, fact },
     createdAt: fact.at,
@@ -130,7 +121,6 @@ export function readActionPreFingerprints(
   const out = new Map<string, ActionPreFingerprint>();
   for (const e of entries) {
     if (e.kind !== "ACTION_FACT") continue;
-    if (e.schemaVersion > CURRENT_SUPPORTED_SCHEMA) continue;
     if (e.meta?.["metaKind"] !== ACTION_PRE_FINGERPRINT_KIND) continue;
     const f = e.meta["fact"] as ActionPreFingerprint;
     out.set(f.toolCallId, f);

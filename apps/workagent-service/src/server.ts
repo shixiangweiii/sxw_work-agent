@@ -25,6 +25,7 @@ import { extname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { RunEvent } from "@workagent/harness-runtime";
 import { join } from "node:path";
+import { workspaceStorage } from "../../cli/src/compose.js";
 import { RunHost, type RunHostOptions } from "./run-host.js";
 import { WorkspaceHosts } from "./workspace-hosts.js";
 import { LocalGuard, SECURITY_HEADERS } from "./security.js";
@@ -44,14 +45,30 @@ const UI_DIR = resolve(
   "../../workagent-ui/public",
 );
 
-export interface ServiceOptions extends RunHostOptions {
+export interface ServiceOptions extends Omit<RunHostOptions, "dbPath" | "traceDir"> {
+  /**
+   * 覆盖 bootstrap workspace 的存储位置。**只给验收脚本用。**
+   *
+   * 【定】生产路径没有这个入口：存储位置由 `workspaceStorage(workspaceRoot)`
+   * 唯一推出，CLI 与界面同一条规则。此前它是**生产行为**（服务启动时
+   * 把注册表的默认值覆盖回 CLI 的旧路径，为的是让旧库里的 Run 还能显示），
+   * 那是为历史数据保留的第二套规则，已经删掉。
+   *
+   * 留给脚本是因为它们要 `:memory:` 与临时目录 —— 与 `ComposeOptions.dbPath`
+   * 同一个性质：**旋钮长在测量装置这边**。
+   */
+  storageOverride?: { dbPath: string; traceDir: string };
   /** 0 = 随机端口（§22.6 的「随机端口」）。 */
   port?: number;
   /** 固定 Token。**只给验收脚本用** —— 生产一律随机。 */
   token?: string;
   /**
    * workspace 注册表的位置（Layer 2 产品状态）。
-   * 不传则不启用多 workspace —— 验收脚本大多只关心单个 workspace 的行为。
+   *
+   * 【定】它是**默认路径的覆盖**，不是功能开关 —— 多 workspace 一直是开着的。
+   * 此前这里写着「不传则不启用多 workspace」，而 `startService` 无论传不传
+   * 都会建 `WorkspaceHosts`，只是缺省时落在 `<workspace>/.workagent/`。
+   * 验收脚本传它是为了把注册表关进临时目录，不是为了关掉这个功能。
    */
   registryFile?: string;
 }
@@ -78,8 +95,7 @@ export async function startService(opts: ServiceOptions): Promise<RunningService
     ...(opts.composeOverrides ? { composeOverrides: opts.composeOverrides } : {}),
     bootstrap: {
       path: opts.workspaceRoot,
-      dbPath: opts.dbPath,
-      traceDir: opts.traceDir,
+      ...(opts.storageOverride ? { storage: opts.storageOverride } : {}),
     },
   });
   const host = (): RunHost => workspaces.host();
@@ -189,8 +205,8 @@ async function handle(
         name: w.name,
         path: w.path,
         realPath: w.realPath,
-        dbPath: w.dbPath,
-        traceDir: w.traceDir,
+        // 【定】现算，与注册表无关 —— 派生值不落盘（见 WorkspaceEntry）。
+        ...workspaceStorage(w.realPath),
         createdAt: w.createdAt,
         lastUsedAt: w.lastUsedAt,
         active: w.id === activeId,

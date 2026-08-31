@@ -62,24 +62,18 @@ export const editFileDefinition: ToolDefinition = {
     },
     required: ["path", "old_string", "new_string"],
   },
-  // 【定】本字段当前零消费，授权层推到 bugfix 阶段（阶段 3 方案 S12）。
-  requiredCapabilities: ["fs.write"],
   effectResolution: {
     kind: "DECLARATIVE",
-    version: "1.0.0",
-    rules: [
-      {
-        pointer: "/path",
-        effectType: "WRITE",
-        scopeKind: "FILE",
-        // 旧内容被新内容盖掉，找不回来 —— 与覆盖写同档。
-        reversibility: "PARTIALLY_REVERSIBLE",
-        operation: "edit",
-      },
-    ],
+    rule: {
+      pointer: "/path",
+      effectType: "WRITE",
+      scopeKind: "FILE",
+      // 旧内容被新内容盖掉，找不回来 —— 与覆盖写同档。
+      reversibility: "PARTIALLY_REVERSIBLE",
+      operation: "edit",
+    },
   },
   redaction: { profile: "STANDARD" },
-  retryPolicy: { maxAttempts: 1, backoffMs: 0 },
   /**
    * 【定】真的非幂等，不是为了测试才这么标（对比 write_file 的说明）。
    *
@@ -88,13 +82,10 @@ export const editFileDefinition: ToolDefinition = {
    */
   idempotency: { isIdempotent: false, isReadOnly: false },
   timeoutPolicy: { timeoutMs: 30_000 },
-  cancellation: { cooperative: true },
   progressReporting: { mode: "NONE" },
   verification: {
     mode: "REOBSERVE",
     requiredForSuccess: true,
-    observationCost: "LOW",
-    timeoutMs: 5_000,
   },
   /**
    * 【定】`requiresPreFingerprint: true`。
@@ -103,7 +94,7 @@ export const editFileDefinition: ToolDefinition = {
    * 判不出「那次替换发生没发生」—— 新内容可能本来就在那儿。
    * 只有拿执行前的 hash 比一比，才回答得了。
    */
-  recoveryObservation: { kind: "TARGET_CONTENT_HASH", requiresPreFingerprint: true },
+  recoveryObservation: { requiresPreFingerprint: true },
 };
 
 export async function executeEditFile(
@@ -343,6 +334,5 @@ function diagnoseNoMatch(text: string, oldString: string, path: string): string 
 export const editFileSnapshot: ToolSnapshot = {
   toolId: editFileDefinition.id,
   version: editFileDefinition.version,
-  contentHash: `${editFileDefinition.name}@${editFileDefinition.version}`,
   definition: editFileDefinition,
 };

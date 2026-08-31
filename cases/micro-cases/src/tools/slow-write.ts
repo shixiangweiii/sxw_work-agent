@@ -58,26 +58,19 @@ export const slowWriteDefinition: ToolDefinition = {
     },
     required: ["path", "content"],
   },
-  // 【定】本字段当前零消费，授权层推到 bugfix 阶段（阶段 3 方案 S12）。
-  requiredCapabilities: ["fs.write"],
   effectResolution: {
     kind: "DECLARATIVE",
-    version: "1.0.0",
-    rules: [
-      {
-        pointer: "/path",
-        effectType: "WRITE",
-        scopeKind: "FILE",
-        reversibility: "PARTIALLY_REVERSIBLE",
-        operation: "write",
-      },
-    ],
+    rule: {
+      pointer: "/path",
+      effectType: "WRITE",
+      scopeKind: "FILE",
+      reversibility: "PARTIALLY_REVERSIBLE",
+      operation: "write",
+    },
   },
   redaction: { profile: "STANDARD" },
-  retryPolicy: { maxAttempts: 1, backoffMs: 0 },
   idempotency: { isIdempotent: false, isReadOnly: false },
   timeoutPolicy: { timeoutMs: 60_000 },
-  cancellation: { cooperative: true },
   /**
    * 慢工具必须回报进展（V05 §16.2）。
    *
@@ -86,14 +79,12 @@ export const slowWriteDefinition: ToolDefinition = {
    * 声明比实现慢五倍，`verify:progress` A 段「600ms 至少报 3 次」这条期望
    * 依赖的其实是实现的 200，按声明算一次都不该有（阶段 3 收口批改）。
    */
-  progressReporting: { mode: "HEARTBEAT", intervalMs: 200 },
+  progressReporting: { mode: "HEARTBEAT" },
   verification: {
     mode: "REOBSERVE",
     requiredForSuccess: true,
-    observationCost: "LOW",
-    timeoutMs: 5_000,
   },
-  recoveryObservation: { kind: "TARGET_CONTENT_HASH", requiresPreFingerprint: false },
+  recoveryObservation: { requiresPreFingerprint: false },
 };
 
 export async function executeSlowWrite(
@@ -168,6 +159,5 @@ function sleep(ms: number): Promise<void> {
 export const slowWriteSnapshot: ToolSnapshot = {
   toolId: slowWriteDefinition.id,
   version: slowWriteDefinition.version,
-  contentHash: `${slowWriteDefinition.name}@${slowWriteDefinition.version}`,
   definition: slowWriteDefinition,
 };

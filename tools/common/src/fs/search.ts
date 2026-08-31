@@ -109,26 +109,19 @@ export const searchDefinition: ToolDefinition = {
     },
     required: ["pattern"],
   },
-  // 【定】本字段当前零消费，授权层推到 bugfix 阶段（阶段 3 方案 S12）。
-  requiredCapabilities: ["fs.read"],
   effectResolution: {
     kind: "DECLARATIVE",
-    version: "1.0.0",
-    rules: [
-      {
-        pointer: "/path",
-        effectType: "READ",
-        scopeKind: "DIRECTORY",
-        reversibility: "REVERSIBLE",
-        operation: "search",
-      },
-    ],
+    rule: {
+      pointer: "/path",
+      effectType: "READ",
+      scopeKind: "DIRECTORY",
+      reversibility: "REVERSIBLE",
+      operation: "search",
+    },
   },
   redaction: { profile: "STANDARD" },
-  retryPolicy: { maxAttempts: 1, backoffMs: 0 },
   idempotency: { isIdempotent: true, isReadOnly: true },
   timeoutPolicy: { timeoutMs: 60_000 },
-  cancellation: { cooperative: true },
   /**
    * 【定】MONOTONIC_PROGRESS —— 它是本批唯一**真的能回报**的场景工具。
    *
@@ -137,8 +130,8 @@ export const searchDefinition: ToolDefinition = {
    * 单调的、与工作量成正比，而「30 秒一次」这个节奏这里根本产生不出来。
    */
   progressReporting: { mode: "MONOTONIC_PROGRESS" },
-  verification: { mode: "NONE", requiredForSuccess: false, observationCost: "LOW" },
-  recoveryObservation: { kind: "TARGET_EXISTS", requiresPreFingerprint: false },
+  verification: { mode: "NONE", requiredForSuccess: false },
+  recoveryObservation: { requiresPreFingerprint: false },
 };
 
 export interface SearchMatch {
@@ -355,6 +348,5 @@ function clip(line: string): string {
 export const searchSnapshot: ToolSnapshot = {
   toolId: searchDefinition.id,
   version: searchDefinition.version,
-  contentHash: `${searchDefinition.name}@${searchDefinition.version}`,
   definition: searchDefinition,
 };

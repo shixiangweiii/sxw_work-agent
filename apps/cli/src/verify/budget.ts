@@ -208,8 +208,8 @@ async function main(): Promise<void> {
       { axis: "modelCalls", budgets: { maxTurns: 999, maxModelCalls: 4 } },
       { axis: "toolCalls", budgets: { maxTurns: 999, maxToolCalls: 5 } },
       {
-        axis: "inputTokens",
-        budgets: { maxTurns: 999, maxInputTokens: 450 },
+        axis: "billedInputTokens",
+        budgets: { maxTurns: 999, maxBilledInputTokens: 450 },
         usage: { inputTokens: 100, outputTokens: 20 },
       },
       {
@@ -258,7 +258,7 @@ async function main(): Promise<void> {
         "   一条轴都没拦住。\n",
     );
     const tokenAxes: Array<[string, number | undefined]> = [
-      ["maxInputTokens", DEFAULT_BUDGETS.maxInputTokens],
+      ["maxBilledInputTokens", DEFAULT_BUDGETS.maxBilledInputTokens],
       ["maxOutputTokens", DEFAULT_BUDGETS.maxOutputTokens],
     ];
     for (const [name, v] of tokenAxes) fact(name, v ?? "（未设 —— 这条轴在生产里是死的）");

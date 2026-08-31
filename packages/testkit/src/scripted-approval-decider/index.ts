@@ -9,14 +9,6 @@
 
 import type { ApprovalDecider, ApprovalDecision, PreparedAction } from "@workagent/harness-runtime";
 
-export function alwaysApprove(): ApprovalDecider {
-  return async () => ({ approved: true });
-}
-
-export function alwaysReject(reason = "脚本化拒绝"): ApprovalDecider {
-  return async () => ({ approved: false, reason });
-}
-
 /** 按调用序号给出决策。用于「第 N 个被拒绝」这类场景。 */
 export function approveExcept(rejectIndices: number[], reason = "脚本化拒绝"): ApprovalDecider {
   let i = -1;

@@ -11,7 +11,6 @@
 
 import {
   rebuildFromEntries,
-  TRANSCRIPT_SCHEMA_VERSION,
   type ContextMessage,
   type RunId,
   type TranscriptEntry,
@@ -23,7 +22,6 @@ import { inTransaction, type Db } from "./db.js";
 interface Row {
   run_id: string;
   sequence: number;
-  schema_version: number;
   kind: string;
   payload_json: string;
   created_at: number;
@@ -100,17 +98,10 @@ export class SqliteTranscriptStore implements TranscriptStorePort {
     this.db
       .prepare(
         `INSERT INTO transcript_entries
-           (run_id, sequence, schema_version, kind, payload_json, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+           (run_id, sequence, kind, payload_json, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
       )
-      .run(
-        String(entry.runId),
-        sequence,
-        entry.schemaVersion || TRANSCRIPT_SCHEMA_VERSION,
-        entry.kind,
-        payload,
-        entry.createdAt,
-      );
+      .run(String(entry.runId), sequence, entry.kind, payload, entry.createdAt);
 
     return sequence;
   }
@@ -122,7 +113,7 @@ export class SqliteTranscriptStore implements TranscriptStorePort {
   async readAll(runId: RunId): Promise<TranscriptEntry[]> {
     const rows = this.db
       .prepare(
-        `SELECT run_id, sequence, schema_version, kind, payload_json, created_at
+        `SELECT run_id, sequence, kind, payload_json, created_at
            FROM transcript_entries WHERE run_id = ? ORDER BY sequence ASC`,
       )
       .all(String(runId)) as unknown as Row[];
@@ -140,30 +131,41 @@ export class SqliteTranscriptStore implements TranscriptStorePort {
 /**
  * 行 → TranscriptEntry。
  *
- * 【定】§18.5：`schemaVersion` 不兼容时，重建器必须能**跳过或 upcast 单条**，
- * 而不是整个 transcript 失效。这里的职责只是如实读出版本号 ——
- * 判定与跳过在 `rebuildFromEntries` / `readRunFacts` 里，
- * 不要在这一层提前过滤掉，否则 Trace 与 Replay 就看不到那些条目存在过。
+ * ══════════════════════════════════════════════════════════════════════
+ * 【定】payload 解析失败**必须抛**，并点名是哪一条。
  *
- * payload 解析失败也不抛：一条坏行不该让整个 Run 无法恢复。它会退化成
- * 一条没有 message 的条目，在重建时被自然跳过（`kind !== "MESSAGE" || !message`）。
+ * 它此前退化成一条空 payload 的条目，注释写着「一条坏行不该让整个 Run
+ * 无法恢复」。那句话把代价说反了 —— 被静默丢掉的可能是：
+ *
+ *   MESSAGE          恢复出来的上下文少一段，而模型不会发现；
+ *   RUN_META         预算、验证事实、恢复项、序号下界一起归零；
+ *   ACTION_FACT      执行前指纹消失 → §18.2 的分支判定换一条路走；
+ *   COMPACT_BOUNDARY 重建从错误的位置开始。
+ *
+ * 也就是说：**一条坏数据不会失败，会被解释成「这些事实从未存在」**。
+ * 这和本批删掉逐行 `schemaVersion` 跳过的理由是同一条 —— 那次删了，
+ * 而同一个文件里这一处留着，口径不一致（codex 二次评审 P1-3）。
+ * ══════════════════════════════════════════════════════════════════════
  */
 function toEntry(r: Row): TranscriptEntry {
   let payload: {
     message?: ContextMessage;
     compactSummary?: ContextMessage;
     meta?: Record<string, unknown>;
-  } = {};
+  };
   try {
     payload = JSON.parse(r.payload_json) as typeof payload;
-  } catch {
-    payload = {};
+  } catch (err) {
+    throw new Error(
+      `transcript 条目损坏，无法解析 payload：run=${r.run_id} sequence=${r.sequence} ` +
+        `kind=${r.kind}（${(err as Error).message}）。\n` +
+        `恢复的唯一来源就是它 —— 跳过这一条会把「读不出来」变成「从未发生过」。`,
+    );
   }
 
   const entry: TranscriptEntry = {
     runId: r.run_id as RunId,
     sequence: Number(r.sequence),
-    schemaVersion: Number(r.schema_version),
     kind: r.kind as TranscriptEntryKind,
     createdAt: Number(r.created_at),
   };

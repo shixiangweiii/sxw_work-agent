@@ -6,7 +6,6 @@ import type {
   ActionBatchId,
   ActionId,
   AttemptId,
-  BlobRef,
   JsonValue,
   RunId,
   Timestamp,
@@ -25,12 +24,6 @@ export interface EffectScope {
   value: string;
 }
 
-export interface PreconditionFingerprint {
-  target: string;
-  hash?: string;
-  existedAt?: Timestamp;
-}
-
 export interface DataMovementDescriptor {
   destination: string;
   scope: string;
@@ -41,10 +34,13 @@ export interface ResolvedEffect {
   operation: string;
   scope: EffectScope;
   reversibility: "REVERSIBLE" | "PARTIALLY_REVERSIBLE" | "IRREVERSIBLE";
+  /**
+   * 这次调用把数据发去了哪里（护栏 3）。
+   * 【定】它与 `riskFacts` 一起进 `ActionProposed` 事件 —— 那是
+   * `policy.ts` 「让外发在 Trace 上可审计」这句话唯一的兑现处。
+   */
   dataMovement?: DataMovementDescriptor;
-  targetFingerprints: PreconditionFingerprint[];
   riskFacts: string[];
-  resolverVersion: string;
   digest: string;
 }
 
@@ -57,8 +53,15 @@ export interface DeclarativeScopeRule {
   operation: string;
 }
 
+/**
+ * 【定】DECLARATIVE 那一档是**单条**规则，不是数组。
+ *
+ * 此前是 `rules: DeclarativeScopeRule[]`，而解析器只读 `rules[0]` ——
+ * 谁写第二条会被静默丢弃，而这里恰好是 §12.4「不以自由文本作为授权边界」
+ * 最不能出错的地方：被丢掉的那条规则可能正是限制写入范围的那条。
+ */
 export type EffectResolutionDescriptor =
-  | { kind: "DECLARATIVE"; version: string; rules: DeclarativeScopeRule[] }
+  | { kind: "DECLARATIVE"; rule: DeclarativeScopeRule }
   | { kind: "RESOLVER"; resolverRef: VersionedRef<unknown> };
 
 // ─────────────────────────────────────────────────────── Descriptors
@@ -76,20 +79,10 @@ export interface RedactionDescriptor {
 export interface IdempotencyDescriptor {
   isIdempotent: boolean;
   isReadOnly: boolean;
-  idempotencyKeyPointer?: string;
 }
 
 export interface TimeoutPolicy {
   timeoutMs: number;
-}
-
-export interface RetryPolicy {
-  maxAttempts: number;
-  backoffMs: number;
-}
-
-export interface CancellationDescriptor {
-  cooperative: boolean;
 }
 
 /**
@@ -116,25 +109,16 @@ export interface CancellationDescriptor {
  */
 export interface ProgressReportingDescriptor {
   mode: "NONE" | "HEARTBEAT" | "MONOTONIC_PROGRESS";
-  intervalMs?: number;
 }
 
+/** 【定】值域只放**有实现**的两档。`INLINE_RESULT` / `CUSTOM_VERIFIER` 零生产者。 */
 export interface VerificationDescriptor {
-  mode: "NONE" | "INLINE_RESULT" | "REOBSERVE" | "CUSTOM_VERIFIER";
-  verifierRef?: string;
+  mode: "NONE" | "REOBSERVE";
   /** 唯一一个能把 SUCCESS 降级为 COMPLETED_WITH_LIMITS 的信号（V05 §10.4）。 */
   requiredForSuccess: boolean;
-  observationCost: "LOW" | "MEDIUM" | "HIGH";
-  timeoutMs?: number;
-  staleAfterMs?: number;
 }
 
-export interface ConcurrencyDescriptor {
-  mode: "SAFE" | "EXCLUSIVE" | "KEYED";
-  key?: string;
-}
-
-/** 一个极简的 JSON Schema 子集。够阶段 1 的两个工具用，不引入 schema 库。 */
+/** 一个极简的 JSON Schema 子集。够当前工具面用，不引入 schema 库（D-25 精神）。 */
 export interface JsonSchema {
   type: "object";
   properties: Record<string, JsonSchemaProperty>;
@@ -146,20 +130,26 @@ export interface JsonSchemaProperty {
   description?: string;
 }
 
+/**
+ * 【定】这里只放**Runtime 真的会读**的声明。
+ *
+ * 此前还有 `requiredCapabilities` / `retryPolicy` / `cancellation` /
+ * `concurrency` 四项：14 个工具逐个认真填值，Runtime 侧零消费点。
+ * 后果不是浪费几行 —— 是工具作者会以为 Harness 已经提供了重试、
+ * 能力校验、协作式取消与并发保护。**声明了却不生效比不声明更危险。**
+ * 真要做它们时，第一步是写消费者，不是补声明。
+ */
 export interface ToolDefinition {
   id: ToolId;
   version: string;
   name: string;
   description: string;
   inputSchema: JsonSchema;
-  requiredCapabilities: string[];
   effectResolution: EffectResolutionDescriptor;
   /** 必填（V05 §12.3）。 */
   redaction: RedactionDescriptor;
-  retryPolicy: RetryPolicy;
   idempotency: IdempotencyDescriptor;
   timeoutPolicy: TimeoutPolicy;
-  cancellation: CancellationDescriptor;
   progressReporting: ProgressReportingDescriptor;
   verification: VerificationDescriptor;
   /**
@@ -223,18 +213,17 @@ export interface ToolDefinition {
    * Agent 在干活。只有「在等外部世界里的人」才该两者都做。
    */
   waitsForHumanInteraction?: boolean;
-  concurrency?: ConcurrencyDescriptor;
 }
 
 /**
  * 崩溃后观察的声明。
  *
- * `kind` 供 VerificationPort 的实现理解「该拍什么指纹、怎么比」——
- * Runtime 只负责在执行前把指纹存下来、在恢复时取出来交回去，
- * **不理解指纹的内容**（那是工具域知识，而依赖方向禁止 Runtime 认识 Case 包）。
+ * 【定】只剩 `requiresPreFingerprint` 一个字段 —— 它是 §18.2 分支二判定的
+ * 合取项之一，有真实读取点。此前还有一个 `kind`（TARGET_EXISTS /
+ * TARGET_CONTENT_HASH / TARGET_APPEND_TAIL），两个 Verifier 都按
+ * `action.toolName` 分支，谁都没读过它。
  */
 export interface RecoveryObservationDescriptor {
-  kind: "TARGET_EXISTS" | "TARGET_CONTENT_HASH" | "TARGET_APPEND_TAIL";
   /**
    * 观察是否**必须**有执行前指纹才成立。
    *
@@ -245,10 +234,17 @@ export interface RecoveryObservationDescriptor {
   requiresPreFingerprint: boolean;
 }
 
+/**
+ * 【定】没有 `contentHash`。
+ *
+ * 它此前是 `${name}@${version}` —— 一个叫 hash 的字段装着版本标签，
+ * 且全仓零读取点。真正的内容身份由 `store-sqlite/run-repository` 对
+ * 序列化后的 AgentSpec 现算（那才是 `agent_spec_snapshots` 的主键）。
+ * 留着它只会让人以为已经有了内容寻址保证。
+ */
 export interface ToolSnapshot {
   toolId: ToolId;
   version: string;
-  contentHash: string;
   definition: ToolDefinition;
 }
 
@@ -261,8 +257,7 @@ export type ActionStage =
   | "REJECTED_APPROVAL"
   | "PREPARED"
   | "EXECUTING"
-  | "SETTLED"
-  | "SKIPPED";
+  | "SETTLED";
 
 export interface ProposedAction {
   id: ActionId;
@@ -277,16 +272,14 @@ export interface ProposedAction {
   toolName: string;
   rawInput: unknown;
   stage: ActionStage;
-  schemaError?: RuntimeErrorRecord;
   createdAt: Timestamp;
 }
 
 export interface PreparedAction extends ProposedAction {
   normalizedInput: JsonValue;
+  /** Progress Guard 的打转判据之一（另一个是 `resolvedEffect.digest`）。 */
   inputDigest: string;
   resolvedEffect: ResolvedEffect;
-  actionDigest: string;
-  previewRef?: BlobRef;
   preparedAt: Timestamp;
 }
 
@@ -295,7 +288,8 @@ export interface ExecutionAttempt {
   actionId: ActionId;
   startedAt: Timestamp;
   finishedAt?: Timestamp;
-  status: "STARTED" | "SUCCEEDED" | "FAILED" | "CANCELLED" | "SKIPPED";
+  /** 【定】只有这两个有写入点。执行要么跑完了要么没跑成，没有第三种记录。 */
+  status: "SUCCEEDED" | "FAILED";
   sideEffectState: SideEffectState;
   output?: string;
   error?: RuntimeErrorRecord;
@@ -306,7 +300,6 @@ export interface ExecutionAttempt {
 export interface BatchSettlementPolicy {
   onActionFailure: "CONTINUE_REMAINING" | "SKIP_REMAINING" | "ABORT_BATCH";
   onApprovalRejected: "SKIP_REMAINING" | "CONTINUE_REMAINING";
-  onCancel: "ABORT_UNSTARTED";
 }
 
 /**
@@ -319,7 +312,6 @@ export interface BatchSettlementPolicy {
 export const DEFAULT_SETTLEMENT: BatchSettlementPolicy = {
   onActionFailure: "CONTINUE_REMAINING",
   onApprovalRejected: "CONTINUE_REMAINING",
-  onCancel: "ABORT_UNSTARTED",
 };
 
 export interface ActionBatch {
@@ -328,33 +320,16 @@ export interface ActionBatch {
   invocationId: string;
   actions: PreparedAction[];
   /**
-   * v0.1 恒为 SEQUENTIAL（D-01）。理据是 Runtime 自持，不是协议保障：
-   * 四个端点全部静默接受强制单条开关，其中三个不生效，没有一个会告诉你「我不支持」。
+   * 【定·D-01】恒为 SEQUENTIAL，所以它是一个**单值类型**而不是二选一。
+   *
+   * 理据是 Runtime 自持，不是协议保障：四个端点全部静默接受强制单条开关，
+   * 其中三个不生效，没有一个会告诉你「我不支持」。写成联合类型会让人
+   * 以为另一档是可选项，而全仓没有任何并发执行路径。
    */
-  executionMode: "SEQUENTIAL" | "CONCURRENT_LIMITED";
-  maxConcurrency?: number;
-  approvalMode: "PER_ACTION" | "BATCH_SINGLE";
-  batchDigest: string;
-  settlement: BatchSettlementPolicy;
-  status: "PLANNED" | "IN_PROGRESS" | "SETTLED";
-  settledAt?: Timestamp;
+  executionMode: "SEQUENTIAL";
 }
 
 // ───────────────────────────────────────────────────────── Approval
-
-export interface Approval {
-  id: string;
-  runId: RunId;
-  scope: "ACTION" | "BATCH";
-  actionId?: ActionId;
-  batchId?: ActionBatchId;
-  digest: string;
-  effectScope: EffectScope;
-  reason: string;
-  status: "PENDING" | "APPROVED" | "REJECTED" | "EXPIRED" | "CANCELLED";
-  createdAt: Timestamp;
-  decidedAt?: Timestamp;
-}
 
 export interface ApprovalDecision {
   approved: boolean;

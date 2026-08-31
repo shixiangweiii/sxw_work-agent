@@ -14,7 +14,8 @@
  *
  * ── 【定】一个 workspace 一套存储，这是安全设计不是整理癖 ────────────────
  *
- * 每个 workspace 自带 `dbPath` 与 `traceDir`，默认落在 `<ws>/.workagent/` 下。
+ * 每个 workspace 的存储落在 `<ws>/.workagent/` 下，**由 `workspaceStorage()` 现算**，
+ * 不落盘（见 `WorkspaceEntry.realPath` 上的【定】）。
  * 于是「A 的 Run 出现在 B 的列表里」在**物理上**不成立 —— 而 S4-5 那个洞
  * （在 /A 起的 Run 用 --workspace /B 恢复）的前提正是「同一个库里躺着
  * 来自不同目录的 Run」。
@@ -43,16 +44,35 @@ export interface WorkspaceEntry {
   name: string;
   /** 用户敲进来的那个路径（原样留着，报错时好认）。 */
   path: string;
-  /** realpath 之后的那个 —— 身份与所有判定都用它。 */
+  /**
+   * realpath 之后的那个 —— 身份与所有判定都用它，**存储位置也由它现算**。
+   *
+   * ══════════════════════════════════════════════════════════════════
+   * 【定】注册表**不存 `dbPath` / `traceDir`**。
+   *
+   * 它们此前是落盘字段，于是「库在哪」有两个出处：`workspaceStorage()`
+   * 与这份 JSON 里躺着的那一份。后者一旦写进去就再也不会被重算 ——
+   * `create()` 的幂等分支只更新名字与时间，`load()` 只查 `workspaces` 是数组。
+   * 结果：一份旧 `workspaces.json` 里指向 `.workagent-state/runs.db` 的记录
+   * 会继续生效，**绕过本批刚立的唯一规则**（codex 二次评审 P1-4）。
+   *
+   * 派生值不落盘，那条规则就没有第二个出处可绕。
+   * ══════════════════════════════════════════════════════════════════
+   */
   realPath: string;
-  dbPath: string;
-  traceDir: string;
   createdAt: number;
   lastUsedAt: number;
 }
 
+/**
+ * 【定】没有 `version` 字段。
+ *
+ * 它此前有一个 `version: 1` ＋ 一道校验，而没有任何迁移路径 ——
+ * 读到非 1 或读坏都一律重置为空。也就是说那道门与「读坏当空」这条既有降级
+ * **处置完全相同**，它唯一的作用是让人以为注册表有版本管理。
+ * 这是一个产品状态文件，格式变了就重新选一次目录。
+ */
 interface RegistryFile {
-  version: 1;
   activeId: string;
   workspaces: WorkspaceEntry[];
 }
@@ -150,15 +170,11 @@ export class WorkspaceRegistry {
       return { ok: true, entry: existing, warnings: this.warnFor(realPath) };
     }
 
-    const stateDir = join(realPath, ".workagent");
     const entry: WorkspaceEntry = {
       id,
       name: name?.trim() || basenameOf(realPath),
       path: abs,
       realPath,
-      // 【定】一个 workspace 一套存储，见文件头。
-      dbPath: join(stateDir, "runs.db"),
-      traceDir: join(stateDir, "runs"),
       createdAt: Date.now(),
       lastUsedAt: Date.now(),
     };
@@ -212,10 +228,10 @@ export class WorkspaceRegistry {
   }
 
   private load(): RegistryFile {
-    if (!existsSync(this.file)) return { version: 1, activeId: "", workspaces: [] };
+    if (!existsSync(this.file)) return { activeId: "", workspaces: [] };
     try {
       const parsed = JSON.parse(readFileSync(this.file, "utf8")) as RegistryFile;
-      if (parsed.version !== 1 || !Array.isArray(parsed.workspaces)) throw new Error("schema");
+      if (!Array.isArray(parsed.workspaces)) throw new Error("形状不对");
       return parsed;
     } catch {
       /**
@@ -225,7 +241,7 @@ export class WorkspaceRegistry {
        * 可回收」同一档）—— 为了它启动不了服务，代价与收益完全不成比例。
        * 真正不可重建的东西（transcript / RunSpec）在 Layer 3，读不到时那边是抛的。
        */
-      return { version: 1, activeId: "", workspaces: [] };
+      return { activeId: "", workspaces: [] };
     }
   }
 

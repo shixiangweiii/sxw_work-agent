@@ -20,7 +20,6 @@
  * ══════════════════════════════════════════════════════════════════════
  */
 
-import { createHash } from "node:crypto";
 import type {
   UnmetCause,
   ApprovalDecision,
@@ -37,7 +36,7 @@ import type { ModelContent } from "../types/context.js";
 import type { ArtifactCheckFact, RecoveryItem } from "../types/run.js";
 import type { RunEvent } from "../types/event.js";
 import { makeError, type RuntimeErrorRecord } from "../types/error.js";
-import { asId, type ActionBatchId, type ActionId, type AttemptId, type RunId } from "../types/ids.js";
+import { asId, digest, type ActionBatchId, type ActionId, type AttemptId, type RunId } from "../types/ids.js";
 import type {
   ArtifactCheckerPort,
   ArtifactStorePort,
@@ -78,7 +77,6 @@ export interface BatchDeps {
   now: () => number;
   signal: AbortSignal;
   workspaceRoot: string;
-  hasUntrustedContext: boolean;
   settlement?: BatchSettlementPolicy;
   /**
    * 大结果外置（阶段 3 S6，§11.4）。
@@ -167,13 +165,9 @@ export async function* executeBatch(
     runId: deps.runId,
     invocationId: deps.invocationId,
     actions: prepared,
-    // 【定·D-01】v0.1 恒为串行，且必须由 Runtime 自己保证。
+    // 【定·D-01】恒为串行，且必须由 Runtime 自己保证。
     // 实测四个端点全部静默接受强制单条开关，三个不生效，没有一个报错。
     executionMode: "SEQUENTIAL",
-    approvalMode: "PER_ACTION",
-    batchDigest: digest(calls.map((c) => `${c.name}:${JSON.stringify(c.input)}`).join("|")),
-    settlement,
-    status: "PLANNED",
   };
 
   yield ev(deps, "ActionBatchPlanned", {
@@ -181,8 +175,6 @@ export async function* executeBatch(
     callCount: calls.length,
     mode: batch.executionMode,
   });
-
-  batch.status = "IN_PROGRESS";
 
   try {
     for (let i = 0; i < calls.length; i++) {
@@ -197,6 +189,13 @@ export async function* executeBatch(
 
       const actionId = asId<ActionId>(deps.ids.next("act"));
       actionIdByCall.set(call.toolCallId, actionId);
+      /**
+       * 【定】`stage` 从这里起只在**进了 `prepared[]` 的那份**上有意义。
+       *
+       * 三条 REJECTED_SCHEMA 路径此前会给这个局部对象写一次 stage 再 `continue`，
+       * 而它**不会进任何集合**（只有下面那个 `action` 才 push）—— 写完就被丢弃。
+       * 拒绝这件事由 `ActionRejected` 事件承载，那才是有读者的那条轨道。
+       */
       const proposed: ProposedAction = {
         id: actionId,
         runId: deps.runId,
@@ -212,7 +211,6 @@ export async function* executeBatch(
       // ── ① schema 校验。四端点全部放行不合 schema 的入参，这里是唯一一道。
       const snapshot = deps.registry.get(call.name);
       if (!snapshot) {
-        proposed.stage = "REJECTED_SCHEMA";
         const e = makeError({
           code: "TOOL_NOT_FOUND",
           source: "TOOL_INPUT",
@@ -229,7 +227,6 @@ export async function* executeBatch(
       const def = snapshot.definition;
       const validation = validateAndNormalize(call.input, def.inputSchema, def.name);
       if (!validation.ok || validation.normalized === undefined) {
-        proposed.stage = "REJECTED_SCHEMA";
         const e = validation.error!;
         settle(call.toolCallId, renderError(e), true);
         yield ev(deps, "ActionRejected", { actionId, stage: "REJECTED_SCHEMA", reason: e.safeMessage });
@@ -248,7 +245,6 @@ export async function* executeBatch(
         },
       );
       if (!resolveGuarded.ok) {
-        proposed.stage = "REJECTED_SCHEMA";
         settle(call.toolCallId, renderError(resolveGuarded.error), true);
         yield ev(deps, "ActionRejected", {
           actionId,
@@ -265,26 +261,34 @@ export async function* executeBatch(
         normalizedInput: validation.normalized,
         inputDigest: digest(JSON.stringify(validation.normalized)),
         resolvedEffect,
-        actionDigest: digest(
-          [def.name, def.version, JSON.stringify(validation.normalized), resolvedEffect.digest].join("|"),
-        ),
         preparedAt: deps.now(),
       };
       prepared.push(action);
 
+      /**
+       * ══════════════════════════════════════════════════════════════════
+       * 【定】`riskFacts` 与 `dataMovement` 必须进事件（本批决 3）。
+       *
+       * `policy.ts` 把「URL scope 产出 riskFact ＋ dataMovement，**让外发在
+       * Trace 上可审计**」列为「越界读放行」这个决定的三条护栏之一 ——
+       * 而在此之前事件里只有一个拼接字符串 `effect`，那两样**从未离开过
+       * Resolver 的返回值**。既有判据也没测到这一层：它直接调 Resolver 取值，
+       * 绕过了它声称在测的那条链路（「判据测的不是它声称在测的东西」的又一例）。
+       *
+       * 于是那条护栏是一句**不成立的依据**，而放开越界读正是靠它撑着的。
+       * ══════════════════════════════════════════════════════════════════
+       */
       yield ev(deps, "ActionProposed", {
         actionId,
         toolCallId: call.toolCallId,
         toolName: call.name,
         effect: `${resolvedEffect.effectType} ${resolvedEffect.scope.value}`,
+        riskFacts: [...resolvedEffect.riskFacts],
+        ...(resolvedEffect.dataMovement ? { dataMovement: resolvedEffect.dataMovement } : {}),
       });
 
       // ── ③ Policy
-      const verdict = evaluatePolicy({
-        action,
-        approvalPolicy: deps.approvalPolicy,
-        hasUntrustedContext: deps.hasUntrustedContext,
-      });
+      const verdict = evaluatePolicy({ action, approvalPolicy: deps.approvalPolicy });
 
       if (verdict.decision === "DENY") {
         action.stage = "REJECTED_POLICY";
@@ -409,10 +413,13 @@ export async function* executeBatch(
        * **零发出点**，Progress Guard 因此没有任何输入可消费。
        * 这是「未接线比不写更糟」的又一例：读代码的人会以为进展是被监控的。
        *
+       * ⚠️ 修它的那一版**只加了 `progressQueue`，把原来那个只写不读的
+       * `progressNotes` 原样留在了原地** —— 一个仓库把某种缺陷写成文件头的
+       * 教训，然后在同一个函数体里留下了它的实例。2026-08-31 才删掉。
+       *
        * 【定】进展直接 yield，**不进 LoopState**（循环纪律第 4 条）。
        * 它是可观测信号，不是状态。
        */
-      const progressNotes: string[] = [];
       const progressQueue: string[] = [];
       /**
        * U-2：每一步都有自己的超时，但共享 Run 级取消。
@@ -431,10 +438,7 @@ export async function* executeBatch(
       const ctx: ToolExecutionContext = {
         signal: stepSignal,
         workspaceRoot: deps.workspaceRoot,
-        onProgress: (n) => {
-          progressNotes.push(n);
-          progressQueue.push(n);
-        },
+        onProgress: (n) => progressQueue.push(n),
         timezone: deps.timezone,
       };
 
@@ -676,7 +680,6 @@ export async function* executeBatch(
             kind: a.kind,
             ...(a.path === undefined ? {} : { path: a.path }),
             content: a.content,
-            ...(a.derivedFrom === undefined ? {} : { derivedFrom: a.derivedFrom }),
           });
           yield ev(deps, "ArtifactRegistered", {
             artifactId: record.artifactId,
@@ -733,7 +736,7 @@ export async function* executeBatch(
         const note =
           vr.status === "FAILED" ? `\n\n[验证未通过] ${vr.detail}` : "";
         // §11.4：超阈值的结果在这里外置，帧里只留结构合法的 stub。
-        const materialized = await materialize(red.text, call.name, deps);
+        const materialized = await materialize(red.text, deps);
         if (materialized.externalized) {
           yield ev(deps, "ToolResultExternalized", {
             actionId,
@@ -755,8 +758,6 @@ export async function* executeBatch(
     finalize(calls, ledger, deps.signal.aborted || aborted, skipRemaining);
     // 【定】result 补齐了，事实也必须补齐 —— 两者是同一条不变量的两面。
     recordUnmetRequired(calls, deps, ledger, verifiedCallIds, actionIdByCall, verifications, causeByCall);
-    batch.status = "SETTLED";
-    batch.settledAt = deps.now();
   }
 
   const results = calls.map((c) => ledger.get(c.toolCallId)!);
@@ -807,7 +808,6 @@ export async function* executeBatch(
  */
 async function materialize(
   text: string,
-  toolName: string,
   deps: BatchDeps,
 ): Promise<{
   text: string;
@@ -827,11 +827,7 @@ async function materialize(
   }
 
   try {
-    const { ref } = await deps.blobs.put({
-      content: text,
-      runId: deps.runId,
-      toolName,
-    });
+    const { ref } = await deps.blobs.put(text);
     const lines = text.split("\n");
     const stub = {
       status: "EXTERNALIZED",
@@ -961,11 +957,6 @@ function recordUnmetRequired(
 }
 
 /**
- * 合成 result 的形态是端点相关的：Anthropic 形状有 is_error 带外字段，
- * OpenAI 形状只能写进 content。这里约定一个结构化 payload 作为下限，
- * 形状适配器在有带外字段时额外标记（见 protocol.ts 的 toBlock）。
- */
-/**
  * Port 调用的异常收敛（存量清单 R-4）。
  *
  * ══════════════════════════════════════════════════════════════════════
@@ -1090,6 +1081,11 @@ function errorOf(outcome: ToolExecutionOutcome, toolName: string): RuntimeErrorR
   });
 }
 
+/**
+ * 合成 result 的形态是端点相关的：Anthropic 形状有 is_error 带外字段，
+ * OpenAI 形状只能写进 content。这里约定一个结构化 payload 作为下限，
+ * 形状适配器在有带外字段时额外标记（见 protocol.ts 的 toBlock）。
+ */
 function renderError(e: RuntimeErrorRecord): string {
   return JSON.stringify({
     status: "ERROR",
@@ -1100,9 +1096,6 @@ function renderError(e: RuntimeErrorRecord): string {
   });
 }
 
-function digest(s: string): string {
-  return createHash("sha256").update(s).digest("hex").slice(0, 32);
-}
 
 function ev<T extends RunEvent["type"]>(
   deps: BatchDeps,

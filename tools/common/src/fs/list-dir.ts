@@ -50,39 +50,31 @@ export const listDirDefinition: ToolDefinition = {
     },
     required: ["path"],
   },
-  // 【定】本字段当前零消费，授权层推到 bugfix 阶段（阶段 3 方案 S12）。
-  requiredCapabilities: ["fs.read"],
   effectResolution: {
     kind: "DECLARATIVE",
-    version: "1.0.0",
-    rules: [
-      {
-        pointer: "/path",
-        effectType: "READ",
-        scopeKind: "DIRECTORY",
-        reversibility: "REVERSIBLE",
-        operation: "list",
-      },
-    ],
+    rule: {
+      pointer: "/path",
+      effectType: "READ",
+      scopeKind: "DIRECTORY",
+      reversibility: "REVERSIBLE",
+      operation: "list",
+    },
   },
   redaction: { profile: "STANDARD" },
-  retryPolicy: { maxAttempts: 2, backoffMs: 200 },
   // 只读且幂等 —— resume() 遇到它的未配对 tool_use 可以直接重跑（V05 §18.2 分支一）
   idempotency: { isIdempotent: true, isReadOnly: true },
   timeoutPolicy: { timeoutMs: 10_000 },
-  cancellation: { cooperative: true },
   progressReporting: { mode: "NONE" },
   verification: {
     mode: "NONE",
     requiredForSuccess: false,
-    observationCost: "LOW",
   },
   /**
    * 只读 → 崩溃后重跑即可，观察本身没有意义。
    * 【定】阶段 3 起这个字段不再是可选的（§2.2）—— 声明 TARGET_EXISTS
    * 只是说「原则上可以这么观察」，实际走哪条分支由 idempotency 先判掉。
    */
-  recoveryObservation: { kind: "TARGET_EXISTS", requiresPreFingerprint: false },
+  recoveryObservation: { requiresPreFingerprint: false },
 };
 
 export async function executeListDir(
@@ -197,6 +189,5 @@ export async function executeListDir(
 export const listDirSnapshot: ToolSnapshot = {
   toolId: listDirDefinition.id,
   version: listDirDefinition.version,
-  contentHash: `${listDirDefinition.name}@${listDirDefinition.version}`,
   definition: listDirDefinition,
 };

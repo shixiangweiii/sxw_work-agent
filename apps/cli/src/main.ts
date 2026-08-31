@@ -32,10 +32,12 @@ import {
   autoGrantVerdict,
   compose,
   gitProvenance,
+  hostOf,
   parseEndpointArg,
   REPO_ROOT,
   resolveDbPath,
   stripUnsafeDisplayChars,
+  workspaceStorage,
   type AutoGrantVerdict,
   type EndpointChoice,
 } from "./compose.js";
@@ -50,22 +52,25 @@ interface Args {
   task: string;
   workspace: string;
   /**
-   * 【定】阶段 3 决 3 起，「workspace 内的可逆写自动放行」是**默认行为**，
-   * `--yes` 只是它的显式写法（保留是为了不破坏既有命令行与文档）。
+   * 每一个需要审批的操作都停下来问。
    *
-   * 理由：本阶段不接 Capability 授权层，而每写一个文件就停下来问一次，
+   * ── 【定】没有 `--yes` ────────────────────────────────────────────────
+   *
+   * 决 3 起「workspace 内的可逆写自动放行」是**默认行为**，于是 `--yes`
+   * 变成了一个「显式写出默认值」的开关。而 `parseArgs` **从来没有解析过它** ——
+   * 字段是 `yes: !argv.includes("--confirm")`，两个字段编码同一个 bit，
+   * 打 `--yes` 之所以「能用」纯粹是因为默认本来就是它。
+   * 一个文档里承诺、实现里不存在的开关，正是本仓反复猎杀的形态。
+   *
+   * 理由（决 3）：不接 Capability 授权层时，每写一个文件就停下来问一次，
    * 在「读一批文档 → 汇总 → 产出」这种任务里会问十几次 —— 那不是安全，
-   * 那是把闸门变成噪音，用户会开始无脑回车（而无脑回车比自动放行更糟：
-   * 它看起来像是有人在把关）。
-   *
-   * 边界仍在，只是位置不同：越界写由 Policy **直接拒绝**（不给审批机会），
-   * 不可逆与 EXECUTE 仍然逐次问。要恢复「每一步都问」用 `--confirm`。
+   * 是把闸门变成噪音，用户会开始无脑回车（而无脑回车比自动放行更糟：
+   * 它看起来像是有人在把关）。边界仍在，只是位置不同：越界写由 Policy
+   * **直接拒绝**（不给审批机会），不可逆与 EXECUTE 仍然逐次问。
    */
-  yes: boolean;
+  confirm: boolean;
   /** 显式的「批准一切」。见 interactiveApproval 里 E-3 那段说明。 */
   yesAll: boolean;
-  /** 恢复阶段 1–2 的行为：每一个需要审批的操作都停下来问。 */
-  confirm: boolean;
   /** undefined = --no-trace；string = 显式 --trace 路径；"auto" = 按 runId 定名 */
   trace: string | undefined;
   dbPath: string;
@@ -84,12 +89,50 @@ interface Args {
   endpoint: EndpointChoice;
 }
 
+/**
+ * 认识的参数。**带值的与开关分开列**，因为拒绝未知参数要跳过被消费的那个值。
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ * 【定】未知参数**必须让命令失败**，不能静默忽略。
+ *
+ * 这条是 `--yes` 那件事的收尾：那个开关从来没有被解析过，
+ * 打上去之所以「能用」纯粹因为默认档位本来就是它。一个被静默吞掉的
+ * 参数与一个生效的参数，在用户那里完全不可区分 ——
+ * 而这正是本仓反复记的「静默忽略用户配置比不支持更糟」（M-5 的形态）。
+ * ══════════════════════════════════════════════════════════════════════
+ */
+const VALUE_FLAGS = ["task", "workspace", "trace", "db", "resume", "recovery-decision", "recovery-note", "endpoint"];
+const BOOL_FLAGS = ["confirm", "yes-all", "no-trace", "list-runs"];
+
+function assertKnownArgs(argv: string[]): void {
+  for (let i = 0; i < argv.length; i += 1) {
+    const raw = argv[i]!;
+    if (!raw.startsWith("--")) continue;
+    const name = raw.slice(2);
+    if (BOOL_FLAGS.includes(name)) continue;
+    if (VALUE_FLAGS.includes(name)) {
+      i += 1; // 跳过它的值，免得值本身被当成参数
+      continue;
+    }
+    throw new Error(
+      `不认识的参数 ${raw}。\n` +
+        `可用：${[...BOOL_FLAGS, ...VALUE_FLAGS].map((f) => `--${f}`).join(" ")}\n` +
+        (name === "yes"
+          ? `（\`--yes\` 已删除：workspace 内的可逆写自动放行本来就是**默认档位**，` +
+            `而这个开关从来没有被解析过。要逐次询问用 --confirm，要批准一切用 --yes-all。）`
+          : ""),
+    );
+  }
+}
+
 function parseArgs(argv: string[]): Args {
+  assertKnownArgs(argv);
   const get = (name: string): string | undefined => {
     const i = argv.indexOf(`--${name}`);
     return i >= 0 ? argv[i + 1] : undefined;
   };
 
+  const workspace = resolve(get("workspace") ?? resolve(REPO_ROOT, ".workagent-workspace"));
   const resumeId = get("resume");
   const mode: Mode = argv.includes("--list-runs") ? "list" : resumeId ? "resume" : "start";
 
@@ -109,11 +152,10 @@ function parseArgs(argv: string[]): Args {
   return {
     mode,
     task: get("task") ?? "看看 workspace 根目录里有什么，然后写一份 summary.txt 说明你看到了什么。",
-    workspace: resolve(get("workspace") ?? resolve(REPO_ROOT, ".workagent-workspace")),
+    workspace,
     // 决 3：默认放行（有限 auto-grant）。`--confirm` 显式恢复逐次询问。
-    yes: !argv.includes("--confirm"),
-    yesAll: argv.includes("--yes-all"),
     confirm: argv.includes("--confirm"),
+    yesAll: argv.includes("--yes-all"),
     /**
      * 【定】默认开着。
      *
@@ -122,7 +164,7 @@ function parseArgs(argv: string[]): Args {
      * 恰恰是最想回看的那次。要关就显式 --no-trace。
      */
     trace: argv.includes("--no-trace") ? undefined : (get("trace") ?? "auto"),
-    dbPath: resolveDbPath(get("db")),
+    dbPath: resolveDbPath(workspace, get("db")),
     runId: resumeId ?? "",
     recoveryDecision: decision as Args["recoveryDecision"],
     recoveryNote: get("recovery-note"),
@@ -138,7 +180,8 @@ function parseArgs(argv: string[]): Args {
  * 验收脚本必须能无人值守跑完。
  */
 function interactiveApproval(
-  autoYes: boolean,
+  /** 默认档位：workspace 内、非 IRREVERSIBLE 的写事先同意（决 3）。 */
+  limitedAutoGrant: boolean,
   yesAll: boolean,
   workspaceRoot: string,
   signal: AbortSignal,
@@ -152,7 +195,7 @@ function interactiveApproval(
   stdin: StdinChannel,
 ): ApprovalDecider {
   /**
-   * ── E-3：`--yes` 不再是「批准一切」──────────────────────────────────
+   * ── E-3：默认档位不再是「批准一切」────────────────────────────────────
    *
    * 原实现对模型后续提出的**任何** PreparedAction 一律放行。复评报告的
    * 措辞是「应增加基于 effect、路径和 operation 的有限 auto-grant，
@@ -164,10 +207,10 @@ function interactiveApproval(
    *   ② 不是 IRREVERSIBLE（覆盖写算「找得回来」，追加与删除不算）；
    *   ③ 不是 EXECUTE。
    *
-   * 不满足的仍然停下来问。真要恢复旧的「批准一切」，得显式写 `--yes-all` ——
+   * 不满足的仍然停下来问。真要「批准一切」，得显式写 `--yes-all` ——
    * 让那个决定有名字，而不是藏在一个看起来很无害的开关后面。
    *
-   * 【定】阶段 3 决 3 起这是**默认档位**，`--confirm` 才回到「每一步都问」。
+   * 【定】决 3 起这是**默认档位**，`--confirm` 才回到「每一步都问」。
    */
   if (yesAll) {
     return async (a: PreparedAction) => {
@@ -268,16 +311,16 @@ function interactiveApproval(
     }
   };
 
-  if (autoYes) {
+  if (limitedAutoGrant) {
     return async (a: PreparedAction) => {
       const grant = autoGrant(a);
       const e = a.resolvedEffect;
       if (grant.ok) {
-        console.log(`  (--yes) 自动批准 ${a.toolName} → ${e.effectType} ${e.scope.value}`);
+        console.log(`  \x1b[2m(默认档位) 自动批准\x1b[0m ${a.toolName} → ${e.effectType} ${e.scope.value}`);
         return { approved: true };
       }
       finishRendering();
-      console.log(`  \x1b[33m--yes 不覆盖这一步\x1b[0m：${grant.why}`);
+      console.log(`  \x1b[33m默认档位不覆盖这一步\x1b[0m：${grant.why}`);
       return ask(a, "");
     };
   }
@@ -383,7 +426,7 @@ async function main(): Promise<void> {
         // 显式 --trace 时听用户的，那是「我要这一段单独存一份」的意思。
         (runId) =>
           args.trace === "auto"
-            ? resolve(REPO_ROOT, ".workagent-runs", `${runId}.jsonl`)
+            ? resolve(workspaceStorage(args.workspace).traceDir, `${runId}.jsonl`)
             : resolve(args.trace!),
         () => ({
           ...gitProvenance(),
@@ -402,7 +445,7 @@ async function main(): Promise<void> {
   const composed = compose({
     workspaceRoot: args.workspace,
     approvalDecider: interactiveApproval(
-      args.yes,
+      !args.confirm,
       args.yesAll,
       args.workspace,
       sigint.signal,
@@ -670,14 +713,6 @@ function terminalQuestion(stdin: StdinChannel, signal: AbortSignal): QuestionCha
  */
 const forTerminal = stripUnsafeDisplayChars;
 
-/** 只取 host —— 完整 URL 的路径里有时带部署标识，而这一行会被贴进报告。 */
-function hostOf(baseUrl: string): string {
-  try {
-    return new URL(baseUrl).host;
-  } catch {
-    return baseUrl ? "（无法解析的 baseUrl）" : "（未配置）";
-  }
-}
 
 /**
  * 从 transcript 的最后一条 RUN_META 读回累计预算。

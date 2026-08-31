@@ -11,8 +11,12 @@
  *    同一次 Run 里模型可能重复登记同一份产物（比如验证后再登记一次）。
  *    每次都 +1 会让版本号变成「登记次数」，失去「改了几次」的含义。
  *
- * ③ **删除写 Tombstone**，不物理删除。
- *    一次误删之后，「它曾经存在过」比「它现在没了」更重要。
+ *
+ * 【定】没有 Tombstone、没有 lineage —— 两者都**没有任何生产者**：
+ * 全仓没有删除产物的路径，也没有工具填过 `derivedFrom`。
+ * 一个永远为空的 lineage 字段与一个不存在的字段分不出来，而它会让
+ * 读代码的人以为派生关系是被记录的（本仓「未接线比不写更糟」的形态）。
+ * 真出现「产物 A 由 B 派生」的用例时再加，那时它会有第一个生产者。
  */
 
 import { createHash } from "node:crypto";
@@ -21,7 +25,6 @@ import type {
   ArtifactRegistration,
   ArtifactStorePort,
   RunId,
-  Timestamp,
 } from "@workagent/harness-runtime";
 import type { Db } from "./db.js";
 import { inTransaction } from "./db.js";
@@ -36,8 +39,6 @@ interface Row {
   path: string | null;
   content_hash: string;
   size_bytes: number;
-  derived_from: string;
-  tombstoned_at: number | null;
   verified: number | null;
   verify_detail: string | null;
   created_at: number;
@@ -98,7 +99,6 @@ export class SqliteArtifactStore implements ArtifactStorePort {
       if (
         latest &&
         latest.content_hash === hash &&
-        latest.tombstoned_at === null &&
         latest.run_id === String(input.runId) &&
         latest.role === input.role
       ) {
@@ -122,8 +122,8 @@ export class SqliteArtifactStore implements ArtifactStorePort {
         .prepare(
           `INSERT INTO artifacts
              (artifact_id, logical_id, version, run_id, role, kind, path,
-              content_hash, size_bytes, derived_from, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              content_hash, size_bytes, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           artifactId,
@@ -135,7 +135,6 @@ export class SqliteArtifactStore implements ArtifactStorePort {
           input.path ?? null,
           hash,
           size,
-          JSON.stringify(input.derivedFrom ?? []),
           now,
         );
 
@@ -165,12 +164,6 @@ export class SqliteArtifactStore implements ArtifactStorePort {
       .all(String(runId)) as unknown as Row[];
     return rows.map(toRecord);
   }
-
-  async tombstone(artifactId: string, at: Timestamp): Promise<void> {
-    this.db
-      .prepare("UPDATE artifacts SET tombstoned_at = ? WHERE artifact_id = ?")
-      .run(at, artifactId);
-  }
 }
 
 function toRecord(r: Row): ArtifactRecord {
@@ -184,8 +177,6 @@ function toRecord(r: Row): ArtifactRecord {
     ...(r.path === null ? {} : { path: r.path }),
     contentHash: r.content_hash,
     sizeBytes: r.size_bytes,
-    derivedFrom: JSON.parse(r.derived_from) as string[],
-    ...(r.tombstoned_at === null ? {} : { tombstonedAt: r.tombstoned_at }),
     // 【定】NULL → undefined，不要变成 false。
     // 「还没验过」与「验过没通过」在结算时的含义完全不同。
     ...(r.verified === null ? {} : { verified: r.verified === 1 }),

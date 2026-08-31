@@ -7,8 +7,7 @@
  * 恢复走 transcript，不走状态快照。这是删掉纯 Kernel 之后剩下的唯一自由度。
  */
 
-import type { BudgetUsage, IncompleteItem, RecoveryItem } from "./run.js";
-import type { CompactTrackingState } from "./context.js";
+import type { BudgetUsage, RecoveryItem } from "./run.js";
 import type { RuntimeErrorRecord } from "./error.js";
 import type { ContextMessage } from "./transcript.js";
 
@@ -20,7 +19,6 @@ export interface LoopState {
   messages: ContextMessage[];
   turnCount: number;
   consecutiveFailures: number;
-  compactTracking: CompactTrackingState | undefined;
   budgetUsage: BudgetUsage;
   maxOutputTokensOverride: number | undefined;
   modelErrorRetries: number;
@@ -32,15 +30,16 @@ export interface LoopState {
   transition: Continue | undefined;
 }
 
-/** 每个 continue 必须带具名 reason（循环纪律第 2 条）。 */
+/**
+ * 每个 continue 必须带具名 reason（循环纪律第 2 条）。
+ *
+ * 【定】值域 == 循环里**真的存在**的 continue 站点，一个不多。
+ * 此前 7 个值里 4 个零生产者，读 Trace 的人会去找一条不存在的路径。
+ */
 export type Continue =
   | { reason: "NEXT_TURN" }
-  | { reason: "COMPACT_RETRY" }
-  | { reason: "CONTEXT_OVERFLOW_RECOVERY" }
   | { reason: "OUTPUT_LIMIT_RECOVERY"; attempt: number }
-  | { reason: "MODEL_ERROR_RETRY"; attempt: number }
-  | { reason: "APPROVAL_RESUMED" }
-  | { reason: "INTERJECTION_ACCEPTED" };
+  | { reason: "MODEL_ERROR_RETRY"; attempt: number };
 
 /**
  * 每个 return 必须是具名 Terminal（循环纪律第 2 条）。
@@ -53,7 +52,27 @@ export type Continue =
  */
 export type Terminal =
   | { reason: "COMPLETED" }
-  | { reason: "COMPLETED_WITH_LIMITS"; incompleteItems: IncompleteItem[] }
+  /**
+   * 【定】**不带 `incompleteItems`。**
+   *
+   * 它此前有这个字段，而 `LoopTerminated` 的载荷同时装 `terminal` 与
+   * `outcome` —— 于是同一行 JSONL 里会出现两份「未完成项」。
+   * 2026-08-31 的 current-only 清理里，为了消掉一次重复结算，
+   * 这里被填成了 `[]`，两份从「必然相同」变成了**必然不同**：
+   *
+   *   terminal.incompleteItems = []
+   *   outcome.incompleteItems  = [真实未完成项…]
+   *
+   * 它零消费者（全仓只有 `terminal.reason` 与 `RECOVERY_REQUIRED` 的
+   * `recoveryItems` 被读过），所以处置是**删掉**，不是填回真值 ——
+   * 补一份「正确的」只会留下第二个事实载体。权威在 `outcome`。
+   *
+   * 【定】其余变体上的字段留着（`MAX_TURNS.turnCount`、`MODEL_ERROR.error`、
+   * `NO_PROGRESS.toolName/repeats`）：它们**补充**了 reason 说不出的信息，
+   * 而不是复述 outcome 已有的东西 —— 那是 §19.2「Trace 里能直接读出
+   * 走了哪条路径」的兑现方式。
+   */
+  | { reason: "COMPLETED_WITH_LIMITS" }
   | { reason: "ABORTED_STREAMING" }
   | { reason: "ABORTED_TOOLS" }
   | { reason: "CONTEXT_EXHAUSTED" }
@@ -70,14 +89,6 @@ export type Terminal =
    */
   | { reason: "NO_PROGRESS"; toolName: string; repeats: number }
   | { reason: "RECOVERY_REQUIRED"; recoveryItems: RecoveryItem[] };
-
-export type StepKind =
-  | "CONTEXT_COMPILE"
-  | "COMPACT"
-  | "MODEL_INVOCATION"
-  | "TOOL_EXECUTION"
-  | "OBSERVATION"
-  | "VERIFICATION";
 
 /**
  * 构造下一轮状态的唯一入口。

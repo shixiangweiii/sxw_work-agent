@@ -95,6 +95,16 @@ export interface UiToolActivity extends UiEntryBase {
   result?: string;
   resultIsError?: boolean;
   effect?: string;
+  /**
+   * 这次调用的风险事实与数据去向（护栏 3）。
+   *
+   * 【定】它们必须显示出来。`policy.ts` 把「让外发在 Trace 上可审计」
+   * 列为「越界读放行」的依据之一，而在事件里补上它们之后，
+   * 这里是那句话的**第一个人类可读出口** —— 不接消费点等于只把
+   * 未接线从一层挪到了另一层。
+   */
+  riskFacts?: string[];
+  dataMovement?: { destination: string; scope: string };
   status?: string;
   sideEffectState?: string;
   durationMs?: number;
@@ -195,7 +205,6 @@ export interface UiModelCall {
   outputTokens: number;
   billedInputTokens: number;
   cacheReadInputTokens?: number;
-  reasoningTokens?: number;
   stopReason: string;
   durationMs: number;
   toolCallCount: number;
@@ -405,8 +414,6 @@ export interface UiArtifactRecord {
   path?: string;
   contentHash: string;
   sizeBytes: number;
-  derivedFrom: string[];
-  tombstonedAt?: number;
   /** 【定】undefined ≠ false。「没验过」与「验过没通过」不是一回事。 */
   verified?: boolean;
   verifyDetail?: string;

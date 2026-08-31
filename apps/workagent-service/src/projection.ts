@@ -192,6 +192,9 @@ export function projectTimeline(input: ProjectionInput): UiTranscriptEntry[] {
         const a = touch(ev.payload.toolCallId, seq, at, "EVENT");
         a.toolName = ev.payload.toolName;
         a.effect = ev.payload.effect;
+        // 护栏 3 的投影出口。转述，不推算（决 5）。
+        if (ev.payload.riskFacts.length > 0) a.riskFacts = [...ev.payload.riskFacts];
+        if (ev.payload.dataMovement) a.dataMovement = { ...ev.payload.dataMovement };
         break;
       }
       case "ActionRejected": {
@@ -543,7 +546,6 @@ export function projectTurns(input: ProjectionInput): UiTurn[] {
           ...(u.cacheReadInputTokens !== undefined
             ? { cacheReadInputTokens: u.cacheReadInputTokens }
             : {}),
-          ...(u.reasoningTokens !== undefined ? { reasoningTokens: u.reasoningTokens } : {}),
           stopReason: ev.payload.stopReason,
           durationMs: ev.payload.durationMs,
           toolCallCount: ev.payload.toolCallCount,

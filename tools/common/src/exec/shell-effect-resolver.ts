@@ -74,7 +74,6 @@ export class ShellEffectResolver implements TrustedEffectResolver {
        * 上次是闸门太严从没覆盖到 `write_file`，这次会是闸门太松放过 `rm`。
        */
       reversibility: readOnly ? "REVERSIBLE" : "IRREVERSIBLE",
-      targetFingerprints: [],
       riskFacts,
       ...(allowNetwork
         ? {
@@ -87,7 +86,6 @@ export class ShellEffectResolver implements TrustedEffectResolver {
             },
           }
         : {}),
-      resolverVersion: SHELL_RESOLVER_REF.version,
       digest: "",
     };
 

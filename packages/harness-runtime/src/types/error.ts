@@ -1,12 +1,12 @@
 /**
  * 多维错误模型（V05 §13）。
  *
- * D-22：四个维度全部保留（结构经三轮实测验证），
- * 阶段 1 值域裁剪到 Micro Case 能真正触发的 —— 未触发的枚举值留在类型里但不产生，
- * 避免写出没有任何用例检验过的分类逻辑。
+ * D-22：四个维度全部保留（结构经三轮实测验证），值域裁剪到真正会产生的 ——
+ * 未触发的枚举值留在类型里但不产生，避免写出没有任何用例检验过的分类逻辑，
+ * 而 `assertActiveErrorDomain()` 让这份裁剪声明可验证。
  */
 
-import type { BlobRef, EndpointId, Timestamp } from "./ids.js";
+import type { EndpointId, Timestamp } from "./ids.js";
 
 export type ErrorSource =
   | "MODEL_PROVIDER"
@@ -73,27 +73,15 @@ export type SideEffectState =
 
 export interface RuntimeErrorRecord {
   code: string;
-  schemaVersion: number;
   source: ErrorSource;
   category: ErrorCategory;
   retryability: Retryability;
   sideEffectState: SideEffectState;
   /** 已脱敏，可以展示给用户。 */
   safeMessage: string;
-  diagnosticRef?: BlobRef;
-  providerCode?: string;
   endpointId?: EndpointId;
   occurredAt: Timestamp;
 }
-
-export type ErrorDisposition =
-  | "RETRY_AUTOMATICALLY"
-  | "RETURN_TO_MODEL"
-  | "SKIP_REMAINING_BATCH"
-  | "REQUEST_APPROVAL"
-  | "REQUEST_USER_INPUT"
-  | "ENTER_RECOVERY"
-  | "FAIL_RUN";
 
 /**
  * 实际会产生的 source 值域（D-22）。
@@ -125,9 +113,6 @@ export const ACTIVE_ERROR_SOURCES = [
   "VERIFICATION",
 ] as const satisfies readonly ErrorSource[];
 
-/** @deprecated 改名为 ACTIVE_ERROR_SOURCES —— 它不再只描述阶段 1。 */
-export const STAGE1_ACTIVE_SOURCES = ACTIVE_ERROR_SOURCES;
-
 /** 实际会产生的 category 值域（D-22）。补齐说明见上方 ACTIVE_ERROR_SOURCES。 */
 export const ACTIVE_ERROR_CATEGORIES = [
   "VALIDATION",
@@ -151,14 +136,24 @@ export const ACTIVE_ERROR_CATEGORIES = [
    * （CAPACITY 早已登记，`read_file` 撞单次读取上限时复用它。）
    */
   "CONFLICT",
-  // QUOTA / RATE_LIMIT **刻意不登记**：当前没有任何代码路径产生它们。
-  // 登记一个没有用例覆盖的值，恰好破坏 D-22 裁剪声明的全部价值 ——
-  // 那份记录的意义就在于「登记的都被用例覆盖过」。等 R-1 的配额路径
-  // 真的接进来再加。
+  /**
+   * ── 这两个是本批（2026-08-31 current-only 清理）补的，成因值得记 ──────────
+   *
+   * 原注释写着「QUOTA / RATE_LIMIT **刻意不登记**：当前没有任何代码路径
+   * 产生它们」。回源：`shape-anthropic-messages/protocol.ts` 的 429 分支
+   * **两个都产生**，而 `run-loop` 还专门读 `e.category === "QUOTA"` 去结算
+   * `QUOTA_EXHAUSTED`。
+   *
+   * 后果是这份「可验证的值域声明」自己会在真实 429 上炸掉：
+   * 开发期 `assertActiveErrorDomain()` 抛「错误值域越界」，把一次本该退避
+   * 重试的限流变成一个看不懂的崩溃。
+   *
+   * 形态与本批清理的其余项一模一样 —— **一句写在权威位置的话，
+   * 与它声称描述的代码不符**，而没有任何东西会说出来。
+   */
+  "QUOTA",
+  "RATE_LIMIT",
 ] as const satisfies readonly ErrorCategory[];
-
-/** @deprecated 改名为 ACTIVE_ERROR_CATEGORIES。 */
-export const STAGE1_ACTIVE_CATEGORIES = ACTIVE_ERROR_CATEGORIES;
 
 /**
  * 越界即抛（M-7）。
@@ -185,22 +180,10 @@ function assertActiveErrorDomain(source: ErrorSource, category: ErrorCategory): 
 }
 
 export function makeError(
-  init: Omit<RuntimeErrorRecord, "schemaVersion" | "occurredAt"> &
+  init: Omit<RuntimeErrorRecord, "occurredAt"> &
     Partial<Pick<RuntimeErrorRecord, "occurredAt">>,
 ): RuntimeErrorRecord {
   // M-7：值域声明在这里才第一次有了消费点。
   assertActiveErrorDomain(init.source, init.category);
-  return {
-    schemaVersion: 1,
-    occurredAt: init.occurredAt ?? Date.now(),
-    ...init,
-  };
-}
-
-/** 不变量 10 的判据函数。副作用状态未知时不得自动重试。 */
-export function mayRetryAutomatically(e: RuntimeErrorRecord): boolean {
-  if (e.sideEffectState === "UNKNOWN" || e.sideEffectState === "PARTIALLY_APPLIED") {
-    return false;
-  }
-  return e.retryability === "SAME_INPUT_IMMEDIATE" || e.retryability === "SAME_INPUT_BACKOFF";
+  return { occurredAt: init.occurredAt ?? Date.now(), ...init };
 }

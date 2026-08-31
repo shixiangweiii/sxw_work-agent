@@ -1,15 +1,17 @@
 /**
- * Runtime Ports（V05 §8.7）。共 **15** 个。
- *
- * D-14：阶段 1 实现 10 个（标 ★），4 个只留接口。
- * 四个不实现的共同点：阶段 1 没有任何用例能检验它们设计得对不对，实现了也是盲写。
- *
- * 阶段 2 新增第 15 个 `RunStorePort`（也标 ★）—— 跨进程 resume 的前提。
- * 它不是「顺手多加一个」：§8.7 原本 14 个是在**单进程**假设下数出来的，
- * 那个假设在阶段 2 被去掉了。
+ * Runtime Ports（V05 §8.7）。共 **14** 个，**全部有实现**。
  *
  * §2.5 规格纪律第 4 条：每新增一个 Port，必须同时指出强制它存在的不变量。
  * 下面每个接口的注释都写了这一条。
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ * 【定】**不留「只有接口、没有实现」的 Port。**
+ *
+ * 此前挂着 `CapabilityLeasePort` 与 `SecretResolverPort` 两个空壳，
+ * 而各自的注释里写的是「明确不做」（决 5 / 决 2）—— 一个公共接口
+ * 同时声明「我存在」和「我不做」，读的人只会记住前半句。
+ * 真需要时再加，那时它会连着实现一起来。
+ * ══════════════════════════════════════════════════════════════════════
  */
 
 import type {
@@ -32,10 +34,8 @@ import type {
 } from "../types/tool.js";
 import type { JsonValue, RunId, RunSpecId, Timestamp } from "../types/ids.js";
 
-// ═══════════════════════════════════════════════ ★ 阶段 1 实现（10）
-
 /**
- * ★ ModelPort —— 网络调用与流式传输。
+ * ModelPort —— 网络调用与流式传输。
  * 强制它的不变量：主循环不得 import Provider SDK（§4.2 禁止项）。
  */
 export interface ModelPort {
@@ -70,7 +70,7 @@ export interface ModelInvocationResult {
 }
 
 /**
- * ★ ModelProtocolPort —— 形状适配器 ＋ 端点能力声明的消费入口。
+ * ModelProtocolPort —— 形状适配器 ＋ 端点能力声明的消费入口。
  *
  * 每个方法的左边来自形状，右边来自端点。这就是 D-07 答案的代码形态。
  * 对外仍是一个 Port：调用方关心「这个帧合不合法」「这些块能不能删」，
@@ -102,7 +102,7 @@ export interface FrameValidation {
 }
 
 /**
- * ★ TranscriptStorePort —— 消息追加与重建。
+ * TranscriptStorePort —— 消息追加与重建。
  *
  * 强制它的不变量：消息先落盘再进内存 messages（不变量 5）。
  * append 是 async 且必须 await 完成才允许更新内存 —— 接口形态本身强制这条。
@@ -137,7 +137,7 @@ export interface TranscriptStorePort {
 }
 
 /**
- * ★ RunStorePort —— Run 身份的持久化（阶段 2 新增，第 15 个）。
+ * RunStorePort —— Run 身份的持久化。
  *
  * 强制它的不变量：**§18.4【定】resume 必须使用 RunSpec 冻结的那一份，
  * 不得使用当前配置**（连带不变量 14：端点能力声明须与冻结版一致）。
@@ -181,7 +181,7 @@ export interface RunListItem {
 }
 
 /**
- * ★ ToolHandlerPort —— 工具执行。
+ * ToolHandlerPort —— 工具执行。
  * 强制它的不变量：每个外部副作用关联 Action 和 Attempt（不变量 3）。
  */
 export interface ToolHandlerPort {
@@ -256,11 +256,10 @@ export interface ProducedArtifact {
   kind: string;
   path?: string;
   content: ArtifactContent;
-  derivedFrom?: string[];
 }
 
 /**
- * ★ RedactionPort —— 边界脱敏。
+ * RedactionPort —— 边界脱敏。
  *
  * 强制它的不变量：未脱敏原文不得离开 Adapter 边界（原则十二、不变量 13）。
  * 脱敏失败 = Tool 失败，不得降级为原样保存。
@@ -277,7 +276,7 @@ export interface RedactionOutcome {
 }
 
 /**
- * ★ EffectResolverPort —— 把 Tool 参数解析为可信 EffectScope。
+ * EffectResolverPort —— 把 Tool 参数解析为可信 EffectScope。
  *
  * 强制它的不变量：每次 Action 执行前必须具有 ResolvedEffect（不变量 9）。
  * EffectScope 使用规范化语义对象，不以自由文本作为授权边界。
@@ -314,7 +313,7 @@ export interface TrustedEffectResolver {
 }
 
 /**
- * ★ VerificationPort —— 独立验证外部世界是否达到目标。
+ * VerificationPort —— 独立验证外部世界是否达到目标。
  *
  * 强制它的不变量：Run 进入 COMPLETED 前必须结算 outcome.kind，
  * 且结算依据必须来自事实表（不变量 12）。
@@ -365,57 +364,24 @@ export interface ObservationResult {
   at: Timestamp;
 }
 
-/** ★ ClockPort —— 测试注入 FakeClock。 */
+/** ClockPort —— 测试注入 FakeClock。 */
 export interface ClockPort {
   now(): number;
   sleep(ms: number, signal?: AbortSignal): Promise<void>;
 }
 
-/** ★ IdGeneratorPort —— 测试注入确定性实现，Replay 才可能逐字节一致。 */
+/** IdGeneratorPort —— 测试注入确定性实现，Replay 才可能逐字节一致。 */
 export interface IdGeneratorPort {
   next(prefix: string): string;
 }
 
-/** ★ TraceSinkPort —— 事件消费。阶段 1 先 console，接口按最终形态定。 */
+/** TraceSinkPort —— 事件消费。CLI 写 JSONL，Web 入口转成 SSE。 */
 export interface TraceSinkPort {
   emit(event: RunEvent): void;
 }
 
-// ═════════════════════════════════════ 只留接口，不实现（阶段 3 后剩 2）
-
 /**
- * CapabilityLeasePort —— 并发保护（EXCLUSIVE / KEYED lease，含 PARKED）。
- *
- * ── 阶段 3 决 5：**明确不做**，理由从「还没到时候」换成了「需求不在这里」──
- *
- * 阶段 1 写的是「lease 语义要到 Browser Capability 才有真需求（阶段 3）」。
- * 阶段 3 到了，结论是**不做**：lease 的真需求来自**多 Run 并发**，
- * 不是来自浏览器。当前是单进程、一 Run 一循环（§18.6【定】「等待就是 await，
- * 进程死了所有等待一起死」），三个场景里找不到一个通用工具需要独占。
- *
- * 但「人工接管」本身要做，且三场景都有需求 —— 那条走 `request_handoff`
- * ＋ `WAITING_FOR_INTERACTION`，不需要 lease。
- */
-export interface CapabilityLeasePort {
-  acquire(key: string, runId: RunId): Promise<{ leaseId: string }>;
-  release(leaseId: string): Promise<void>;
-  park(leaseId: string, interactionId: string): Promise<void>;
-  unpark(leaseId: string): Promise<void>;
-}
-
-/**
- * SecretResolverPort —— Secret 明文的短暂解析。
- * 不实现的理由：阶段 3 首批工具明确不含需要凭证的（决 2 判定 ⏸）。
- * 注意端点凭证不走这里 —— 它由 Composition Root 直接注入形状适配器。
- */
-export interface SecretResolverPort {
-  resolve(ref: string): Promise<string>;
-}
-
-// ═══════════════════════════════════════ ★ 阶段 3 实现（17、18）
-
-/**
- * ★ BlobStorePort —— 大结果外置（阶段 3，§11.4）。
+ * BlobStorePort —— 大结果外置（阶段 3，§11.4）。
  *
  * 强制它的不变量：**§11.5 不变量 5 —— 外置必须保留协议合法的结构化 stub**，
  * 以及 §16.1 的上下文预算（超过 `inlineToolResultLimitTokens` 的结果不得
@@ -423,11 +389,10 @@ export interface SecretResolverPort {
  *
  * 【定】它同时是数据最小化机制 —— 外置的内容不进模型也就不出境（V05 §22.7）。
  *
- * ── 阶段 1 不实现的理由，与阶段 3 实现的理由是同一句话 ────────────────────
+ * ── 它为什么是被真需求逼出来的 ────────────────────────────────────────
  *
- * 代码里原本写着「大结果外置**要到 Case 01 才有真实的大结果**」。阶段 3 的
- * `read_file` 与 `fetch_url` 就是那个真实的大结果 —— **不是忘了做，
- * 是没有工具需要它**。所以顺序是先建工具面，让机制被真需求逼出来。
+ * `read_file` 与 `fetch_url` 会产出超过 `inlineToolResultLimitTokens` 的结果。
+ * 顺序是先建工具面，让机制被真需求逼出来 —— 而不是先实现 Port 再找用例。
  *
  * ── 【定】`get` 必须支持分页 ────────────────────────────────────────────
  *
@@ -437,11 +402,7 @@ export interface SecretResolverPort {
  */
 export interface BlobStorePort {
   /** 内容寻址：同一份内容只存一份，但每次调用得到自己的 ref。 */
-  put(input: {
-    content: string;
-    runId?: RunId;
-    toolName?: string;
-  }): Promise<{ ref: string; hash: string; size: number }>;
+  put(content: string): Promise<{ ref: string; hash: string; size: number }>;
   /**
    * 按 ref 取回。`startLine` 从 1 起；`limit` 是最多返回多少行；
    * `lineOffset` 是起始行内的字符偏移（超长单行续取时用）。
@@ -484,7 +445,7 @@ export interface BlobPage {
 }
 
 /**
- * ★ ArtifactStorePort —— Artifact 登记、版本链与 lineage（阶段 3，§17）。
+ * ArtifactStorePort —— Artifact 登记、版本链与 lineage（阶段 3，§17）。
  *
  * 强制它的不变量：**V05 §10.4【定】的第二层 Verification**（「这个产物本身
  * 是否完整合法」）在 `ArtifactRegistered` 之后触发 —— 没有登记就没有触发点。
@@ -507,7 +468,10 @@ export interface BlobPage {
  * 1. **由工具显式产出后登记，不由 Runtime 扫 workspace 自动派生。**
  *    自动派生会把用户自己放进 workspace 的文件误当成本次 Run 的交付物。
  * 2. **内容变化形成新版本**，不原地覆盖。
- * 3. **删除优先 Tombstone**，不物理删除。
+ *
+ * 【定】**没有 Tombstone、没有 lineage** —— 全仓既没有删除产物的路径，
+ * 也没有任何工具填过 `derivedFrom`。一个永远为空的 lineage 字段
+ * 会让读代码的人以为派生关系是被记录的。真出现用例时再加。
  */
 export interface ArtifactStorePort {
   register(input: ArtifactRegistration): Promise<ArtifactRecord>;
@@ -515,8 +479,6 @@ export interface ArtifactStorePort {
   markVerified(artifactId: string, ok: boolean, detail: string): Promise<void>;
   get(artifactId: string): Promise<ArtifactRecord | undefined>;
   listByRun(runId: RunId): Promise<ArtifactRecord[]>;
-  /** 【定】Tombstone，不是 DELETE。「它曾经存在过」比「它现在没了」更重要。 */
-  tombstone(artifactId: string, at: Timestamp): Promise<void>;
 }
 
 /**
@@ -545,8 +507,6 @@ export interface ArtifactRegistration {
   path?: string;
   /** 【定】字节这一档见 `ArtifactContent` —— 按字符串传二进制会把 Run 判成 FAILED。 */
   content: ArtifactContent;
-  /** lineage：从哪些 artifact 派生而来。 */
-  derivedFrom?: string[];
 }
 
 export interface ArtifactRecord {
@@ -559,8 +519,6 @@ export interface ArtifactRecord {
   path?: string;
   contentHash: string;
   sizeBytes: number;
-  derivedFrom: string[];
-  tombstonedAt?: Timestamp;
   /** undefined = 还没验过。【定】「没验过」与「验过没通过」不是一回事。 */
   verified?: boolean;
   verifyDetail?: string;
@@ -598,7 +556,7 @@ export interface RuntimePorts {
 }
 
 /**
- * ★ ArtifactCheckerPort —— 产物**类型**的静态结构约束（阶段 3，§10.4 第二层）。
+ * ArtifactCheckerPort —— 产物**类型**的静态结构约束（§10.4 第二层）。
  *
  * 强制它的不变量：**§10.4【定】两层 Verification 不得互相替代。**
  *

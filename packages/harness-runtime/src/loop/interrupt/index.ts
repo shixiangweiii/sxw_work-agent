@@ -13,35 +13,29 @@
  * 没有 Pause / Unpause —— 产品上的「暂停」实现为 cancel() ＋ 稍后 resume()。
  */
 
-export interface InterjectionItem {
-  content: string;
-  intent: "ADD_CONTEXT" | "CONSTRAIN" | "REDIRECT";
-  urgency: "NEXT_FRAME" | "NEXT_SAFE_POINT";
-  at: number;
-}
-
 /**
  * 进程内插话队列。
  *
  * 【定】已排空并落盘为消息的才是事实，队列里的不是。
  * 因此 drain() 之后调用方必须先把它们落盘再进内存 messages（不变量 5）。
+ *
+ * 【定】队列里只有**话本身**。此前每条还带 `intent`（ADD_CONTEXT /
+ * CONSTRAIN / REDIRECT）、`urgency`（NEXT_FRAME / NEXT_SAFE_POINT）与 `at`，
+ * 而 facade 一律写死前两个常量、主循环只读 `content` —— 三个纯装饰字段
+ * 描述着一套并不存在的调度语义（插话永远在下一轮迭代开始处排空）。
  */
 export class InterjectQueue {
-  private items: InterjectionItem[] = [];
+  private items: string[] = [];
 
-  push(item: Omit<InterjectionItem, "at">, now: number): void {
-    this.items.push({ ...item, at: now });
+  push(content: string): void {
+    this.items.push(content);
   }
 
   /** 排空并返回。调用方负责落盘。 */
-  drain(): InterjectionItem[] {
+  drain(): string[] {
     const out = this.items;
     this.items = [];
     return out;
-  }
-
-  get size(): number {
-    return this.items.length;
   }
 }
 

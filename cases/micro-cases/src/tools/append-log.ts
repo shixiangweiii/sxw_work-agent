@@ -66,28 +66,21 @@ export const appendLogDefinition: ToolDefinition = {
     },
     required: ["path", "line"],
   },
-  // 【定】本字段当前零消费，授权层推到 bugfix 阶段（阶段 3 方案 S12）。
-  requiredCapabilities: ["fs.write"],
   effectResolution: {
     kind: "DECLARATIVE",
-    version: "1.0.0",
-    rules: [
-      {
-        pointer: "/path",
-        effectType: "WRITE",
-        scopeKind: "FILE",
-        // 追加写没法靠再写一次撤销，也没法把旧内容找回来。
-        reversibility: "IRREVERSIBLE",
-        operation: "append",
-      },
-    ],
+    rule: {
+      pointer: "/path",
+      effectType: "WRITE",
+      scopeKind: "FILE",
+      // 追加写没法靠再写一次撤销，也没法把旧内容找回来。
+      reversibility: "IRREVERSIBLE",
+      operation: "append",
+    },
   },
   redaction: { profile: "STANDARD" },
-  retryPolicy: { maxAttempts: 1, backoffMs: 0 },
   /** 【定】追加两次就是两行。这是语义决定的，不是实现凑的。 */
   idempotency: { isIdempotent: false, isReadOnly: false },
   timeoutPolicy: { timeoutMs: 10_000 },
-  cancellation: { cooperative: true },
   progressReporting: { mode: "NONE" },
   /**
    * 【定】执行后无法验证 —— 验证器不知道「该有几行」。
@@ -100,7 +93,6 @@ export const appendLogDefinition: ToolDefinition = {
   verification: {
     mode: "NONE",
     requiredForSuccess: false,
-    observationCost: "LOW",
   },
   /**
    * 崩溃后**原则上**可观察，但必须有执行前的尾部指纹（决 6）。
@@ -109,7 +101,6 @@ export const appendLogDefinition: ToolDefinition = {
    * write_note 区分开：后者比「内容 == 计划内容」就够了，不需要起始状态。
    */
   recoveryObservation: {
-    kind: "TARGET_APPEND_TAIL",
     requiresPreFingerprint: true,
   },
 };
@@ -174,6 +165,5 @@ export async function executeAppendLog(
 export const appendLogSnapshot: ToolSnapshot = {
   toolId: appendLogDefinition.id,
   version: appendLogDefinition.version,
-  contentHash: "append_log@1.0.0",
   definition: appendLogDefinition,
 };

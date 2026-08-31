@@ -215,7 +215,3 @@ function containsNumber(text: string, n: number): boolean {
   // 千分位与裸数字都算。20000 与 20,000 是同一个事实，不该因格式判错。
   return new RegExp(`\\b${n.toLocaleString("en-US").replace(/,/g, "[,，]?")}\\b`).test(text);
 }
-
-function escapeRe(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}

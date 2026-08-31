@@ -223,8 +223,6 @@ export const runShellDefinition: ToolDefinition = {
     },
     required: ["command"],
   },
-  // 【定】本字段当前零消费，授权层推到 bugfix 阶段（阶段 3 方案 S12 / 存量 S3-1）。
-  requiredCapabilities: ["process.exec"],
   /**
    * 【定】RESOLVER 而不是 DECLARATIVE —— 这是这一档**第一次被真正需要**。
    *
@@ -241,7 +239,6 @@ export const runShellDefinition: ToolDefinition = {
    * 自动重试一次 `rm -rf build && make install` 意味着那条命令真的跑了两遍。
    * 重试与否交给模型，它至少知道自己刚才想干什么。
    */
-  retryPolicy: { maxAttempts: 1, backoffMs: 0 },
   /**
    * 【定】说实话：既不幂等也不只读。
    *
@@ -254,7 +251,6 @@ export const runShellDefinition: ToolDefinition = {
    */
   idempotency: { isIdempotent: false, isReadOnly: false },
   timeoutPolicy: { timeoutMs: STEP_TIMEOUT_MS },
-  cancellation: { cooperative: true },
   /**
    * 【定】HEARTBEAT 是**承诺**，实现里必须真有周期性的 `ctx.onProgress(`。
    *
@@ -262,7 +258,7 @@ export const runShellDefinition: ToolDefinition = {
    * `verify:tools` B 段会扫源码里的调用点，缺一即红 —— 所以下面那个
    * `setInterval` 不是可有可无的装饰。
    */
-  progressReporting: { mode: "HEARTBEAT", intervalMs: HEARTBEAT_MS },
+  progressReporting: { mode: "HEARTBEAT" },
   /**
    * 【定】NONE，不是 INLINE_RESULT。
    *
@@ -270,7 +266,7 @@ export const runShellDefinition: ToolDefinition = {
    * 新事实 —— 那正是「声明与实现不符」的另一种形态：声明了一个观察，
    * 实际只是把已有字段抄一遍，而结算时它会被当成独立证据。
    */
-  verification: { mode: "NONE", requiredForSuccess: false, observationCost: "LOW" },
+  verification: { mode: "NONE", requiredForSuccess: false },
   /**
    * 【定】要求前置指纹，而 Verifier 对本工具**给不出**指纹 —— 于是
    * `canObserve` 恒假，§18.2 落**分支三 RECOVERY_REQUIRED**。
@@ -282,7 +278,7 @@ export const runShellDefinition: ToolDefinition = {
    * 此前只有 `append_log` 这个测量工具，而用测量工具去测分支分布，
    * 正是阶段 2 决 6 要防的「旋钮长在被测对象身上」。
    */
-  recoveryObservation: { kind: "TARGET_EXISTS", requiresPreFingerprint: true },
+  recoveryObservation: { requiresPreFingerprint: true },
 };
 
 /**
@@ -810,6 +806,5 @@ function truncate(s: string, n: number): string {
 export const runShellSnapshot: ToolSnapshot = {
   toolId: runShellDefinition.id,
   version: runShellDefinition.version,
-  contentHash: `${runShellDefinition.name}@${runShellDefinition.version}`,
   definition: runShellDefinition,
 };

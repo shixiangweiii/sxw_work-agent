@@ -4,8 +4,17 @@
  * 阶段 1 只实现 TRUSTED_PERSONAL preset：单人本地使用，默认信任，
  * 但写操作要审批、越界一律拒绝。
  *
- * 【定】Context trust 只是风险信号，不能取代独立的 Capability/Effect 校验。
- * 也就是说：不能因为「这次任务的上下文里没有不可信内容」就跳过 Effect 判定。
+ * ══════════════════════════════════════════════════════════════════════
+ * 【定】判定**只读 ResolvedEffect 与审批档位**，不读上下文 trust。
+ *
+ * 这里此前收一个 `hasUntrustedContext` 入参，注释写着「只作风险信号」——
+ * 而函数体从来没有解构过它。三跳（compile → run-loop → executeBatch → 这里）
+ * 全程传递、终点落地，读代码的人会以为 trust 参与了 Allow/Deny 或审批理由。
+ *
+ * 删掉而不是「让它真的参与判定」：那需要一条「不可信上下文在场时提高档位」
+ * 的产品决定，而那个决定不存在。凭空加等于新造一条没有证据支撑的闸门。
+ * trust 作为**审计事实**由 `ContextFrameCompiled.trust` 承载，那条有读者。
+ * ══════════════════════════════════════════════════════════════════════
  */
 
 import type { PreparedAction } from "../types/tool.js";
@@ -20,8 +29,6 @@ export type PolicyVerdict =
 export interface PolicyInput {
   action: PreparedAction;
   approvalPolicy: ApprovalPolicySnapshot;
-  /** 来自 ContextFrame.trustSummary。只作风险信号，不作判定依据。 */
-  hasUntrustedContext: boolean;
 }
 
 export function evaluatePolicy(input: PolicyInput): PolicyVerdict {

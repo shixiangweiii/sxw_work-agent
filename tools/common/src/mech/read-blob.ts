@@ -61,32 +61,25 @@ export const readBlobDefinition: ToolDefinition = {
     },
     required: ["ref"],
   },
-  // 【定】本字段当前零消费，授权层推到 bugfix 阶段（阶段 3 方案 S12）。
-  requiredCapabilities: [],
   effectResolution: {
     kind: "DECLARATIVE",
-    version: "1.0.0",
-    rules: [
-      {
-        pointer: "/ref",
-        effectType: "READ",
-        // 【定】不是 FILE —— blob 不在文件系统里，它在 Runtime 自己的库里。
-        // 标成 FILE 会让 EffectResolver 去 resolve 一个不存在的路径，
-        // 然后 Policy 拿着一个假的 workspace 判定去做决定。
-        scopeKind: "NONE",
-        reversibility: "REVERSIBLE",
-        operation: "read_blob",
-      },
-    ],
+    rule: {
+      pointer: "/ref",
+      effectType: "READ",
+      // 【定】不是 FILE —— blob 不在文件系统里，它在 Runtime 自己的库里。
+      // 标成 FILE 会让 EffectResolver 去 resolve 一个不存在的路径，
+      // 然后 Policy 拿着一个假的 workspace 判定去做决定。
+      scopeKind: "NONE",
+      reversibility: "REVERSIBLE",
+      operation: "read_blob",
+    },
   },
   redaction: { profile: "STANDARD" },
-  retryPolicy: { maxAttempts: 2, backoffMs: 100 },
   idempotency: { isIdempotent: true, isReadOnly: true },
   timeoutPolicy: { timeoutMs: 10_000 },
-  cancellation: { cooperative: true },
   progressReporting: { mode: "NONE" },
-  verification: { mode: "NONE", requiredForSuccess: false, observationCost: "LOW" },
-  recoveryObservation: { kind: "TARGET_EXISTS", requiresPreFingerprint: false },
+  verification: { mode: "NONE", requiredForSuccess: false },
+  recoveryObservation: { requiresPreFingerprint: false },
 };
 
 /**
@@ -171,6 +164,5 @@ export async function executeReadBlob(
 export const readBlobSnapshot: ToolSnapshot = {
   toolId: readBlobDefinition.id,
   version: readBlobDefinition.version,
-  contentHash: `${readBlobDefinition.name}@${readBlobDefinition.version}`,
   definition: readBlobDefinition,
 };

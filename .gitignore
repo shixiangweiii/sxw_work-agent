@@ -13,6 +13,10 @@ bin
 node_modules
 .workagent-workspace
 
+# 一个 workspace 一套存储（<ws>/.workagent/）。workspace 可以是仓库内任意目录，
+# 所以这一条不能只靠上面那个固定目录名兜。
+.workagent/
+
 # 每次 CLI 运行落一份 JSONL trace（--no-trace 可关）。
 # 是诊断与评测的 artifact，不是源码 —— 要留证据请显式复制到 评测/ 下。
 .workagent-runs

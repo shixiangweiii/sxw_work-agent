@@ -7,7 +7,6 @@
  */
 
 import type {
-  BlobRef,
   ContextFrameId,
   ContextItemId,
   ModelInvocationId,
@@ -18,22 +17,21 @@ import type {
 // import type 会被完全擦除，不产生运行期依赖环。
 import type { ContextMessage } from "./transcript.js";
 
+/**
+ * 【定】只放 `compile.ts` **真的会产出**的七种。
+ *
+ * 此前有 15 个值，8 个零生产者 —— 其中 `USER_INTERJECTION` 还在
+ * `computeIrreducible()` 里占着一行永不命中的判定（插话被 `kindOf()`
+ * 归成 `USER_MESSAGE`）。一个恒假的合取项读起来像是一条保护。
+ */
 export type ContextItemKind =
   | "SYSTEM_INSTRUCTION"
-  | "SKILL_DESCRIPTOR"
-  | "SKILL_INSTRUCTION"
+  | "SYSTEM_NOTICE"
   | "USER_MESSAGE"
-  | "USER_INTERJECTION"
   | "ASSISTANT_MESSAGE"
   | "MODEL_REASONING"
   | "MODEL_TOOL_CALL"
-  | "TOOL_RESULT"
-  | "OBSERVATION"
-  | "VERIFICATION"
-  | "ARTIFACT_REFERENCE"
-  | "SUMMARY"
-  | "RESOURCE_EXCERPT"
-  | "SYSTEM_NOTICE";
+  | "TOOL_RESULT";
 
 export type ContextTrust =
   | "SYSTEM_TRUSTED"
@@ -53,12 +51,10 @@ export type ContextProtocolRole =
   | "ORDINARY"
   | "PROTOCOL_GROUP_MEMBER"
   | "PLACEHOLDER_REQUIRED"
-  | "REQUIRED_VERBATIM"
-  | "CACHE_BREAKPOINT";
+  | "REQUIRED_VERBATIM";
 
 export interface ContextSource {
-  kind: "SESSION" | "RUN" | "TOOL" | "SYSTEM" | "USER";
-  ref?: string;
+  kind: "RUN" | "TOOL" | "SYSTEM" | "USER";
 }
 
 /** 规范化的模型内容块。形状适配器负责在此与各家协议之间翻译。 */
@@ -77,14 +73,8 @@ export interface ContextItem {
   /** 同组的项构成不可拆分单元。一个 tool_call 与其 result 属于同一组。 */
   protocolGroupId?: string;
   content?: ModelContent;
-  verbatimPayloadRef?: BlobRef;
-  blobRef?: BlobRef;
-  preview?: string;
   contentHash: string;
   estimatedTokens: number;
-  actualTokens?: number;
-  /** 未脱敏内容不得写入任何持久化存储（不变量 13）。 */
-  redactionApplied: boolean;
   createdAt: Timestamp;
 }
 
@@ -99,8 +89,6 @@ export interface ContextFrame {
   id: ContextFrameId;
   runId: RunId;
   invocationId: ModelInvocationId;
-  compilerVersion: string;
-  policyVersion: string;
   /** 这个帧是按哪套端点规则编译的。端点声明变更后，旧帧的合法性判断不能照搬。 */
   endpointProfileVersion: string;
   items: ContextItem[];
@@ -120,26 +108,17 @@ export interface TrustSummary {
 }
 
 export interface ContextBudgetPolicy {
-  modelWindowTokens: number;
   reservedOutputTokens: number;
   softInputLimitTokens: number;
   hardInputLimitTokens: number;
   compactTargetTokens: number;
   inlineToolResultLimitTokens: number;
-  retrievalPageLimitTokens: number;
 }
 
 export interface CompactionRecord {
   reason: string;
-  removedItemIds: ContextItemId[];
   freedTokens: number;
   at: Timestamp;
-}
-
-export interface CompactTrackingState {
-  compacted: boolean;
-  turnsSinceCompact: number;
-  consecutiveFailures: number;
 }
 
 export interface ContextFrameOutcome {
@@ -163,15 +142,4 @@ export interface ContextFrameOutcome {
   compactSummary?: ContextMessage;
   /** boundary 之后需要重新 append 的消息（不含摘要）。 */
   compactKept?: ContextMessage[];
-  /**
-   * COMPACTION_INSUFFICIENT 时：连**不可压缩集**都已经超硬限（R-3）。
-   *
-   * 两种处置在 D-05 里是分开的：
-   *   false → 还有可压空间，主循环可以更激进地压一轮再试；
-   *   true  → 压到底也没用，只能 DETERMINISTIC handoff。
-   *
-   * 修复前这两种情况根本区分不出来 —— 超硬限但「还能压」的帧会被**照常发出**，
-   * 而不是回来再压一次。
-   */
-  irreducibleExceedsHardLimit?: boolean;
 }

@@ -94,24 +94,18 @@ export const requestHandoffDefinition: ToolDefinition = {
     },
     required: ["instructions", "expected_completion"],
   },
-  // 【定】本字段当前零消费，授权层推到 bugfix 阶段（阶段 3 方案 S12）。
-  requiredCapabilities: [],
   effectResolution: {
     kind: "DECLARATIVE",
-    version: "1.0.0",
-    rules: [
-      {
-        pointer: "/instructions",
-        // 它不碰外部世界 —— 碰外部世界的是**人**。工具本身只是发一个信号。
-        effectType: "NONE",
-        scopeKind: "NONE",
-        reversibility: "REVERSIBLE",
-        operation: "request_handoff",
-      },
-    ],
+    rule: {
+      pointer: "/instructions",
+      // 它不碰外部世界 —— 碰外部世界的是**人**。工具本身只是发一个信号。
+      effectType: "NONE",
+      scopeKind: "NONE",
+      reversibility: "REVERSIBLE",
+      operation: "request_handoff",
+    },
   },
   redaction: { profile: "STANDARD" },
-  retryPolicy: { maxAttempts: 1, backoffMs: 0 },
   idempotency: { isIdempotent: true, isReadOnly: true },
   /**
    * 【定】步骤超时必须**远大于**人的反应时间。
@@ -124,10 +118,9 @@ export const requestHandoffDefinition: ToolDefinition = {
    * 所以这里给一个宽松值不会让 Run 白白耗光预算。
    */
   timeoutPolicy: { timeoutMs: 2 * 60 * 60_000 },
-  cancellation: { cooperative: true },
   progressReporting: { mode: "NONE" },
-  verification: { mode: "NONE", requiredForSuccess: false, observationCost: "LOW" },
-  recoveryObservation: { kind: "TARGET_EXISTS", requiresPreFingerprint: false },
+  verification: { mode: "NONE", requiredForSuccess: false },
+  recoveryObservation: { requiresPreFingerprint: false },
   /**
    * 【定】这一行是 §20 的**全部触发条件**。
    *
@@ -230,6 +223,5 @@ export async function executeRequestHandoff(
 export const requestHandoffSnapshot: ToolSnapshot = {
   toolId: requestHandoffDefinition.id,
   version: requestHandoffDefinition.version,
-  contentHash: `${requestHandoffDefinition.name}@${requestHandoffDefinition.version}`,
   definition: requestHandoffDefinition,
 };

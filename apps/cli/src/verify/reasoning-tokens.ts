@@ -36,13 +36,11 @@
  * ══════════════════════════════════════════════════════════════════════
  */
 
-import { resolve } from "node:path";
 import { loadProfileFromFile, type ModelRequest } from "@workagent/harness-runtime";
 import { createAnthropicModelPort } from "@workagent/shape-anthropic-messages";
 import {
   DEFAULT_SYSTEM_PROMPT,
   DEFAULT_TOOLS,
-  REPO_ROOT,
   loadEnv,
   readEndpointConfig,
 } from "../compose.js";

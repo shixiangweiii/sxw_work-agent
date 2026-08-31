@@ -12,6 +12,7 @@ import type { ActionBatchId, ActionId, RunId, Timestamp } from "./ids.js";
 import type { Continue, Terminal } from "./loop.js";
 import type { ModelUsage, RunOutcome } from "./run.js";
 import type { RuntimeErrorRecord } from "./error.js";
+import type { DataMovementDescriptor } from "./tool.js";
 
 export type RunEvent =
   | Ev<"RunStarted", { task: string; endpointId: string; modelId: string }>
@@ -39,8 +40,27 @@ export type RunEvent =
   | Ev<"ModelInvocationCompleted",
       { toolCallCount: number; usage: ModelUsage; stopReason: string; durationMs: number }>
   | Ev<"ActionBatchPlanned", { batchId: ActionBatchId; callCount: number; mode: string }>
+  /**
+   * 【定】`riskFacts` / `dataMovement` 必须在这里，不能只活在 Resolver 的返回值里。
+   *
+   * `policy.ts` 把「URL scope 产出 riskFact ＋ dataMovement，让外发在 **Trace 上
+   * 可审计**」列为「越界读放行」的三条护栏之一。护栏 ①②（读黑名单、私网拒绝）
+   * 都在工具里真的拦着，而 ③ 此前**没有任何出口** —— 事件只带一个拼接过的
+   * `effect` 字符串，「这次调用把数据发去了哪个 host、带了哪些参数名」在盘上
+   * 完全查不到。一条不成立的依据支撑着一个已经生效的放开决定。
+   *
+   * 【定】`dataMovement.destination` 只记 host，`scope` 只记参数**名** ——
+   * 记参数值会让这条审计记录自己变成第二个泄漏点（见 effect-resolver）。
+   */
   | Ev<"ActionProposed",
-      { actionId: ActionId; toolCallId: string; toolName: string; effect: string }>
+      {
+        actionId: ActionId;
+        toolCallId: string;
+        toolName: string;
+        effect: string;
+        riskFacts: string[];
+        dataMovement?: DataMovementDescriptor;
+      }>
   | Ev<"ActionRejected", { actionId: ActionId; stage: string; reason: string }>
   | Ev<"ApprovalRequested", { actionId: ActionId; effect: string; reason: string }>
   | Ev<"ApprovalDecided", { actionId: ActionId; approved: boolean; reason?: string }>

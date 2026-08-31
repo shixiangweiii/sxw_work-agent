@@ -21,7 +21,6 @@ import type { Continue, LoopState, Terminal } from "../types/loop.js";
 import { nextState } from "../types/loop.js";
 import type { RunSpec } from "../types/run.js";
 import type { ContextMessage, TranscriptEntry } from "../types/transcript.js";
-import { TRANSCRIPT_SCHEMA_VERSION } from "../types/transcript.js";
 import type { ModelContent } from "../types/context.js";
 import type { RunId } from "../types/ids.js";
 import type { RuntimePorts } from "../ports/index.js";
@@ -97,7 +96,6 @@ export async function* runLoop(
   ): Promise<ContextMessage[]> => {
     const entry: Omit<TranscriptEntry, "sequence"> = {
       runId,
-      schemaVersion: TRANSCRIPT_SCHEMA_VERSION,
       kind: "MESSAGE",
       message,
       createdAt: now(),
@@ -206,7 +204,6 @@ export async function* runLoop(
     messages: deps.initialMessages ?? [],
     turnCount: deps.resumeFrom?.turnCount ?? 0,
     consecutiveFailures: deps.resumeFrom?.consecutiveFailures ?? 0,
-    compactTracking: undefined,
     // 【定】V05 §18.4：resume 保留预算使用。startedAt 也必须继承 ——
     // 重置它等于把墙钟清零，一次 crash + resume 就能白拿一整个预算周期。
     budgetUsage: deps.resumeFrom?.budgetUsage ?? {
@@ -345,7 +342,7 @@ export async function* runLoop(
     // ── ⓪ 排空 Interject 队列
     const pending = interrupts.interjections.drain();
     if (pending.length > 0) {
-      for (const item of pending) {
+      for (const content of pending) {
         // 【定】插话不得创建 Grant、改变 Policy、批准 Action。
         // 它只是一条 USER_PROVIDED 的消息。
         state = {
@@ -353,10 +350,10 @@ export async function* runLoop(
           messages: await appendAndPush(state.messages, {
             role: "user",
             turn: state.turnCount,
-            content: [{ type: "text", text: `[执行中插话] ${item.content}` }],
+            content: [{ type: "text", text: `[执行中插话] ${content}` }],
           }),
         };
-        yield await emit("InterjectionAccepted", { content: item.content });
+        yield await emit("InterjectionAccepted", { content });
       }
     }
 
@@ -513,7 +510,6 @@ export async function* runLoop(
         if (compiled.compactSummary && compiled.compactKept) {
           lastSequence = await ports.transcript.append({
             runId,
-            schemaVersion: TRANSCRIPT_SCHEMA_VERSION,
             kind: "COMPACT_BOUNDARY",
             compactSummary: compiled.compactSummary,
             createdAt: now(),
@@ -521,7 +517,6 @@ export async function* runLoop(
           for (const m of compiled.compactKept) {
             lastSequence = await ports.transcript.append({
               runId,
-              schemaVersion: TRANSCRIPT_SCHEMA_VERSION,
               kind: "MESSAGE",
               message: m,
               createdAt: now(),
@@ -642,6 +637,36 @@ export async function* runLoop(
       const e = ports.protocol.classifyError(err);
       yield await emit("RuntimeErrorOccurred", { error: e });
 
+      /**
+       * ── U-1 的第三个观测点：配对漂移（本批决 2 接线）────────────────────
+       *
+       * 【定】它必须在这里，因为**只有失败的模型调用才带得出这条证据**。
+       * 三条漂移规则里只有这一条是 FAIL_FAST，而它此前**生产路径零调用** ——
+       * 一条声称「端点开始校验配对就立刻停下」的规则，只在验收脚本里跑得到。
+       *
+       * 循环纪律第 5 条仍然成立：这里读的是 detector 返回的 observation，
+       * 端点声明的比对发生在 detector 内部。
+       */
+      const pairingDrift = drift.observePairingError(e);
+      if (pairingDrift) {
+        yield await emit("EndpointBehaviorDrift", {
+          field: pairingDrift.field,
+          declared: pairingDrift.declared,
+          observed: pairingDrift.observed,
+          disposition: pairingDrift.disposition,
+        });
+        const err2 = makeError({
+          code: "ENDPOINT_BEHAVIOR_DRIFT",
+          source: "MODEL_PROVIDER",
+          category: "PROTOCOL",
+          retryability: "NEVER",
+          sideEffectState: "NO_EFFECT",
+          safeMessage: new EndpointDriftError(pairingDrift).message,
+        });
+        yield await emit("RuntimeErrorOccurred", { error: err2 });
+        return yield* finish({ reason: "MODEL_ERROR", error: err2 });
+      }
+
       if (e.category === "QUOTA") return yield* finish({ reason: "QUOTA_EXHAUSTED" });
       if (e.category === "CAPACITY") return yield* finish({ reason: "CONTEXT_EXHAUSTED" });
 
@@ -682,7 +707,7 @@ export async function* runLoop(
      *
      * 这里此前传的是 `usage.inputTokens`，而那是**未命中缓存的增量**，
      * 不是这一帧的输入总量。profile 里就写着该比哪个数：
-     * `billedInputFormula: "INPUT_PLUS_CACHE"`；下面 `budget` 那段的【定】
+     * `billedInputFormula: "INPUT_PLUS_CACHE"`；下面 `usageAfter` 那段的【定】
      * 也写着「计费输入含缓存两项。只读 inputTokens 在命中时低估达 85%」——
      * 这一行做的正是它隔了几十行明令禁止的事。
      *
@@ -733,7 +758,12 @@ export async function* runLoop(
       }
     }
 
-    const budget = {
+    /**
+     * 【定】它装的是**用量**（`BudgetUsage`），不是限额。
+     * 全仓约定 `budgets` = 限额、`usage` = 消耗，而这个变量此前就叫 `budget`
+     * —— 几十行外的 `spec.budgets` 正好是它的反面。
+     */
+    const usageAfter = {
       ...state.budgetUsage,
       modelCalls: state.budgetUsage.modelCalls + 1,
       inputTokens: state.budgetUsage.inputTokens + usage.inputTokens,
@@ -772,10 +802,10 @@ export async function* runLoop(
           turn: state.turnCount + 1,
           content: synthesized,
         });
-        state = { ...state, messages: msgs, budgetUsage: budget };
+        state = { ...state, messages: msgs, budgetUsage: usageAfter };
       } else {
         // 这次模型调用已经发生并计费了，中断不改变这个事实。
-        state = { ...state, budgetUsage: budget };
+        state = { ...state, budgetUsage: usageAfter };
       }
       /**
        * 【定】按 abort 的**来源**分流，不要一律记成 ABORTED_STREAMING。
@@ -811,7 +841,7 @@ export async function* runLoop(
         state = nextState(
           state,
           {
-            budgetUsage: budget,
+            budgetUsage: usageAfter,
             outputLimitRecoveries: attempt,
             maxOutputTokensOverride: (state.maxOutputTokensOverride ?? frame.reservedOutputTokens) * 4,
           },
@@ -838,16 +868,21 @@ export async function* runLoop(
       state = {
         ...state,
         messages,
-        budgetUsage: { ...budget, turns: state.turnCount + 1 },
+        budgetUsage: { ...usageAfter, turns: state.turnCount + 1 },
         turnCount: state.turnCount + 1,
       };
-      const r = settleOutcome({ verifications, recoveryItems, artifactChecks });
+      /**
+       * 【定】这里**只判 kind**，未完成项不经 Terminal 走 —— 见 `Terminal` 的注释。
+       *
+       * `finish()` 会用同一份输入算出权威 outcome；Terminal 只负责说
+       * 「走的是哪条出口」。两者同时装进 `LoopTerminated`，谁多说一句
+       * 都会变成第二个可以与另一个矛盾的事实。
+       */
+      const kind = settleOutcome({ verifications, recoveryItems, artifactChecks }).kind;
       // 走 finish() 而不是直接构造返回值 —— 否则这条最常见的出口
       // 会绕过事实落盘，resume 读到的预算永远停在上一轮。
       return yield* finish(
-        r.kind === "SUCCESS"
-          ? { reason: "COMPLETED" }
-          : { reason: "COMPLETED_WITH_LIMITS", incompleteItems: r.incompleteItems },
+        kind === "SUCCESS" ? { reason: "COMPLETED" } : { reason: "COMPLETED_WITH_LIMITS" },
       );
     }
 
@@ -874,7 +909,6 @@ export async function* runLoop(
         now,
         signal: interrupts.signal,
         workspaceRoot: deps.workspaceRoot,
-        hasUntrustedContext: frame.trustSummary.hasExternalUntrusted,
         // §11.4：大结果外置。阈值来自**上下文预算**，不是端点协议上限 ——
         // 循环只是把它透传下去，不读端点声明（纪律第 5 条不变）。
         blobs: ports.blobs,
@@ -965,7 +999,7 @@ export async function* runLoop(
     });
 
     if (batchOutcome.aborted) {
-      state = { ...state, messages, budgetUsage: budget };
+      state = { ...state, messages, budgetUsage: usageAfter };
       return yield* finish({ reason: "ABORTED_TOOLS" });
     }
 
@@ -988,7 +1022,7 @@ export async function* runLoop(
       state = {
         ...state,
         messages,
-        budgetUsage: { ...budget, turns: state.turnCount + 1 },
+        budgetUsage: { ...usageAfter, turns: state.turnCount + 1 },
         turnCount: state.turnCount + 1,
       };
       return yield* finish({ reason: "NO_PROGRESS", toolName: noProgress.toolName, repeats: noProgress.repeats });
@@ -1004,9 +1038,9 @@ export async function* runLoop(
         messages,
         turnCount: state.turnCount + 1,
         budgetUsage: {
-          ...budget,
+          ...usageAfter,
           turns: state.turnCount + 1,
-          toolCalls: budget.toolCalls + invocation.toolCalls.length,
+          toolCalls: usageAfter.toolCalls + invocation.toolCalls.length,
         },
         // consecutiveFailures 归零条件：任一 Action 成功且其 required Verification 通过
         consecutiveFailures: anyVerified

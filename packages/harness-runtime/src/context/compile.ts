@@ -147,7 +147,11 @@ export async function compileFrame(
    *    在精确路径上再扣一次，阈值基准本身就是错的。
    *
    * 修法是把三种口径显式分开，见 `computeIrreducible` 的判定表。
-   * 这里只做一件事：**超硬限一律不发**，区分的只是「还能不能靠压缩救」。
+   * 这里只做一件事：**超硬限一律不发**。
+   *
+   * 【定】不再回一个 `irreducibleExceedsHardLimit` 标志位。它带着一整段
+   * 「两种处置在 D-05 里是分开的」的说明，而主循环只读 `status`、
+   * 从来没有第二种处置 —— 一个自称存在的分支比一个缺失的分支更误导。
    */
   if (count.tokens > deps.policy.hardInputLimitTokens) {
     return {
@@ -156,9 +160,6 @@ export async function compileFrame(
       irreducibleTokens: irreducible,
       fixedOverheadTokens: deps.fixedOverheadTokens,
       compactionApplied,
-      // 主循环据此选处置（D-05）：还有可压空间就更激进地压一轮，
-      // 连不可压缩集都超限就只能 DETERMINISTIC handoff。
-      irreducibleExceedsHardLimit: irreducible > deps.policy.hardInputLimitTokens,
     };
   }
 
@@ -272,8 +273,6 @@ function buildFrame(messages: ContextMessage[], deps: CompileDeps): ContextFrame
     id: asId<ContextFrameId>(deps.ids.next("frame")),
     runId: deps.runId,
     invocationId: asId<ModelInvocationId>(deps.ids.next("inv")),
-    compilerVersion: "1.0.0",
-    policyVersion: "1.0.0",
     endpointProfileVersion: `${deps.protocol.profile.id}@${deps.protocol.profile.observedAt}`,
     items,
     totalTokens: 0,
@@ -326,9 +325,6 @@ function finishItem(p: PartialItem, deps: CompileDeps): ContextItem {
     id: asId(deps.ids.next("ci")),
     contentHash: sha256(text),
     estimatedTokens: Math.ceil(text.length / 2.5),
-    // 阶段 1 的两个工具都在 ToolRuntime 里过了 RedactionPort，
-    // 进到这里的内容一律已脱敏（不变量 13）。
-    redactionApplied: true,
     createdAt: deps.now,
   };
 }
@@ -380,13 +376,10 @@ function summarize(items: ContextItem[]): TrustSummary {
 }
 
 /**
- * 不可压缩的部分。
+ * 不可压缩集（R-3）。
  *
  * 【端点】选定端点 reasoningBlockRule = DROPPABLE，所以只需覆盖配对组；
  * 换成 PLACEHOLDER_REQUIRED 的端点时，占位块也进入不可压缩集。
- */
-/**
- * 不可压缩集（R-3）。
  *
  * ── 判定表：工具定义开销到底该不该算进来 ──────────────────────────────
  *
@@ -424,9 +417,12 @@ function computeIrreducible(
        * **压不掉**。而修复前 irreducible 不把它们算进去，于是一个超长
        * 用户输入会得到「irreducible 很小 → 还能压 → 照常发出」的判定，
        * 而实际上一条都压不动。超硬限的帧就这样被放行了。
+       *
+       * 【定】这里此前还并着一个 `USER_INTERJECTION` —— 而插话被 `kindOf()`
+       * 归成 `USER_MESSAGE`，那个合取项从写下来就没命中过。
+       * 一个恒假的判定读起来像是一条保护。
        */
-      item.kind === "USER_MESSAGE" ||
-      item.kind === "USER_INTERJECTION"
+      item.kind === "USER_MESSAGE"
     ) {
       sum += item.estimatedTokens;
     }

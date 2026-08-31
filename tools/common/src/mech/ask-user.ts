@@ -94,24 +94,18 @@ export const askUserDefinition: ToolDefinition = {
     },
     required: ["question", "options"],
   },
-  // 【定】本字段当前零消费，授权层推到 bugfix 阶段（阶段 3 方案 S12 / 存量 S3-1）。
-  requiredCapabilities: [],
   effectResolution: {
     kind: "DECLARATIVE",
-    version: "1.0.0",
-    rules: [
-      {
-        pointer: "/question",
-        // 它不碰外部世界，连人都不用去碰 —— 只是要一个决定。
-        effectType: "NONE",
-        scopeKind: "NONE",
-        reversibility: "REVERSIBLE",
-        operation: "ask_user",
-      },
-    ],
+    rule: {
+      pointer: "/question",
+      // 它不碰外部世界，连人都不用去碰 —— 只是要一个决定。
+      effectType: "NONE",
+      scopeKind: "NONE",
+      reversibility: "REVERSIBLE",
+      operation: "ask_user",
+    },
   },
   redaction: { profile: "STANDARD" },
-  retryPolicy: { maxAttempts: 1, backoffMs: 0 },
   idempotency: { isIdempotent: true, isReadOnly: true },
   /**
    * 【定】比 `request_handoff` 的 2 小时短得多，但仍然远大于人的反应时间。
@@ -121,10 +115,9 @@ export const askUserDefinition: ToolDefinition = {
    * 而更短的超时会让「去倒杯水回来」变成一次失败。
    */
   timeoutPolicy: { timeoutMs: 30 * 60_000 },
-  cancellation: { cooperative: true },
   progressReporting: { mode: "NONE" },
-  verification: { mode: "NONE", requiredForSuccess: false, observationCost: "LOW" },
-  recoveryObservation: { kind: "TARGET_EXISTS", requiresPreFingerprint: false },
+  verification: { mode: "NONE", requiredForSuccess: false },
+  recoveryObservation: { requiresPreFingerprint: false },
   /**
    * 【定】与 `request_handoff` 同样要这一行。
    *
@@ -251,6 +244,5 @@ export async function executeAskUser(
 export const askUserSnapshot: ToolSnapshot = {
   toolId: askUserDefinition.id,
   version: askUserDefinition.version,
-  contentHash: `${askUserDefinition.name}@${askUserDefinition.version}`,
   definition: askUserDefinition,
 };

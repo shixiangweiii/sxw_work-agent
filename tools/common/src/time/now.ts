@@ -38,34 +38,27 @@ export const nowDefinition: ToolDefinition = {
     "上下文里的「[系统事实] 当前时间」是本次执行开始时的时刻；" +
     "只有在需要精确到分钟、或本次运行已持续较久时才需要调用本工具。",
   inputSchema: { type: "object", properties: {}, required: [] },
-  // 【定】本字段当前零消费，授权层推到 bugfix 阶段（阶段 3 方案 S12）。
-  requiredCapabilities: [],
   effectResolution: {
     kind: "DECLARATIVE",
-    version: "1.0.0",
     /**
      * 没有任何入参可解析，但仍要有一条规则 —— 不变量 9 要求每次执行前
      * 都具有 ResolvedEffect，「无副作用」也得是显式声明出来的，
      * 不能靠「规则为空所以没有 effect」这种默认推断。
      */
-    rules: [
-      {
-        pointer: "",
-        effectType: "READ",
-        scopeKind: "NONE",
-        reversibility: "REVERSIBLE",
-        operation: "read_clock",
-      },
-    ],
+    rule: {
+      pointer: "",
+      effectType: "READ",
+      scopeKind: "NONE",
+      reversibility: "REVERSIBLE",
+      operation: "read_clock",
+    },
   },
   redaction: { profile: "NONE" },
-  retryPolicy: { maxAttempts: 2, backoffMs: 100 },
   idempotency: { isIdempotent: true, isReadOnly: true },
   timeoutPolicy: { timeoutMs: 5_000 },
-  cancellation: { cooperative: true },
   progressReporting: { mode: "NONE" },
-  verification: { mode: "NONE", requiredForSuccess: false, observationCost: "LOW" },
-  recoveryObservation: { kind: "TARGET_EXISTS", requiresPreFingerprint: false },
+  verification: { mode: "NONE", requiredForSuccess: false },
+  recoveryObservation: { requiresPreFingerprint: false },
 };
 
 /**
@@ -104,6 +97,5 @@ export async function executeNow(
 export const nowSnapshot: ToolSnapshot = {
   toolId: nowDefinition.id,
   version: nowDefinition.version,
-  contentHash: `${nowDefinition.name}@${nowDefinition.version}`,
   definition: nowDefinition,
 };

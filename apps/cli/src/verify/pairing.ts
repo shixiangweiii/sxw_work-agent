@@ -493,7 +493,6 @@ async function main(): Promise<void> {
       // 直接往 transcript 注入一条「有 result 无 call」的消息 —— 锚点错配的形状。
       await composed.ports.transcript.append({
         runId: runId as never,
-        schemaVersion: 1,
         kind: "MESSAGE",
         message: {
           role: "user",

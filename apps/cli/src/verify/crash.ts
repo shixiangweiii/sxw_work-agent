@@ -16,7 +16,7 @@
  * `finalize()` 一行都跑不到。剩下什么，全看已经 COMMIT 的部分。
  */
 
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -30,7 +30,7 @@ import {
   type TranscriptEntry,
 } from "@workagent/harness-runtime";
 import { SqliteTranscriptStore, openDb } from "@workagent/store-sqlite";
-import { runSegment, type SegmentResult } from "@workagent/testkit";
+import { runSegment } from "@workagent/testkit";
 import { compose } from "../compose.js";
 import { banner, fact, runVerify, section, verdict } from "./harness.js";
 

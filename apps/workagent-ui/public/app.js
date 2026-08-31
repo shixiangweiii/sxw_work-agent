@@ -222,8 +222,8 @@ function renderRuns() {
  * 【定】UI **不拥有**这个判断（§5.2「合法状态迁移不由 UI 拥有」）——
  * 它只是不去点一个必错的按钮；真正的裁决仍然在 Runtime，点了照样会被拒。
  */
-const RESUMABLE = ["CREATED", "RUNNING", "CANCELLED", "RECOVERY_REQUIRED",
-  "WAITING_FOR_USER", "WAITING_FOR_APPROVAL", "WAITING_FOR_INTERACTION"];
+const RESUMABLE = ["RUNNING", "CANCELLED", "RECOVERY_REQUIRED",
+  "WAITING_FOR_APPROVAL", "WAITING_FOR_INTERACTION"];
 
 const TABS = [
   ["timeline", "时间线"],
@@ -479,6 +479,23 @@ function renderToolActivity(box, head, e) {
       }),
     );
   }
+  /**
+   * 护栏 3：这次调用带了哪些风险事实、把数据发去了哪里。
+   *
+   * 【定】它必须显示。`policy.ts` 把「让外发在 Trace 上可审计」列为
+   * 「越界读放行」的三条护栏之一，而在此之前 riskFacts / dataMovement
+   * 从来没有离开过 Resolver 的返回值 —— 一条撑着已生效决定的依据，
+   * 在盘上和界面上都查不到。
+   */
+  if (e.riskFacts && e.riskFacts.length) {
+    box.appendChild(el("div", { class: "kv", text: "风险事实：" + e.riskFacts.join("、") }));
+  }
+  if (e.dataMovement) {
+    box.appendChild(
+      el("div", { class: "kv warn", text:
+        "数据外发 → " + e.dataMovement.destination + "（" + e.dataMovement.scope + "）" }),
+    );
+  }
   if (e.rejected) {
     box.appendChild(el("div", { class: "body", text: "被拒绝（" + e.rejected.stage + "）：" + e.rejected.reason }));
   }
@@ -599,7 +616,7 @@ const AXIS_LABEL = {
   totalWallClockMs: "总墙钟（含停机）",
   modelCalls: "模型调用",
   toolCalls: "工具调用",
-  inputTokens: "输入 token（billed）",
+  billedInputTokens: "输入 token（含缓存）",
   outputTokens: "输出 token",
   consecutiveFailures: "连续失败",
 };
@@ -687,7 +704,6 @@ function renderArtifacts(view, d) {
       delivered.has(a.artifactId) ? el("span", { class: "chip ok", text: "已交付" }) : null,
       el("span", { class: "chip", text: a.kind }),
       el("span", { class: "chip", text: a.sizeBytes + " 字节" }),
-      a.tombstonedAt ? el("span", { class: "chip bad", text: "已 Tombstone" }) : null,
       // 【定】三态：没验过 / 验过通过 / 验过没通过。undefined 不得显示成「否」。
       a.verified === undefined
         ? el("span", { class: "chip", text: "还没验过" })
@@ -696,9 +712,6 @@ function renderArtifacts(view, d) {
     const box = el("div", { class: "entry ARTIFACT" }, [head]);
     if (a.verifyDetail) box.appendChild(el("div", { class: "kv", text: a.verifyDetail }));
     box.appendChild(el("div", { class: "kv mono", text: "hash " + a.contentHash }));
-    if (a.derivedFrom.length) {
-      box.appendChild(el("div", { class: "kv", text: "派生自：" + a.derivedFrom.join(", ") }));
-    }
     if (a.path) {
       const pre = el("pre", { text: "（点开看磁盘上那一份）" });
       const drift = el("div", { class: "kv" });

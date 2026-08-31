@@ -224,7 +224,6 @@ async function buildRecoveryFixture(workspaceRoot: string, dbPath: string): Prom
   // 注入未配对的 tool_call（没有 result，也没有 ACTION_FACT 指纹）
   await composed.ports.transcript.append({
     runId: asId<RunId>(runId),
-    schemaVersion: 1,
     kind: "MESSAGE",
     message: {
       role: "assistant",
@@ -369,8 +368,7 @@ async function main(): Promise<void> {
 
   const svc = await startService({
     workspaceRoot,
-    dbPath: ":memory:",
-    traceDir,
+    storageOverride: { dbPath: ":memory:", traceDir },
     endpoint: "bailian",
     token: TOKEN,
     composeOverrides: {
@@ -475,8 +473,7 @@ async function main(): Promise<void> {
 
     const svc2 = await startService({
       workspaceRoot,
-      dbPath: ":memory:",
-      traceDir: join(tmp, "runs2"),
+      storageOverride: { dbPath: ":memory:", traceDir: join(tmp, "runs2") },
       endpoint: "bailian",
       token: TOKEN,
       composeOverrides: {
@@ -500,6 +497,26 @@ async function main(): Promise<void> {
       const rid2 = String(r2.body["runId"] ?? "");
       const firstPending = await nextPending(svc2, "APPROVAL");
       fact("第一段的审批出现", firstPending ? "是" : "否");
+
+      /**
+       * ══════════════════════════════════════════════════════════════════
+       * 【定】**跑动中 `liveInThisProcess` 必须为 `true`** —— 这条是配对判据。
+       *
+       * 本段与下面两处只验 `false`（取消之后、resume 结束之后、对历史 Run
+       * 取消之后）。**一个恒返回 false 的实现能让那些全绿。**
+       *
+       * 它不是补形式：`segmentActive` 此前是一次「名字换了、极性没换」的
+       * 改名（六处读写里五处保持旧 `done` 极性），而 163 条判据没有一条
+       * 会响 —— 因为极性只在「跑着的时候」才看得出来，而当时没人验那一侧。
+       * ══════════════════════════════════════════════════════════════════
+       */
+      const midFlight = await call(svc2, `/api/runs/${rid2}`);
+      fact("停在审批上时 liveInThisProcess", String(midFlight.body["liveInThisProcess"]));
+      verdict(
+        midFlight.body["liveInThisProcess"] === true,
+        "**跑动中** liveInThisProcess 为 true —— 与「跑完 / 取消之后为 false」" +
+          "配成一对；少了这一半，一个恒 false 的实现照样全绿",
+      );
 
       // 【定】用取消而不是拒绝 —— 拒绝走的是「人给了决定」那条路，
       // 而这里要造的恰恰是「等待被外力打断」，那才会 abort 掉 controller。
@@ -571,8 +588,7 @@ async function main(): Promise<void> {
 
     const svcAuto = await startService({
       workspaceRoot,
-      dbPath: ":memory:",
-      traceDir: join(tmp, "runs-auto"),
+      storageOverride: { dbPath: ":memory:", traceDir: join(tmp, "runs-auto") },
       endpoint: "bailian",
       token: TOKEN,
       composeOverrides: {
@@ -651,8 +667,7 @@ async function main(): Promise<void> {
 
     const svcG = await startService({
       workspaceRoot,
-      dbPath: ":memory:",
-      traceDir: join(tmp, "runs-g"),
+      storageOverride: { dbPath: ":memory:", traceDir: join(tmp, "runs-g") },
       endpoint: "bailian",
       token: TOKEN,
       composeOverrides: {
@@ -811,8 +826,7 @@ async function main(): Promise<void> {
       const runIdR = await buildRecoveryFixture(workspaceRoot, recoveryDb);
       const svcR = await startService({
         workspaceRoot,
-        dbPath: recoveryDb,
-        traceDir: recoveryTrace,
+        storageOverride: { dbPath: recoveryDb, traceDir: recoveryTrace },
         endpoint: "bailian",
         token: TOKEN,
         composeOverrides: {
@@ -924,8 +938,10 @@ async function main(): Promise<void> {
       const registry = join(tmp, "workspaces.json");
       const svcW = await startService({
         workspaceRoot: wsC,
-        dbPath: join(wsC, ".workagent", "runs.db"),
-        traceDir: join(wsC, ".workagent", "runs"),
+        storageOverride: {
+          dbPath: join(wsC, ".workagent", "runs.db"),
+          traceDir: join(wsC, ".workagent", "runs"),
+        },
         registryFile: registry,
         endpoint: "bailian",
         token: TOKEN,
@@ -1091,12 +1107,13 @@ async function main(): Promise<void> {
     );
 
     const axes = detail["budgetAxes"] as Array<{ axis: string; used: number; limit?: number }>;
-    const inputAxis = axes.find((a) => a.axis === "inputTokens");
+    const billedAxis = axes.find((a) => a.axis === "billedInputTokens");
     fact("八条轴", axes.map((a) => `${a.axis}=${a.used}/${a.limit ?? "—"}`).join(" "));
     verdict(
-      axes.length === 8 && inputAxis?.used === snapshot.budgetUsage["billedInputTokens"],
-      "八条轴走 Runtime 的 readBudgetAxes：inputTokens 读的是 **billed**，不是 inputTokens —— " +
-        "自己拼这张表的人一定会拼错这一行，而错了不会有任何征兆",
+      axes.length === 8 && billedAxis?.used === snapshot.budgetUsage["billedInputTokens"],
+      "八条轴走 Runtime 的 readBudgetAxes，且**轴名与读数同名**（billedInputTokens）—— " +
+        "此前轴叫 inputTokens 而读的是 billed，靠一行注释维持；缓存命中时两者差 5 倍以上，" +
+        "照字面配置的人会把 42 万的墙当成 3 万",
     );
 
     const turns = detail["turns"] as Array<{ turn: number; transition?: string; frame?: unknown }>;

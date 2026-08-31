@@ -49,19 +49,17 @@ export class SqliteRunStore implements RunStorePort {
     inTransaction(this.db, () => {
       this.db
         .prepare(
-          `INSERT OR IGNORE INTO agent_spec_snapshots
-             (content_hash, agent_spec_id, version, snapshot_json, created_at)
-           VALUES (?, ?, ?, ?, ?)`,
+          `INSERT OR IGNORE INTO agent_spec_snapshots (content_hash, snapshot_json)
+           VALUES (?, ?)`,
         )
-        .run(agentHash, String(spec.agentSpec.agentSpecId), spec.agentSpec.version, agentJson, now);
+        .run(agentHash, agentJson);
 
       this.db
         .prepare(
-          `INSERT OR REPLACE INTO run_specs
-             (run_spec_id, agent_spec_content_hash, spec_json, spec_hash, created_at)
-           VALUES (?, ?, ?, ?, ?)`,
+          `INSERT OR REPLACE INTO run_specs (run_spec_id, agent_spec_content_hash, spec_json)
+           VALUES (?, ?, ?)`,
         )
-        .run(String(spec.id), agentHash, specJson, sha256(specJson + agentHash), spec.createdAt);
+        .run(String(spec.id), agentHash, specJson);
 
       this.db
         .prepare(

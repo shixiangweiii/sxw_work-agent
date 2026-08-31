@@ -17,7 +17,6 @@ import {
   DeclarativeEffectResolver,
   HarnessRuntime,
   TRUSTED_PERSONAL,
-  ToolRegistry,
   asId,
   assertProfileMatchesEndpoint,
   freezeProfile,
@@ -74,13 +73,32 @@ const HERE = resolve(fileURLToPath(new URL(".", import.meta.url)));
 export const REPO_ROOT = resolve(HERE, "../../..");
 
 /**
- * SQLite 库的默认位置。
+ * 跨 workspace 的产品状态目录。**只放注册表**（有哪些 workspace）。
  *
- * 【定】与 `.workagent-workspace/` 分开：workspace 是**用户数据**（V05 §7.1），
- * 库是 **Runtime 状态**。换 `--workspace` 不换库 —— 同一个库里可以有指向
- * 不同 workspace 的 Run，这与 RunSpec 自己存 workspaceRoot 是一致的。
+ * 【定】它不再放库。见 `workspaceStorage()`。
  */
 export const DEFAULT_STATE_DIR = ".workagent-state";
+
+/**
+ * 一个 workspace 一套存储。
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ * 【定】**只有这一条规则**，终端与浏览器共用。
+ *
+ * 此前有两套：CLI 一律用固定的 `.workagent-state/runs.db`，而界面新建的
+ * workspace 用 `<ws>/.workagent/`；服务启动时还专门把 CLI 那条路径**覆盖**
+ * 回注册表，注释写着「换成新默认等于让已有的 Run 一夜之间从界面上消失」。
+ * 那是为历史数据保留的第二套规则 —— 旧数据不再兼容，规则因此只剩一套。
+ *
+ * 【定】库跟着 workspace 走，而不是全局一份：`resume()` 的 §18.3 第二维闸门
+ * 判的就是「这个 Run 属于哪个 workspace」。两者同源之后，
+ * 「A 的 Run 出现在 B 的列表里」物理上不成立，闸门只是兜底。
+ * ══════════════════════════════════════════════════════════════════════
+ */
+export function workspaceStorage(workspaceRoot: string): { dbPath: string; traceDir: string } {
+  const dir = resolve(workspaceRoot, ".workagent");
+  return { dbPath: resolve(dir, "runs.db"), traceDir: resolve(dir, "runs") };
+}
 
 /**
  * 默认装配的工具集（阶段 3 §2.1 的工具账）。
@@ -100,12 +118,12 @@ export const DEFAULT_TOOLS: ToolSnapshot[] = [...commonTools, ...microCaseTools]
 /**
  * 解析库路径。`--db` 覆盖默认值，`:memory:` 原样透传。
  *
- * 【定】默认路径必须是**固定的**，不能随 `--workspace` 或时间戳变 ——
+ * 【定】默认值由 workspace 推出（`workspaceStorage`），且**不含时间戳** ——
  * `--resume <runId>` 跨进程要能找回同一个库，这就是它的前提。
  */
-export function resolveDbPath(explicit?: string): string {
+export function resolveDbPath(workspaceRoot: string, explicit?: string): string {
   if (explicit === ":memory:") return explicit;
-  return explicit ? resolve(explicit) : resolve(REPO_ROOT, DEFAULT_STATE_DIR, "runs.db");
+  return explicit ? resolve(explicit) : workspaceStorage(workspaceRoot).dbPath;
 }
 
 /**
@@ -293,6 +311,20 @@ export function stripUnsafeDisplayChars(raw: string): string {
     .replace(/[\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff]/g, "");
 }
 
+/**
+ * baseUrl 里只取 host，供入口打印诊断用。
+ *
+ * 【定】两个入口共用这一份。完整 URL 的路径里有时带部署标识，
+ * 而这一行会被贴进 issue 与评测报告；key 一个字都不出现（§22.3）。
+ */
+export function hostOf(baseUrl: string): string {
+  try {
+    return new URL(baseUrl).host;
+  } catch {
+    return baseUrl ? "（无法解析的 baseUrl）" : "（未配置）";
+  }
+}
+
 // ═══════════════════════════════════════════════ 工作树身份（两入口共用）
 
 export interface GitProvenance {
@@ -338,8 +370,13 @@ export function gitProvenance(): GitProvenance {
  * 与 trace header 的 `entry`（进 JSONL）。此前只有后者是对的 ——
  * header 写着 `entry:"web"`，而同一个 Run 的 RunSpec 里写着 `CLI`。
  * 两条轨道对同一件事各说各话，事后没有任何办法判断哪条可信。
+ *
+ * 【定】`EVAL` 是本批补的：`RunOrigin` 里早就有这个变体、零生产者，
+ * 而 `eval/suite` 走的是默认值 —— **Eval 起的 Run 一直自称 CLI**。
+ * 与阶段 4 修掉的 WEB 那个 bug 一字不差，只是当时 `RunEntry` 的类型
+ * 连 `EVAL` 都传不进来。决 4 说评测数据的入口归因读的正是这里。
  */
-export type RunEntry = "CLI" | "WEB";
+export type RunEntry = "CLI" | "WEB" | "EVAL";
 
 export interface ComposeOptions {
   workspaceRoot: string;
@@ -378,7 +415,7 @@ export interface ComposeOptions {
    */
   tools?: ToolSnapshot[];
   /**
-   * SQLite 库路径。默认 `.workagent-state/runs.db`。
+   * SQLite 库路径。默认 `<workspace>/.workagent/runs.db`。
    *
    * 验收脚本传 `":memory:"` —— 那是**同一条 SQLite 代码路径**，只是不落盘，
    * 既密封又不牺牲覆盖（跑的是真 SQL，不是内存桩）。
@@ -507,11 +544,10 @@ export function compose(opts: ComposeOptions): Composed {
   const notices = [...warnIfAssumed(profile), ...(modelMismatch ? [modelMismatch] : [])];
 
   const tools = opts.tools ?? DEFAULT_TOOLS;
-  const registry = new ToolRegistry(tools);
   const systemPrompt = opts.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
   const contextPolicy = opts.contextPolicy ?? DEFAULT_CONTEXT_POLICY;
 
-  const dbPath = opts.dbPath ?? resolve(REPO_ROOT, DEFAULT_STATE_DIR, "runs.db");
+  const dbPath = opts.dbPath ?? workspaceStorage(opts.workspaceRoot).dbPath;
   if (dbPath !== ":memory:") mkdirSync(dirname(dbPath), { recursive: true });
   const db = openDb({ path: dbPath });
 
@@ -622,12 +658,21 @@ export function compose(opts: ComposeOptions): Composed {
     // 【定】不要写死。见 Composed.makeRunSpec 与 RunOrigin 的说明 ——
     // 写死一个常量的后果不是「值不对」，是**没有任何东西能与它矛盾**。
     origin: { kind: entry, invokedAt: clock.now() },
-    correlationId: ids.next("corr"),
     input: { task },
     agentSpec: {
-      agentSpecId: asId<AgentSpecId>("agent_micro_case"),
+      /**
+       * 【定】名字要描述它现在装的是什么。
+       *
+       * 它此前叫 `agent_micro_case`，而这份 AgentSpec 装的是完整的通用工具面
+       * （`cases/micro-cases` 只剩两个测量工具）。这个 id 会进
+       * `agent_spec_snapshots` 表、进 Replay、进评测归因。
+       *
+       * 【定】没有 `contentHash` 字段了 —— 真正的内容身份由
+       * `SqliteRunStore.createRun()` 对序列化后的 AgentSpec 现算。
+       * 此前这里写死 `"micro@0.1.0"`，一个叫 hash 的字段装着人工常量。
+       */
+      agentSpecId: asId<AgentSpecId>("agent_default"),
       version: "0.1.0",
-      contentHash: "micro@0.1.0",
       model: {
         endpointId: profile.endpointId,
         modelId: profile.modelId,
@@ -639,12 +684,10 @@ export function compose(opts: ComposeOptions): Composed {
       timezone: opts.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone,
       toolSnapshots: tools,
       contextPolicy,
-      loopPolicy: {
-        maxTurns: DEFAULT_BUDGETS.maxTurns,
-        maxConsecutiveFailures: DEFAULT_BUDGETS.maxConsecutiveFailures,
-        maxModelErrorRetries: 2,
-        maxOutputLimitRecoveries: 2,
-      },
+      // 【定】只放循环自己的重试上限。turns 与连续失败是**预算轴**，
+      // 权威副本在 `budgets` 里，执行期读的也是那边 —— 此前这里抄了一份
+      // 同名字段、零读取点，于是「改哪个才生效」有两个答案。
+      loopPolicy: { maxModelErrorRetries: 2, maxOutputLimitRecoveries: 2 },
       approvalPolicy: TRUSTED_PERSONAL,
     },
     // 【定】Run 启动时冻结。Replay 使用冻结版本，不使用当前配置。
@@ -662,11 +705,8 @@ export function compose(opts: ComposeOptions): Composed {
      */
     workspace: freezeWorkspace(opts.workspaceRoot),
     budgets: DEFAULT_BUDGETS,
-    runtimeEnvironmentFingerprint: `node-${process.version}`,
     createdAt: clock.now(),
   });
-
-  void registry; // 供将来的固定开销核对；ToolRegistry 由主循环自行构造
 
   return {
     runtime,

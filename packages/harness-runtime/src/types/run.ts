@@ -3,14 +3,12 @@
  */
 
 import type {
-  ActionBatchId,
   ActionId,
   AgentSpecId,
   EndpointId,
   JsonValue,
   RunId,
   RunSpecId,
-  SessionId,
   Timestamp,
   WorkspaceId,
 } from "./ids.js";
@@ -31,7 +29,6 @@ export interface ModelConfigurationSnapshot {
 export interface AgentSpecSnapshot {
   agentSpecId: AgentSpecId;
   version: string;
-  contentHash: string;
   model: ModelConfigurationSnapshot;
   systemPrompt: string;
   /**
@@ -48,9 +45,15 @@ export interface AgentSpecSnapshot {
   approvalPolicy: ApprovalPolicySnapshot;
 }
 
+/**
+ * 循环自身的重试上限。
+ *
+ * 【定】**不含 `maxTurns` / `maxConsecutiveFailures`** —— 那两条是**预算轴**，
+ * 权威副本在 `RunBudgets` 里，执行期读的也是那边（`checkBudgets`）。
+ * 这里此前抄了一份同名字段、零读取点，于是「改哪个才生效」有两个答案，
+ * 而只改错的那个不会有任何征兆。
+ */
 export interface LoopPolicySnapshot {
-  maxTurns: number;
-  maxConsecutiveFailures: number;
   maxModelErrorRetries: number;
   maxOutputLimitRecoveries: number;
 }
@@ -77,11 +80,17 @@ export interface RunBudgets {
   maxTotalWallClockMs?: number;
   maxModelCalls?: number;
   maxToolCalls?: number;
-  maxInputTokens?: number;
+  /**
+   * 【定】名字里的 **billed** 不是修饰，是口径：它限制的是
+   * `BudgetUsage.billedInputTokens`（含缓存读写两项），不是 `inputTokens`。
+   *
+   * 两者在命中前缀缓存时差 5 倍以上 —— 此前这条轴叫 `maxInputTokens`
+   * 而读的是 billed，靠一行注释维持，而注释拦不住下一个照字面配置的人。
+   */
+  maxBilledInputTokens?: number;
   maxOutputTokens?: number;
   maxConsecutiveFailures: number;
   softLimitRatio: number;
-  handoffReserveTokens?: number;
 }
 
 export interface BudgetUsage {
@@ -187,10 +196,9 @@ export interface ArtifactCheckFact {
  * 判据比枚举值本身重要 —— 补一个枚举值容易，让它不再退回常量要靠那条判据。
  */
 export type RunOrigin =
-  | { kind: "SESSION_MESSAGE"; sessionId: SessionId; messageId: string }
-  | { kind: "EVAL"; caseId: string }
   | { kind: "CLI"; invokedAt: Timestamp }
-  | { kind: "WEB"; invokedAt: Timestamp };
+  | { kind: "WEB"; invokedAt: Timestamp }
+  | { kind: "EVAL"; invokedAt: Timestamp };
 
 export interface RunInput {
   task: string;
@@ -211,7 +219,6 @@ export interface WorkspaceExecutionSnapshot {
 export interface RunSpec {
   id: RunSpecId;
   origin: RunOrigin;
-  correlationId: string;
   input: RunInput;
   agentSpec: AgentSpecSnapshot;
   /**
@@ -219,9 +226,12 @@ export interface RunSpec {
    * 三个月后 Replay 一个旧 Run 用的是今天的端点行为 —— 而实测表明端点行为会变。
    */
   endpointProfile: EndpointCapabilityProfileSnapshot;
-  workspace?: WorkspaceExecutionSnapshot;
+  /**
+   * 【定】必填。它是 §18.3 第二维闸门（`assertResumeWorkspaceMatches`）的被比对方 ——
+   * 可选意味着「有一档没有身份可比」，而那一档只能放行，闸门就此有洞。
+   */
+  workspace: WorkspaceExecutionSnapshot;
   budgets: RunBudgets;
-  runtimeEnvironmentFingerprint: string;
   createdAt: Timestamp;
 }
 
@@ -229,14 +239,17 @@ export interface RunSpec {
 
 /**
  * 没有 PAUSED —— 消息级恢复下它与「cancel() 后稍后 resume()」行为一致。
+ * 也没有 CREATED：`createRun()` 一律以 RUNNING 落库，没有第二个起点。
  *
  * WAITING_FOR_* 不是「循环停下来等一个 durable request」，而是循环阻塞在一个 await 上。
  * 状态值保留是给 Layer 2 与 UI 用的，不驱动调度。
+ *
+ * 【定】这里只放**有写入点**的值。`WAITING_FOR_USER` 在此之前挂了四个阶段，
+ * 全仓零生产者，而 UI 的可恢复状态表照抄了它 —— 一个永远不会出现的分支
+ * 被当成产品行为维护着。
  */
 export type RunStatus =
-  | "CREATED"
   | "RUNNING"
-  | "WAITING_FOR_USER"
   | "WAITING_FOR_APPROVAL"
   | "WAITING_FOR_INTERACTION"
   | "RECOVERY_REQUIRED"
@@ -280,13 +293,17 @@ export interface RunSnapshot {
   runId: RunId;
   runSpecId: RunSpecId;
   status: RunStatus;
-  currentBatchId?: ActionBatchId;
-  waitingOn?: "USER" | "APPROVAL" | "INTERACTION" | "RECOVERY";
   turnCount: number;
   consecutiveFailures: number;
   budgetUsage: BudgetUsage;
   messageCount: number;
-  updatedAt: Timestamp;
+  /**
+   * 【定】它是**这次 inspect 的时刻**，不是 Run 最近一次状态更新的时刻。
+   * 此前叫 `updatedAt`，而值是 `clock.now()` —— 名字承诺的是一个持久化事实，
+   * 给的是一个每次读都不同的数。要「最近更新时刻」请读 `RunListItem.updatedAt`，
+   * 那个才来自 `runs.updated_at`。
+   */
+  inspectedAt: Timestamp;
   /**
    * §18.2 三条分支各命中过多少次。**阶段 2 测量装置的对外出口。**
    *
@@ -316,7 +333,6 @@ export interface ModelUsage {
   outputTokens: number;
   cacheCreationInputTokens?: number;
   cacheReadInputTokens?: number;
-  reasoningTokens?: number;
   /**
    * 派生字段。只读 inputTokens 会在缓存命中时低估达 85%，
    * 因为命中时 inputTokens 只剩非缓存部分。

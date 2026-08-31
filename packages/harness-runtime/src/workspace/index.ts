@@ -98,31 +98,22 @@ export function freezeWorkspace(root: string): WorkspaceExecutionSnapshot {
  * 【定】排在**端点闸门之后、生命周期闸门之前** —— 与 §18.3 同一档：
  * 换了执行条件之后，连「这个 Run 现在是什么状态」都该被怀疑。
  *
- * ── 三档处置，中间那档是这条闸门最需要解释的地方 ──────────────────────
+ * ── 两档处置。此前有第三档，那是历史数据的代价 ────────────────────────
  *
- * | RunSpec 里的 workspace | 处置 |
- * |---|---|
- * | 与当前一致 | 放行 |
- * | 与当前**不一致** | **拒绝** |
- * | **缺失**（本闸门上线前创建的 Run） | 放行，但由调用方发一条可见的降级事实 |
- *
- * 第三档不能硬拒：那会把库里所有存量 Run 一次性变成不可恢复，而它们
- * 当初并没有做错什么。也不能静默放行 —— 那正是这个洞原来的样子。
- * 所以返回值是**三态**，让调用方把「不知道」如实说出来（见 facade 的调用点）。
+ * `RunSpec.workspace` 曾经是可选的，于是这条闸门有一个 `UNKNOWN_LEGACY`
+ * 档：放行 ＋ 发一条降级事件。它只服务闸门上线之前创建的 Run。
+ * 字段改必填之后，那一档在类型上就不可达了 —— 一条**只能放行**的分支
+ * 不再存在，闸门只有「一致」与「不一致」两种答案。
  */
-export type WorkspaceMatch = "MATCHES" | "UNKNOWN_LEGACY";
-
 export function assertResumeWorkspaceMatches(
-  frozen: WorkspaceExecutionSnapshot | undefined,
+  frozen: WorkspaceExecutionSnapshot,
   currentRoot: string,
-): WorkspaceMatch {
-  if (!frozen) return "UNKNOWN_LEGACY";
-
+): void {
   const current = canonicalWorkspacePath(currentRoot);
   const was = frozen.mounts[0]?.absolutePath ?? "(未记录)";
   const currentId = workspaceIdOf(currentRoot);
 
-  if (String(frozen.workspaceId) === String(currentId)) return "MATCHES";
+  if (String(frozen.workspaceId) === String(currentId)) return;
 
   throw new Error(
     `拒绝 resume：workspace 与这个 Run 启动时不是同一个。\n` +

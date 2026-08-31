@@ -28,6 +28,7 @@ import {
   asId,
   readBudgetAxes,
   readRunFacts,
+  ToolRegistry,
   type RecoveryItem,
   type RunEvent,
   type RunId,
@@ -42,8 +43,8 @@ import {
   compose,
   DEFAULT_TOOLS,
   gitProvenance,
+  hostOf,
   REPO_ROOT,
-  stripUnsafeDisplayChars,
   type Composed,
   type ComposeOptions,
   type EndpointChoice,
@@ -79,8 +80,28 @@ interface LiveRun {
   /** 本段的事件缓冲，供 SSE 重连按 `since` 续拉。 */
   events: RunEvent[];
   outcome?: RunOutcome;
-  terminal?: string;
-  done: boolean;
+  /** 【定】只装 `terminal.reason` 这个字符串，名字跟着实际内容走。 */
+  terminalReason?: string;
+  /**
+   * 「**本进程里**这一段执行还在跑吗」——**正向**布尔：跑着为 `true`。
+   *
+   * ══════════════════════════════════════════════════════════════════
+   * 【定】名字与极性必须一起改。
+   *
+   * 它此前叫 `done`（完成为 true）。2026-08-31 的清理把名字换成
+   * `segmentActive` 却**没有翻转极性** —— 六处读写里五处仍是
+   * 「false ＝ 在跑」，只有 `aborterFor()` 那一处被翻了，于是字段
+   * 内部自相矛盾：谁按名字去「修正」另外五处，逻辑会部分反转。
+   *
+   * 那次改名当时没造成行为错误（可达路径恰好对上），也**没有任何判据
+   * 会响** —— 极性是内部约定，而当时的两条 live 判据都只验 `false`。
+   * 配对判据（跑动中必须 `true`）随本次一并补上。
+   *
+   * 与「Run 完成了吗」是两个事实：历史 Run 在盘上可能正是 `RUNNING`，
+   * 而这里没人在跑它。界面要把它们**分开**显示（见 `liveInThisProcess`）。
+   * ══════════════════════════════════════════════════════════════════
+   */
+  segmentActive: boolean;
   error?: string;
   /**
    * 后台消费 generator 的那个 Promise。
@@ -134,8 +155,11 @@ export class RunHost {
    * 两个 Run 并发时一个接管请求会被挂到错误的 Run 上，而界面上完全看不出来。
    * 要放开这条，得先给那两个接口加 runId —— 那是 Runtime 侧的接口变更，
    * 需要一个真实的并发场景来支撑，本批没有。
+   *
+   * 【定】名字是 **holder** 不是 runId：它也可能装 `STARTING` 哨兵
+   * （start 已经占位、runId 还没从第一个事件里出来的那个窗口）。
    */
-  private currentRunId = "";
+  private foregroundHolder = "";
 
   constructor(private readonly opts: RunHostOptions) {
     this.composed = compose({
@@ -147,8 +171,8 @@ export class RunHost {
         (a) => autoGrantVerdict(a, opts.workspaceRoot),
         (runId) => this.aborterFor(runId).signal,
       ),
-      handoff: this.pendingHub.handoffChannel(() => this.currentRunId),
-      question: this.pendingHub.questionChannel(() => this.currentRunId),
+      handoff: this.pendingHub.handoffChannel(() => this.foregroundHolder),
+      question: this.pendingHub.questionChannel(() => this.foregroundHolder),
       /**
        * 【定】Trace 仍然落盘，Web 入口不例外。
        *
@@ -180,8 +204,11 @@ export class RunHost {
       approvalMode:
         "workspace 内的写自动放行；IRREVERSIBLE（追加/删除）与 EXECUTE 停下来问；越界写直接拒绝",
       toolNames: tools.map((t) => t.definition.name),
-      // 工具数 × 180（§16.1【定·实测】）。这是随时可读的过拟合警报。
-      fixedOverheadTokens: tools.length * 180,
+      // 【定】调 `ToolRegistry` 的那一份，**不抄公式**。
+      // 这里此前写着 `tools.length * 180`，而 §16.1 那个系数的权威副本在
+      // `fixedOverheadTokens()` 里 —— 改实现时这一处不会跟着变，
+      // 而界面上那个「起步价」是给人读的过拟合警报。
+      fixedOverheadTokens: new ToolRegistry(tools).fixedOverheadTokens(),
       notices: this.composed.notices,
       traceDir: this.opts.traceDir,
     };
@@ -248,7 +275,18 @@ export class RunHost {
     const timeline = projectTimeline(input);
     const turns = projectTurns(input);
 
-    const status = (await this.composed.ports.runs.getStatus(id)) ?? "CREATED";
+    /**
+     * 【定】用 `snapshot.status`，**不再第二次查库、也不发明默认值**。
+     *
+     * 这里此前是 `getStatus(id) ?? "CREATED"` —— 而 `"CREATED"` 已经不在
+     * `RunStatus` 的值域里（`createRun()` 一律以 RUNNING 落库，没有第二个起点）。
+     * 它躲过了 typecheck 是因为 `UiRunDetail.status` 放宽成了 `string`：
+     * 局部联合 widen 之后没有任何东西校验它。
+     *
+     * 更要紧的是它会**掩盖库不一致**：spec 行在而状态行不在，是一个要说出来
+     * 的事实，不是一个可以用默认值糊过去的缺省。`inspect()` 那边已经为此抛了。
+     */
+    const status = snapshot.status;
     const outcome = live?.outcome ?? loadTraceOutcome(traceFile);
     /**
      * 【定】`RECOVERY_REQUIRED` 的项优先从 **transcript 的 RUN_META** 读。
@@ -508,7 +546,7 @@ export class RunHost {
      * 但 runId 要等第一个事件才知道，所以这里只能先挂在一个「在途」槽位上。
      * 它不需要是 Map —— 前台槽位（`claimForeground`）保证同时只有一个 Run
      * 处在「已开始、还不知道 runId」的窗口里。**这条不变量成立才允许用单槽**，
-     * 将来放开并发（S4-4）时这里要跟着改成按 correlationId 索引。
+     * 将来放开并发（S4-4）时这里要跟着改成按某个请求级 key 索引。
      * ══════════════════════════════════════════════════════════════════
      */
     this.pendingTask = task;
@@ -551,7 +589,7 @@ export class RunHost {
      * 取消之后仍然挂在那个 await 上 —— 界面显示已取消，进程里还在等人。
      *
      * 【定】**只对已存在的记录动手，不凭空创建**（评审 zcode「同根因」）。
-     * 这里原本调的是 `aborterFor()`，而它查不到就**建一个** `done:false` 的记录
+     * 这里原本调的是 `aborterFor()`，而它查不到就**建一个「在跑」的记录**
      * —— 于是对一个本进程从未跑过的历史 Run 点一次取消，它就在界面上变成
      * 「在跑」。实测复现过：`live: false → true`。
      * 这与决 6 反向违例：投影凭空断言了一个假事实。
@@ -597,7 +635,7 @@ export class RunHost {
   async close(timeoutMs = 5_000): Promise<void> {
     const pumps: Array<Promise<void>> = [];
     for (const [runId, r] of this.runs) {
-      if (r.done) continue;
+      if (!r.segmentActive) continue;
       this.cancel(runId, "服务关闭");
       if (r.pump) pumps.push(r.pump);
     }
@@ -626,13 +664,13 @@ export class RunHost {
    * 后面的读写落到另一个目录里。见 `WorkspaceHosts.switchTo`。
    */
   hasLiveRun(): boolean {
-    for (const r of this.runs.values()) if (!r.done) return true;
+    for (const r of this.runs.values()) if (r.segmentActive) return true;
     return false;
   }
 
   private isLive(runId: string): boolean {
     const r = this.runs.get(runId);
-    return !!r && !r.done;
+    return !!r && r.segmentActive;
   }
 
   /**
@@ -653,7 +691,7 @@ export class RunHost {
    * ══════════════════════════════════════════════════════════════════════
    */
   private claimForeground(runId: string): void {
-    const holder = this.foregroundHolder();
+    const holder = this.currentHolder();
     if (holder) {
       throw new Error(
         `已有一个 Run 在跑（${holder}）。§6.4：同时只允许一个前台 Run。\n` +
@@ -662,24 +700,19 @@ export class RunHost {
     }
     // 同步占位。resume 已知 runId 就用它；start 还不知道，先占一个哨兵，
     // 等第一个事件到达再换成真的 runId（见 drive()）。
-    this.currentRunId = runId;
+    this.foregroundHolder = runId;
   }
 
   /** 谁在占前台。没人占时返回 undefined。 */
-  private foregroundHolder(): string | undefined {
-    if (!this.currentRunId) return undefined;
-    if (this.currentRunId === STARTING) return STARTING;
-    return this.isLive(this.currentRunId) ? this.currentRunId : undefined;
+  private currentHolder(): string | undefined {
+    if (!this.foregroundHolder) return undefined;
+    if (this.foregroundHolder === STARTING) return STARTING;
+    return this.isLive(this.foregroundHolder) ? this.foregroundHolder : undefined;
   }
 
   /** 让出前台槽位。**只有占着的那个 Run 能让**，避免后来者把别人的位子放掉。 */
   private releaseForeground(runId: string): void {
-    if (this.currentRunId === runId || this.currentRunId === STARTING) this.currentRunId = "";
-  }
-
-  /** 查记录，**不创建**。创建只发生在 `beginSegment` 与 `onEvent`。 */
-  private recordOf(runId: string): LiveRun | undefined {
-    return this.runs.get(runId);
+    if (this.foregroundHolder === runId || this.foregroundHolder === STARTING) this.foregroundHolder = "";
   }
 
   private aborterFor(runId: string): AbortController {
@@ -689,13 +722,13 @@ export class RunHost {
       runId,
       aborter: new AbortController(),
       events: [],
-      // 【定】默认 `done: true`。
+      // 【定】默认 `false`（不在跑）。
       //
-      // 这个分支现在只服务两个查询型调用点（审批的 signalFor、事件入口），
-      // 它们拿到记录不等于「有循环在跑」。默认 false 的后果实测过：
+      // 这个分支只服务两个**查询型**调用点（审批的 signalFor、事件入口），
+      // 它们拿到记录不等于「有循环在跑」。默认 true 的后果实测过：
       // 对历史 Run 点一次取消 → 它在界面上变成「在跑」，且再也回不去。
       // 真正的「在跑」只由 `beginSegment()` 置位。
-      done: true,
+      segmentActive: false,
     };
     this.runs.set(runId, created);
     return created.aborter;
@@ -723,7 +756,7 @@ export class RunHost {
      * `resume()` 的三道闸门（端点不一致 §18.3、终态 Run、缺恢复决策）
      * **全部在第一个 yield 之前 throw**。原实现只给「首个事件之后」的后台
      * 循环配了 try/finally，于是异常从这里直接穿出去，而 `beginSegment()`
-     * 刚把记录置成 `done: false` —— 没有任何路径把它复位。三份评审各自
+     * 刚把记录置成 `segmentActive: true` —— 没有任何路径把它复位。三份评审各自
      * 独立报了这一条，我实测复现了它的完整后果：
      *
      *   · 对一个 COMPLETED 的 Run 点一次 resume（界面对所有非 live 的 Run
@@ -731,7 +764,7 @@ export class RunHost {
      *   · 若它恰好又是 `currentRunId`，**后续任何 start/resume 全部被
      *     单前台闸门拒掉，只能重启进程**；
      *   · 而那句错误提示还在建议「或在界面上取消它」—— 取消并不会复位
-     *     `done`，用户照着提示做仍然是死的。
+     *     这个标志位，用户照着提示做仍然是死的。
      *
      * 一个正常的误操作变成服务级不可用，这是本批最容易踩到的路径。
      * ══════════════════════════════════════════════════════════════════
@@ -742,7 +775,7 @@ export class RunHost {
     } catch (err) {
       const message = (err as Error).message;
       if (record) {
-        record.done = true;
+        record.segmentActive = false;
         // 错误原文喂给已有的 `serviceError` 字段 —— 界面下一次刷新就能看到，
         // 而不是只存在于那次 POST 的 500 响应里（决 6：如实转述，不翻译）。
         record.error = message;
@@ -752,16 +785,28 @@ export class RunHost {
     }
 
     if (first.done) {
-      // resume 一个已经没事可做的 Run 会走到这里（没有任何事件）。
+      /**
+       * resume 一个已经没事可做的 Run 会走到这里（没有任何事件）。
+       *
+       * 【定】这里**必须关段**。`beginSegment()` 刚把 `segmentActive` 置成
+       * true，而这条路径不经过 `pump` 的 finally —— 少了下面这一行，
+       * 一个「什么都没发生就返回」的 resume 会让记录**永远挂着「在跑」**，
+       * 界面上再也点不动它（与 codex 二次评审 P1-1 后半段指出的同一处；
+       * 旧极性下同样漏，是 pre-existing）。
+       */
       const rid = runId || "(未知)";
-      if (record) this.settleRecord(record, first.value);
+      if (record) {
+        this.settleRecord(record, first.value);
+        record.segmentActive = false;
+        this.finishSegment(record);
+      }
       this.releaseForeground(rid);
       return { runId: rid };
     }
     if (!runId) runId = String(first.value.runId);
     record = this.beginSegment(runId);
     // start 路径此前占的是哨兵，这里换成真的 runId。
-    this.currentRunId = runId;
+    this.foregroundHolder = runId;
     // 第一个事件已经经由 trace sink 进过缓冲了（compose 里注入的那个），
     // 这里不重复 push —— 重复会让 SSE 的 since 游标看见两条同号事件。
 
@@ -774,7 +819,7 @@ export class RunHost {
       } catch (err) {
         record!.error = (err as Error).message;
       } finally {
-        record!.done = true;
+        record!.segmentActive = false;
         // 【定】收尾时 abort 等待源：Run 结束了还挂着的等待没有人会去应答它，
         // 留着会让界面上出现一个永远点不掉的卡片。
         record!.aborter.abort();
@@ -800,7 +845,7 @@ export class RunHost {
    * 而一个盲着做出的决策不是决策。CLI 那边一直是打出来的（`main.ts` 收尾处）。
    */
   private settleRecord(record: LiveRun, result: DriveResult): void {
-    record.terminal = result.terminal.reason;
+    record.terminalReason = result.terminal.reason;
     if (result.outcome) record.outcome = result.outcome;
     const items = result.terminal.recoveryItems;
     if (items && items.length > 0) record.recoveryItems = [...items];
@@ -833,9 +878,9 @@ export class RunHost {
   private beginSegment(runId: string): LiveRun {
     const rec = this.ensureRecord(runId);
     if (rec.aborter.signal.aborted) rec.aborter = new AbortController();
-    rec.done = false;
+    rec.segmentActive = true;
     delete rec.error;
-    delete rec.terminal;
+    delete rec.terminalReason;
     return rec;
   }
 
@@ -913,7 +958,7 @@ export class RunHost {
     rec.sink = undefined;
     try {
       sink.finish({
-        terminal: rec.terminal ? { reason: rec.terminal } : null,
+        terminal: rec.terminalReason ? { reason: rec.terminalReason } : null,
         outcome: rec.outcome ?? null,
         ...(rec.error ? { serviceError: rec.error } : {}),
         ...(rec.recoveryItems ? { recoveryItems: rec.recoveryItems } : {}),
@@ -966,8 +1011,6 @@ function toUiArtifact(r: {
   path?: string;
   contentHash: string;
   sizeBytes: number;
-  derivedFrom: string[];
-  tombstonedAt?: number;
   verified?: boolean;
   verifyDetail?: string;
   createdAt: number;
@@ -981,8 +1024,6 @@ function toUiArtifact(r: {
     ...(r.path ? { path: r.path } : {}),
     contentHash: r.contentHash,
     sizeBytes: r.sizeBytes,
-    derivedFrom: r.derivedFrom,
-    ...(r.tombstonedAt !== undefined ? { tombstonedAt: r.tombstonedAt } : {}),
     // 【定】undefined 原样透传。「没验过」与「验过没通过」不是一回事，
     // `?? false` 会把前者变成后者。
     ...(r.verified !== undefined ? { verified: r.verified } : {}),
@@ -1039,13 +1080,5 @@ function readJsonl(path: string): unknown[] {
   return out;
 }
 
-/** 只取 host —— 与 CLI 打印时同一条纪律。 */
-function hostOf(baseUrl: string): string {
-  try {
-    return new URL(baseUrl).host;
-  } catch {
-    return baseUrl ? "（无法解析的 baseUrl）" : "（未配置）";
-  }
-}
 
 export { REPO_ROOT };

@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "WorkAgent —— 自建生产级 Agent Harness。阶段 1：Headless Walking Skeleton。",
+  "description": "Atlas / WorkAgent —— 自建 Agent Harness，个人使用的办公 Agent。CLI ＋ 白盒界面。",
   "workspaces": [
     "packages/*",
     "adapters/*",
@@ -15,7 +15,7 @@
     "node": ">=24"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "typecheck": "tsc --noEmit --noUnusedLocals --noUnusedParameters -p tsconfig.json",
     "dev": "tsx apps/cli/src/main.ts",
     "ui": "tsx apps/workagent-service/src/main.ts",
     "verify:endpoint-profile": "tsx apps/cli/src/verify/endpoint-profile.ts",

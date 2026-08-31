@@ -38,17 +38,6 @@ export interface ToolNameRouted {
   handles(toolName: string): boolean;
 }
 
-/**
- * 阶段 3 改过名的工具，**只用于错误信息**（方案 §2.5）。
- *
- * 【定】它不是别名表 —— 不做路由、不做回退执行。
- * 别名表是永久负担，而库里只有开发期 Run；这里要的只是让那条失败
- * 说得出「为什么」，而不是让老 Run 跑起来。
- */
-const MIGRATED_TOOL_NAMES: Record<string, string> = {
-  write_note: "write_file",
-};
-
 export class CompositeToolHandler implements ToolHandlerPort {
   constructor(private readonly members: Array<ToolHandlerPort & ToolNameRouted>) {}
 
@@ -62,17 +51,6 @@ export class CompositeToolHandler implements ToolHandlerPort {
        * 那会让「两个包都声明了同名工具」这种真正的装配错误静默地
        * 落到先注册的那个身上，而没有任何东西告诉你。
        */
-      /**
-       * 文案里带上迁移提示（方案 §2.5 要求的「一条明确的错误信息」）。
-       *
-       * 阶段 3 把 `write_note` 改名成 `write_file` 并搬进了 `tools/common`，
-       * 代价是**迁移前的 Run 不能 resume**（不做别名表，见 write-file.ts 文件头）。
-       * 崩在未配对调用上的那条路径有明确信息（facade 的 `UNKNOWN_TOOL` 分支
-       * 会说「工具已不在 AgentSpec 中」），但另一条没有：老 Run 正常 resume 之后
-       * 模型照着 transcript 再调一次旧名，收到的只是「没人认领」——
-       * 排查方向会指向装配，而真正的原因是这个 Run 比工具改名更早。
-       */
-      const migrated = MIGRATED_TOOL_NAMES[action.toolName];
       return {
         ok: false,
         output: "",
@@ -83,12 +61,7 @@ export class CompositeToolHandler implements ToolHandlerPort {
           category: "NOT_FOUND",
           retryability: "AFTER_MODEL_CORRECTION",
           sideEffectState: "NOT_STARTED",
-          safeMessage:
-            `没有任何已注册的工具包认领 "${action.toolName}"` +
-            (migrated
-              ? `。它在阶段 3 改名为 "${migrated}" —— 如果这是阶段 3 之前创建的 Run，` +
-                `本版本不支持 resume 它（工具名对不上冻结在 RunSpec 里的快照，且不做别名表）。`
-              : ""),
+          safeMessage: `没有任何已注册的工具包认领 "${action.toolName}"`,
         }),
       };
     }

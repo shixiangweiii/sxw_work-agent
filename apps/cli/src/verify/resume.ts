@@ -569,7 +569,6 @@ async function simulateHardCrash(decision: "CONTINUE" | "ABORT" = "CONTINUE"): P
     const injected = ["tc_crash_read", "tc_crash_edit_done", "tc_crash_edit", "tc_crash_append"];
     await composed.ports.transcript.append({
       runId: runId as RunId,
-      schemaVersion: 1,
       kind: "MESSAGE",
       message: {
         role: "assistant",

@@ -239,7 +239,15 @@ async function runTrial(
   let outcome = "?";
   let error: string | undefined;
   try {
-    const gen = composed.runtime.start(composed.makeRunSpec(ARCHIVE_TASK));
+    /**
+     * 【定】入口身份传 `EVAL`。
+     *
+     * `RunOrigin.EVAL` 早就在类型里、**零生产者** —— 这里此前走默认值，
+     * 于是 Eval 起的 Run 在 RunSpec 里自称 `CLI`。与阶段 4 修掉的
+     * 「Web 起的 Run 自称 CLI」是同一个 bug 的未修副本，而决 4 说
+     * 评测数据的入口归因读的正是这个字段。
+     */
+    const gen = composed.runtime.start(composed.makeRunSpec(ARCHIVE_TASK, "EVAL"));
     let r = await gen.next();
     while (!r.done) {
       if (!runId) runId = String(r.value.runId);

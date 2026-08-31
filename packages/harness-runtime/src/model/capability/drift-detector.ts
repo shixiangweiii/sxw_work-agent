@@ -11,6 +11,7 @@
  */
 
 import type { EndpointCapabilityProfile } from "../../types/endpoint.js";
+import type { RuntimeErrorRecord } from "../../types/error.js";
 
 export interface DriftObservation {
   field: string;
@@ -57,19 +58,32 @@ export class DriftDetector {
   }
 
   /**
-   * 规则 2：声明「不校验配对」却收到配对相关 400 → fail fast。
+   * 规则 2：声明「不校验配对」却收到配对相关的协议错误 → fail fast。
    *
    * 这条必须 fail fast：如果端点开始校验了，而 Runtime 仍按「反正不会报错」运行，
    * 后续每一次配对疏漏都会变成硬失败，且失败点离成因很远。
+   *
+   * ══════════════════════════════════════════════════════════════════════
+   * 【定】判别式用 **Runtime 自己的词汇**（source ＋ category），不收 HTTP status。
+   *
+   * 它此前的签名是 `(httpStatus, message)`，而主循环拿不到裸 status ——
+   * 它只有 `classifyError()` 归一化之后的 `RuntimeErrorRecord`，
+   * 去解 SDK 的错误形状是形状适配器的职责，不是循环的。
+   * 结果就是这条规则**生产路径零调用**，只有 `verify:drift` 调得到它：
+   * 三条漂移规则里唯一 FAIL_FAST 的那条，在真实运行中不可能触发。
+   *
+   * `source === "MODEL_PROVIDER" && category === "PROTOCOL"` 恰好就是
+   * 「端点说我们的请求结构不对」—— 形状适配器对 400（非上下文超长）的映射。
+   * ══════════════════════════════════════════════════════════════════════
    */
-  observePairingError(httpStatus: number, message: string): DriftObservation | null {
+  observePairingError(error: RuntimeErrorRecord): DriftObservation | null {
     if (this.profile.protocol.validatesToolResultPairing) return null;
-    if (httpStatus !== 400) return null;
-    if (!/tool_?result|tool_?use|tool_?call_?id|unpaired|pair/i.test(message)) return null;
+    if (error.source !== "MODEL_PROVIDER" || error.category !== "PROTOCOL") return null;
+    if (!/tool_?result|tool_?use|tool_?call_?id|unpaired|pair/i.test(error.safeMessage)) return null;
     return this.record({
       field: "protocol.validatesToolResultPairing",
       declared: "false",
-      observed: `HTTP 400：${message.slice(0, 160)}`,
+      observed: error.safeMessage.slice(0, 160),
       disposition: "FAIL_FAST",
       note: "端点开始校验配对了，声明已过期。继续运行会让后续配对疏漏变成难以定位的硬失败。",
     });

@@ -16,6 +16,91 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 当前状态
 
+### Current-only 清理（2026-08-31）：兼容层、死面与命名一次性拆干净
+
+依据 [current-only 清理实施方案 V20260831-01](sxw_aicoding/实施方案设计/current-only清理实施方案_V20260831.md)，
+来源是三份评审（codex / zcode / claude）交叉核验后的合并结论。
+**`typecheck` 现在含 `--noUnusedLocals --noUnusedParameters`**；`verify:all` **165 条判据**全绿。
+
+> ### 【定】二次评审抓到两条**这一批自己引入的回归**，都在判据照不到的地方
+>
+> | | 形态 |
+> |---|---|
+> | `Terminal.incompleteItems` 被填成 `[]` | `LoopTerminated` 同时装 `terminal` 与 `outcome`，于是同一行 JSONL 里两份「未完成项」**必然不同**。我为了消一次重复结算写的它，旁边的理由还写着「两份必然相同」。处置：**删掉这个字段**（零消费者），不是填回真值 |
+> | `segmentActive` 名字换了、极性没换 | 六处读写里**五处保持旧 `done` 极性**，只有 `aborterFor` 被我翻了 —— 字段自相矛盾。处置：统一为正向，并补一条**跑动中必须 `true`** 的配对判据 |
+>
+> **为什么 163 条全绿**：`terminal.incompleteItems` 零消费者 —— 任何判据都不会碰它，
+> 而正因为零消费者，它才能被填成 `[]` 而不响。跑了全套判据的那份评审没发现，
+> 只读代码的那份发现了。
+>
+> 这是决 6（没有消费者就删）的又一条论据：**留着一个没人读的字段，
+> 等于留着一块判据照不到的地方。**
+>
+> 同批还修了：`run-host` 的 `?? "CREATED"`（已删枚举值，落在 typecheck 盲区）·
+> transcript payload 解析失败静默吞成 `{}`（与删 `schemaVersion` 跳过同一形态，同文件另一处漏了）·
+> 注册表落盘派生路径让「唯一出处」有了第二个出处 ·
+> schema 断言先建表再检查（「声明强于实现」）· `--yes` 只删了一半。
+> 逐条见[存量清单 §0.17](sxw_aicoding/存量BUG/存量问题清单_V20260824.md)。
+
+> ### 【定】不再有 migration 机制。schema 变了就删库重建
+>
+> 那套 runner（`schema_migrations` 记账表 ＋ 版本号 ＋ 逐条事务 ＋ 回滚）
+> 三条 migration 的 DDL **全是 `CREATE TABLE IF NOT EXISTS`** —— 它从来没有
+> 真的迁移过任何东西，只是把「按顺序建表」包了三层。
+> 换成一份当前 Schema ＋ 一道**形状断言**：列集合不符就抛，并打印 `rm <path>`。
+> **空库才建；非空库在动任何 DDL 之前先完整验**（表集合 ＋ 列 ＋ 索引名，
+> 缺表/多表/多余的 `schema_migrations` 都报），失败关连接再抛。
+> 第一版是「无条件建表再断言」，那仍是隐式修补：缺表的旧库会被**先补上**再检查。
+> 判据在 `verify:persistence` D 段（原来那段测的是 transcript 逐行版本降级，
+> 一个**为不存在的数据**维护的证据），注入实测过：摘掉断言当场翻红。
+
+> ### 【定】存储位置只剩一条规则：`<workspace>/.workagent/`
+>
+> 此前有两套 —— CLI 固定用 `.workagent-state/runs.db`，界面新建的 workspace
+> 用 `<ws>/.workagent/`，而服务启动时还专门把注册表的默认值**覆盖回** CLI 那条，
+> 注释写着「换成新默认等于让已有的 Run 一夜之间从界面上消失」。
+> 那是为历史数据保留的第二套规则。现在 `workspaceStorage()` 是唯一出处，
+> 两个入口共用；`.workagent-state/` 只剩跨 workspace 的注册表。
+
+> ### 【定】被删掉的不是「没用的字段」，是**会误导的承诺**
+>
+> | 删的 | 它承诺了什么，而实际没有 |
+> |---|---|
+> | `hasUntrustedContext` | 三跳传到 `evaluatePolicy` 并落地，而函数体**从未解构过它** —— 读代码的人会以为 trust 参与了 Allow/Deny |
+> | `ToolSnapshot.contentHash` / `AgentSpecSnapshot.contentHash` | 名字是 hash，值是 `name@version` 与人工常量 `"micro@0.1.0"`，零读取点；真 hash 由 `run-repository` 现算 |
+> | `retryPolicy` / `cancellation` / `requiredCapabilities` / `observationCost` / `intervalMs` | 14 个工具逐个认真填，Runtime 零消费 —— 工具作者会以为 Harness 提供了重试、能力校验、协作式取消 |
+> | `LoopPolicySnapshot.maxTurns` / `maxConsecutiveFailures` | 与 `RunBudgets` 同名字段重复、零读取点 → 「改哪个才生效」有两个答案 |
+> | `irreducibleExceedsHardLimit` | 带一整段「两种处置在 D-05 里是分开的」，而主循环只读 `status`，第二种处置不存在 |
+> | `ContextItem.redactionApplied` | 恒 `true`，而它是不变量 13 的名义载体 |
+> | `--yes` | 文档里承诺、`parseArgs` **从来没解析过** —— 能用只因为默认档位本来就是它 |
+>
+> 连带删掉的还有：`CapabilityLeasePort` / `SecretResolverPort` 两个空壳 Port
+> （注释自己写着「明确不做」）、`InMemoryTranscriptStore`（自述「历史证物」）、
+> `MIGRATED_TOOL_NAMES`（服务对象是**空集** —— 那些 Run 本来就不能 resume）、
+> `STAGE1_ACTIVE_*` 别名、`RegistryFile.version` 半套 schema 门、
+> 以及一批零生产者的枚举值（`WAITING_FOR_USER`、`CREATED`、4 个 `Continue` reason、
+> 8 个 `ContextItemKind`、`BLOB_REF`、`CACHE_BREAKPOINT` …）。
+
+> ### 【定】接线的两条比删掉的三十条重要
+>
+> **`observePairingError` 接上了生产路径。** 三条漂移规则里唯一 FAIL_FAST 的那条，
+> 此前**只有 `verify:drift` 调得到** —— 因为它的签名是 `(httpStatus, message)`
+> 而主循环只有归一化后的 `RuntimeErrorRecord`。判别式换成 Runtime 自己的词汇
+> （`source === "MODEL_PROVIDER" && category === "PROTOCOL"`）之后，
+> 循环纪律第 5 条仍然成立，而规则第一次真的能在运行中触发。
+>
+> **`riskFacts` / `dataMovement` 上了 `ActionProposed` 事件，并接到投影与界面。**
+> `policy.ts` 把「让外发在 **Trace 上**可审计」列为「越界读放行」的三条护栏之一，
+> 而此前它们**从未离开过 Resolver 的返回值**；`verify:artifact` D 段更是直接
+> 调 Resolver 取值——**判据绕过了它声称在测的那条链路**。一条撑着已生效决定的依据，
+> 在盘上和界面上都查不到。判据已改为读事件，注入实测过。
+
+> ⚠️ **本批修掉一个还没引爆的雷**：`ACTIVE_ERROR_CATEGORIES` 写着
+> 「QUOTA / RATE_LIMIT **刻意不登记**：当前没有任何代码路径产生它们」，
+> 而形状适配器的 429 分支两个都产生、`run-loop` 还专门读 `category === "QUOTA"`。
+> 也就是说一次真实限流会在开发期被 `assertActiveErrorDomain()` 抛成
+> 「错误值域越界」。**又一处写在权威位置、与它声称描述的代码不符的话。**
+
 **阶段 4 产品化半边完成（2026-08-30）：Atlas 有白盒界面了。**
 依据 [阶段 4 实施方案 V20260830-01](sxw_aicoding/实施方案设计/阶段4实施方案_V20260830.md)。
 
@@ -142,9 +227,9 @@ npm run ui        # → http://127.0.0.1:<随机端口>/?t=<会话 Token>
 > 只做闸门也不够 —— 那样每次切目录都靠一条报错教育用户，而正确的默认
 > 应该是**根本不会撞上**。
 >
-> 【定】**启动时用 CLI 参数登记的那个 workspace 保留旧路径**
-> （`.workagent-state/runs.db`）。换成新默认等于让已有的 Run 一夜之间从界面消失 ——
-> **迁移的代价不该由已经存在的数据来付。**
+> ~~【定】启动时用 CLI 参数登记的那个 workspace 保留旧路径~~
+> **这一条已于 2026-08-31 作废**：它是为历史数据保留的第二套存储规则，
+> 而本仓不再兼容旧数据。现在只有 `workspaceStorage()` 一条规则。
 
 有 Run 在跑时切换返回 **409**（不排队也不强杀：强杀会把正在写文件的 Run 停在半路 →
 §18.2 第三条分支 → 要人来销账）。移除 workspace **只摘登记、不删文件**（§22.5）。
@@ -541,7 +626,7 @@ GUI 在阶段 4（已交付，见本文件开头），阶段 1–3 全部 headle
 
 ```bash
 npm install                        # Node 24＋（.nvmrc / engines 都写了）
-npm run typecheck                  # tsc --noEmit，必须干净（每完成一步就跑一次）
+npm run typecheck                  # tsc --noEmit ＋ noUnusedLocals/Parameters，必须干净
 npm run ui                         # ★阶段 4：白盒界面。打印一个带会话 Token 的 loopback URL
 npm run ui -- --port 7788 --endpoint deepseek      # 端口/端点与 CLI 同一套参数
 npm run dev -- --task "看看根目录里有什么，然后写一份 summary.txt"
@@ -551,18 +636,24 @@ npm run dev -- --resume <runId> --recovery-decision CONTINUE --recovery-note "�
 npm run dev -- --endpoint deepseek --task "..."   # 换对照端点（受枚举约束，拼错立刻失败）
 ```
 
-**审批档位（阶段 3 决 3 改过默认值）**：默认**自动放行 workspace 内、非 IRREVERSIBLE 的写**；
+**审批档位（决 3）**：默认**自动放行 workspace 内、非 IRREVERSIBLE 的写**；
 `append_log` 这类不可逆操作与 EXECUTE 仍逐次问；**越界写由 Policy 直接拒绝，不给审批机会**。
 `--confirm` 恢复「每一步都问」；`--yes-all` 是显式的「批准一切」。
-> `--yes` 保留为默认档位的显式写法（不破坏既有命令行）。
+> **没有 `--yes`**，而且**未知参数一律报错**：一个被静默吞掉的参数与一个生效的参数，
+> 在用户那里完全不可区分（M-5 那条教训的形态）。
 > 【定】改这段前先读 `main.ts` 里 `autoGrant` 的注释 —— 那条规则曾经因为
 > `REVERSIBLE` vs `PARTIALLY_REVERSIBLE` 的一字之差，从来没覆盖过 `write_file`。
 
 **运行期交互**：TTY 下 stdin 是**单一通道**，按「谁在等」分派三种语义 ——
 RUNNING 敲一句话回车 = 插话；等审批时回车 = 应答；等接管时回车 = 完成信号。
 非 TTY 优雅降级（审批按**拒绝**处置，接管按「没有人」处置，都不挂起）。
-`--workspace <path>` 指定工作目录（默认 `.workagent-workspace`）；`--db <path>` 指定 SQLite 库（默认 `.workagent-state/runs.db`）；
-`--trace <file>` 指定事件流落盘位置（默认按 runId 定名 `.workagent-runs/<runId>.jsonl`，**resume 续写同一文件**），`--no-trace` 关闭。
+`--workspace <path>` 指定工作目录（默认 `.workagent-workspace`）。
+**【定】存储位置由 workspace 唯一推出**：库 `<ws>/.workagent/runs.db`、trace `<ws>/.workagent/runs/`，
+CLI 与界面同一条规则（`workspaceStorage()`）。`--db` / `--trace` 仍可显式覆盖，`--no-trace` 关闭。
+`.workagent-state/` 只剩跨 workspace 的注册表。
+
+> ⚠️ **没有 migration**：库的表结构与当前 Schema 不符时 `openDb()` 直接抛，
+> 并打印 `rm <path>`。删库重建，trace 的 JSONL 是独立轨道不受影响。
 
 ```bash
 npm run verify:endpoint-profile    # 端点差异能否被挡在主循环之外
@@ -821,19 +912,20 @@ packages/harness-runtime/    Layer 3 全部
   src/action/                Effect 解析、Policy、批结算
   src/verification/          Verifier 与 outcome 结算
   src/model/capability/      端点能力声明的加载、冻结与漂移检测
-  src/ports/                 15 个 Port ＋ 阶段 3 新增的 ArtifactCheckerPort
-                             （阶段 3 后只剩 CapabilityLease / SecretResolver 未实现，各有理由）
+  src/ports/                 14 个 Port，**全部有实现**（不留空壳接口）
   src/loop/progress-guard.ts ★阶段 3。只回答「在原地打转吗」；「还活着吗」那半边
                              收口批删了（进展是批结算时才排空的，时间戳判不了存活）
   src/facade/                HarnessRuntime：start / resume / cancel / interject / inspect
   src/workspace/             ★workspace 身份冻结 ＋ resume 一致性闸门（§18.3 第二维，S4-5）
 packages/store-sqlite/       ★阶段 2。唯一允许 import node:sqlite 的地方
-  src/migrations/            单一 runner，固定顺序（§26.3【定】）
+  src/db.ts                  **一份当前 Schema ＋ 形状断言**，没有 migration
   src/transcript-store.ts    TranscriptStorePort 的 SQLite 实现（接口一字未改）
   src/run-repository.ts      RunStorePort：RunSpec / AgentSpecSnapshot / status
   src/blob-store.ts          ★阶段 3。内容寻址；get 按行**且按字符**分页（见下）
   src/artifact-store.ts      ★阶段 3。版本链 / Tombstone / lineage / role
-packages/testkit/            fake-endpoint-profile、fake-clock、crash-harness（真 kill -9）等
+packages/testkit/            fake-endpoint-profile、clock、id-generator、crash-harness（真 kill -9）
+                             【定】只留有使用者的夹具 —— FakeClock / DeterministicIdGenerator /
+                             alwaysApprove 全仓零调用，2026-08-31 删
 eval/                        ★阶段 2。graders / suite / fixtures
                              【定】只经 Facade，不依赖 Runtime 私有类，不读 RunOutcome 判成败
 adapters/shape-anthropic-messages/   唯一允许 import Provider SDK 的地方
@@ -935,4 +1027,7 @@ V04 及更早的架构设计、`V03_Spike0回填清单.md` **不再作为实现�
 - **规格纪律**：任何 Contract 冻结前必须能指出证据来源；拿不出证据就标【验】或【议】。反向同样成立——「必须存在某个机制」也需要证据，V03 的 15 个决策点里有 3 个被证明**问题本身不该问**。
 - **未接线比不写更糟**：类型、事件、类都在但运行时从不执行，会让人以为问题已经解决了（存量清单 §2 列了 8 项这种）。要么接线，要么删掉。
 - 阶段 1 只实现能被当阶段 Micro Case 覆盖的最小面。新增 Port 时必须同时指出强制它存在的不变量。
-- 提交前跑 `npm run typecheck` ＋ 相关的 `verify:*`，并复核上面四条边界 grep。
+- 提交前跑 `npm run typecheck` ＋ 相关的 `verify:*`，并复核边界 grep（12 条，`verify:tools` A 段机械跑）。
+- **不留「声明了但没人读」的字段、枚举值、Port 或参数。** 要么接线，要么删 ——
+  一个没有消费者的声明会让下一个人以为那件事已经有人管了。2026-08-31 那一批
+  拆掉的三十多项，每一项当初都是「先声明着，将来会用」。

@@ -5,7 +5,6 @@
  * 调用方 for await 消费，UI 投影与 Trace 落盘都在这一条流上。
  */
 
-import { createHash } from "node:crypto";
 import type { RunEvent } from "../types/event.js";
 import type { Terminal } from "../types/loop.js";
 import type {
@@ -18,7 +17,7 @@ import type {
   RunStatus,
 } from "../types/run.js";
 import type { ActionBatchId, ActionId, ModelInvocationId, RunId } from "../types/ids.js";
-import { asId } from "../types/ids.js";
+import { asId, digest } from "../types/ids.js";
 import type { RunListItem, RuntimePorts, ToolExecutionContext } from "../ports/index.js";
 import { assertResumeEndpointMatches, freezeRunSpec } from "../model/capability/profile-loader.js";
 import { assertResumeWorkspaceMatches } from "../workspace/index.js";
@@ -44,7 +43,6 @@ import {
 } from "../transcript/index.js";
 import { executeBatch } from "../action/settle-batch.js";
 import { ToolRegistry, validateAndNormalize } from "../tool-runtime/index.js";
-import { makeError } from "../types/error.js";
 
 export interface HarnessRuntimeDeps {
   ports: RuntimePorts;
@@ -233,14 +231,9 @@ export class HarnessRuntime {
      * §18.3 的第二维：**workspace 身份**（S4-5）。
      *
      * 与端点闸门并排、同样排在生命周期闸门之前 —— 换了执行条件之后，
-     * 连「这个 Run 现在是什么状态」都该被怀疑。
-     *
-     * 【定】它对**缺失**那一档返回 `UNKNOWN_LEGACY` 而不是抛：这道闸门上线前
-     * 创建的 Run 没有冻结 workspace，硬拒会把库里所有存量 Run 一次性变成
-     * 不可恢复，而它们当初没做错什么。但也不能静默放行 —— 那正是这个洞
-     * 原来的样子。所以下面**发一条事件**把「不知道」说出来。
+     * 连「这个 Run 现在是什么状态」都该被怀疑。不一致就抛，没有第三档。
      */
-    const workspaceMatch = assertResumeWorkspaceMatches(spec.workspace, this.deps.workspaceRoot);
+    assertResumeWorkspaceMatches(spec.workspace, this.deps.workspaceRoot);
 
     /**
      * 【定】生命周期闸门。
@@ -249,7 +242,18 @@ export class HarnessRuntime {
      * 带真实写操作时就是重复副作用。CANCELLED 与 RECOVERY_REQUIRED 不在此列：
      * V05 §10 明确「没有 PAUSED，cancel() 后稍后 resume()」就是支持的路径。
      */
-    const current = (await this.deps.ports.runs.getStatus(runId)) ?? "CREATED";
+    /**
+     * 【定】`getRunSpec` 已经返回了，状态行就必须在 —— 两者在
+     * `createRun()` 里是**同一个事务**写下的。读不到说明库被外部改坏了，
+     * 那是一个要立刻说出来的事实，不是一个可以用默认值糊过去的缺省。
+     */
+    const current = await this.deps.ports.runs.getStatus(runId);
+    if (!current) {
+      throw new Error(
+        `Run ${runId} 有 RunSpec 却读不到状态行 —— 库不一致（两者本应在同一个事务里写下）。` +
+          `这个 Run 无法安全恢复。`,
+      );
+    }
     if (current === "COMPLETED" || current === "FAILED") {
       throw new Error(
         `Run ${runId} 已处于终态 ${current}，拒绝 resume。` +
@@ -322,7 +326,6 @@ export class HarnessRuntime {
         const message: ContextMessage = { role: "user", turn, content };
         await ports.transcript.append({
           runId,
-          schemaVersion: 1,
           kind: "MESSAGE",
           message,
           createdAt: ports.clock.now(),
@@ -334,31 +337,6 @@ export class HarnessRuntime {
         fromSequence: lastSeq,
         rebuiltMessages: messages.length,
       });
-
-      /**
-       * 【定】「这条 Run 没冻结 workspace，我无法核对」必须留在 Trace 上。
-       *
-       * 一条**放行了但没验过**的闸门，如果不说话，与「验过并通过」在事后
-       * 完全不可区分 —— 而这两者对复盘的意义相反。用既有的
-       * `RuntimeErrorOccurred` 承载（category INTERNAL、retryability NEVER、
-       * 副作用 NO_EFFECT）：它不是错误，但它是**必须被看见的降级**。
-       */
-      if (workspaceMatch === "UNKNOWN_LEGACY") {
-        yield await emit("RuntimeErrorOccurred", {
-          error: makeError({
-            code: "RESUME_WORKSPACE_UNVERIFIED",
-            source: "RUNTIME",
-            category: "INTERNAL",
-            retryability: "NEVER",
-            sideEffectState: "NO_EFFECT",
-            safeMessage:
-              `这个 Run 的 RunSpec 里没有冻结 workspace（它创建于 S4-5 闸门上线之前），` +
-              `因此**无法核对**恢复时的目录是否与当初一致。本次以当前服务指向的 ` +
-              `${this.deps.workspaceRoot} 继续。若它与当初不是同一个目录，` +
-              `后续所有相对路径的读写都会落错地方。`,
-          }),
-        });
-      }
 
       /**
        * ── S10 ③：上次崩在「等人」那一刻 ──────────────────────────────────
@@ -448,7 +426,6 @@ export class HarnessRuntime {
         spec.agentSpec.toolSnapshots.map((t) => [t.definition.name, t]),
       );
       const turn = messages[messages.length - 1]?.turn ?? 0;
-      const hasUntrusted = messages.some((m) => m.content.some((c) => c.type === "tool_result"));
 
       let blocked = false;
       /** 阶段 2 的测量装置：本次 resume 各分支命中次数，累加到历史值上。 */
@@ -523,7 +500,6 @@ export class HarnessRuntime {
             now: () => ports.clock.now(),
             signal: interrupts.signal,
             workspaceRoot: this.deps.workspaceRoot,
-            hasUntrustedContext: hasUntrusted,
             // 【定】恢复路径也要外置。少了这两行，分支一重跑一个
             // `read_file` 会把几百 KB 原样灌进恢复后的第一帧 ——
             // 而恢复恰恰是上下文最紧张的时候（历史全都还在）。
@@ -717,7 +693,6 @@ export class HarnessRuntime {
         normalizedInput: validation.normalized,
         inputDigest: digest(JSON.stringify(validation.normalized)),
         resolvedEffect,
-        actionDigest: digest([def.name, def.version, resolvedEffect.digest].join("|")),
         createdAt: now,
         preparedAt: now,
       };
@@ -729,9 +704,13 @@ export class HarnessRuntime {
       };
       /**
        * 决 6：优先走 `observePost` —— 它和执行前那次 `observePre` 是**同一个
-       * 实现**，比的是同一个量。回退到 `verify()` 只是为了兼容没有实现
-       * observePost 的 Verifier，那条路径下比的是「内容 == 计划内容」，
-       * 对 append 这类相对操作给不出结论。
+       * 实现**，比的是同一个量。
+       *
+       * 【定】下面那条 `verify()` 不是「兼容旧 Verifier」，是**观察给不出结论时
+       * 的如实降级**：`observePost` 返回 undefined 就意味着这次比不出来
+       * （见 CommonVerifier 里 `edit_file` 缺前置指纹那一支）。
+       * 它比的是「内容 == 计划内容」，对 append 这类相对操作本来就给不出结论，
+       * 那时结果会是 SKIPPED，调用方据此落进第三条分支。
        */
       const post = this.deps.ports.verification.observePost;
       if (post && def.recoveryObservation) {
@@ -785,12 +764,7 @@ export class HarnessRuntime {
   }
 
   interject(runId: RunId, content: string): void {
-    this.interruptsByRun
-      .get(String(runId))
-      ?.interjections.push(
-        { content, intent: "ADD_CONTEXT", urgency: "NEXT_SAFE_POINT" },
-        this.deps.ports.clock.now(),
-      );
+    this.interruptsByRun.get(String(runId))?.interjections.push(content);
   }
 
   cancel(runId: RunId, reason?: string): void {
@@ -819,14 +793,15 @@ export class HarnessRuntime {
     return {
       runId,
       runSpecId: spec.id,
-      status: (await ports.runs.getStatus(runId)) ?? "CREATED",
+      // 同 resume()：spec 在就意味着状态行在（同一个事务写下的）。
+      status: (await ports.runs.getStatus(runId))!,
       turnCount: facts?.turnCount ?? 0,
       consecutiveFailures: facts?.consecutiveFailures ?? 0,
       // 没有 RUN_META（Run 刚建、一轮都没跑完）时如实回落到空预算，
       // 但 startedAt 用 spec 的创建时刻 —— 那个是真的。
       budgetUsage: facts?.budgetUsage ?? emptyBudget(spec.createdAt),
       messageCount: messages.length,
-      updatedAt: ports.clock.now(),
+      inspectedAt: ports.clock.now(),
       // 阶段 2 测量装置的对外出口（P1-2）。见 RunSnapshot 上的注释。
       resumeBranchCounts: { ...(facts?.resumeBranchCounts ?? {}) },
       unmetCauseCounts: tallyUnmetCauses(facts?.verifications ?? []),
@@ -888,9 +863,6 @@ function tallyUnmetCauses(verifications: VerificationResult[]): Record<string, n
   return out;
 }
 
-function digest(s: string): string {
-  return createHash("sha256").update(s).digest("hex").slice(0, 32);
-}
 
 function terminalToStatus(t: Terminal): RunStatus {
   switch (t.reason) {

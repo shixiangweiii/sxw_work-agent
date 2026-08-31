@@ -24,7 +24,7 @@
  * ══════════════════════════════════════════════════════════════════════
  */
 
-import type { CompactionRecord, ContextItem, ModelContent } from "../types/context.js";
+import type { CompactionRecord, ModelContent } from "../types/context.js";
 import type { ContextMessage } from "../types/transcript.js";
 import type { ModelProtocolPort } from "../ports/index.js";
 
@@ -170,7 +170,6 @@ export function compactMessages(
       freedTokens: 0,
       record: {
         reason: "无可压缩项：全部消息受协议、目标或近轮保护，且无可剥离的推理块",
-        removedItemIds: [],
         freedTokens: 0,
         at: deps.now,
       },
@@ -186,7 +185,6 @@ export function compactMessages(
       freedTokens,
       record: {
         reason: `剥离 ${countReasoning(messages)} 个推理块（端点声明 DROPPABLE），未丢弃任何消息`,
-        removedItemIds: [],
         freedTokens,
         at: deps.now,
       },
@@ -217,7 +215,6 @@ export function compactMessages(
         `尾部压缩：丢弃 ${droppedCount} 条非协议约束的助手消息` +
         (reasoningFreed > 0 ? `，并剥离推理块（约 ${reasoningFreed} tokens）` : "") +
         `；收敛目标 ${deps.targetTokens} tokens`,
-      removedItemIds: [] as ContextItem["id"][],
       freedTokens,
       at: deps.now,
     },

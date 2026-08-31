@@ -22,7 +22,8 @@
  * ══════════════════════════════════════════════════════════════════════
  *
  * 【定】不做登录态、不做 Cookie、不做浏览器 —— 那些需要凭证，
- * 而 SecretResolverPort 本阶段不做（决 2 判定 ⏸）。
+ * 而**全仓没有任何凭证解析机制**（原本挂着一个 `SecretResolverPort` 空壳，
+ * 注释写着「不做」，2026-08-31 连壳一起删了）。要做的那天先写实现。
  *
  * 【定】**不得内置任何「正文提取」逻辑。**
  * 从 HTML 里挑正文是**网页归档这个 Case 的业务语义**。一旦写进通用工具，
@@ -127,30 +128,23 @@ export const fetchUrlDefinition: ToolDefinition = {
     },
     required: ["url"],
   },
-  // 【定】本字段当前零消费，授权层推到 bugfix 阶段（阶段 3 方案 S12）。
-  requiredCapabilities: ["net.fetch"],
   effectResolution: {
     kind: "DECLARATIVE",
-    version: "1.0.0",
-    rules: [
-      {
-        pointer: "/url",
-        // 【定】NETWORK 而不是 READ。它不只是「读」——
-        // 一个 GET 的 query 参数就是一条外发通道（决 3 修订 2 的那条链路）。
-        // effectType 是 Policy 与 Trace 看得见的东西，必须说实话。
-        effectType: "NETWORK",
-        scopeKind: "URL",
-        reversibility: "REVERSIBLE",
-        operation: "fetch",
-      },
-    ],
+    rule: {
+      pointer: "/url",
+      // 【定】NETWORK 而不是 READ。它不只是「读」——
+      // 一个 GET 的 query 参数就是一条外发通道（决 3 修订 2 的那条链路）。
+      // effectType 是 Policy 与 Trace 看得见的东西，必须说实话。
+      effectType: "NETWORK",
+      scopeKind: "URL",
+      reversibility: "REVERSIBLE",
+      operation: "fetch",
+    },
   },
   redaction: { profile: "STANDARD" },
-  retryPolicy: { maxAttempts: 2, backoffMs: 500 },
   // 只读且幂等 —— GET 不改变外部状态。§18.2 分支一。
   idempotency: { isIdempotent: true, isReadOnly: true },
   timeoutPolicy: { timeoutMs: 30_000 },
-  cancellation: { cooperative: true },
   /**
    * 【定】NONE，不是 HEARTBEAT。
    *
@@ -160,8 +154,8 @@ export const fetchUrlDefinition: ToolDefinition = {
    * 一个不存在的节奏（阶段 3 收口批改）。
    */
   progressReporting: { mode: "NONE" },
-  verification: { mode: "NONE", requiredForSuccess: false, observationCost: "LOW" },
-  recoveryObservation: { kind: "TARGET_EXISTS", requiresPreFingerprint: false },
+  verification: { mode: "NONE", requiredForSuccess: false },
+  recoveryObservation: { requiresPreFingerprint: false },
 };
 
 export async function executeFetchUrl(
@@ -437,6 +431,5 @@ function classifyFetchError(err: unknown, url: string): ReturnType<typeof makeEr
 export const fetchUrlSnapshot: ToolSnapshot = {
   toolId: fetchUrlDefinition.id,
   version: fetchUrlDefinition.version,
-  contentHash: `${fetchUrlDefinition.name}@${fetchUrlDefinition.version}`,
   definition: fetchUrlDefinition,
 };

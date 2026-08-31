@@ -23,6 +23,7 @@
  * ══════════════════════════════════════════════════════════════════════
  */
 
+import { workspaceStorage } from "../../cli/src/compose.js";
 import { RunHost, type RunHostOptions } from "./run-host.js";
 import { WorkspaceRegistry, type CreateResult, type WorkspaceEntry } from "./workspace-registry.js";
 
@@ -32,22 +33,26 @@ export interface WorkspaceHostsOptions {
   endpoint: RunHostOptions["endpoint"];
   composeOverrides?: RunHostOptions["composeOverrides"];
   /**
-   * 首次启动时用命令行参数登记的那一个。
+   * 首次启动时用命令行参数登记的那一个 workspace。
    *
-   * 【定】它**保留 CLI 传进来的 dbPath / traceDir**，而不是套用
-   * 「一个 workspace 一套存储」的新默认。理由：库里已经躺着用旧默认
-   * （`.workagent-state/runs.db`）跑出来的 Run —— 换成新默认等于让它们
-   * 一夜之间从界面上消失。新建的 workspace 才走新默认。
-   *
-   * 这是「新约定只对新东西生效」的一次具体应用：**迁移的代价不该由
-   * 已经存在的数据来付**。
+   * 【定】只给路径，**存储位置一律由注册表按同一套规则推**
+   * （`<workspace>/.workagent/`）。此前它还带着 CLI 传进来的
+   * `dbPath` / `traceDir` 并覆盖注册表的默认值，理由是「库里躺着用旧默认
+   * 跑出来的 Run，换成新默认等于让它们从界面上消失」—— 一个为历史数据
+   * 保留的第二套存储规则。旧数据不再兼容，规则因此只剩一套。
    */
-  bootstrap: { path: string; dbPath: string; traceDir: string };
+  bootstrap: {
+    path: string;
+    /** 【定】只给验收脚本。见 `ServiceOptions.storageOverride`。 */
+    storage?: { dbPath: string; traceDir: string };
+  };
 }
 
 export class WorkspaceHosts {
   private readonly registry: WorkspaceRegistry;
   private current: { id: string; host: RunHost } | undefined;
+  /** bootstrap 那个 workspace 的真实路径，`storageOverride` 只认它。 */
+  private bootstrapRealPath = "";
 
   constructor(private readonly opts: WorkspaceHostsOptions) {
     this.registry = new WorkspaceRegistry(opts.registryFile);
@@ -61,11 +66,8 @@ export class WorkspaceHosts {
      */
     const created = this.registry.create(opts.bootstrap.path);
     if (created.ok && created.entry) {
-      const e = created.entry;
-      // 保留 CLI 给的存储位置（见 bootstrap 的说明）。
-      e.dbPath = opts.bootstrap.dbPath;
-      e.traceDir = opts.bootstrap.traceDir;
-      this.registry.activate(e.id);
+      this.bootstrapRealPath = created.entry.realPath;
+      this.registry.activate(created.entry.id);
     }
   }
 
@@ -136,11 +138,19 @@ export class WorkspaceHosts {
     this.current = undefined;
   }
 
+  /**
+   * 【定】存储位置在这里**现算**，不从注册表读 —— 见 `WorkspaceEntry.realPath`。
+   * `storageOverride` 只服务验收脚本，且只对 bootstrap 那一个 workspace 生效。
+   */
   private spawn(entry: WorkspaceEntry): RunHost {
+    const storage =
+      this.opts.bootstrap.storage && entry.realPath === this.bootstrapRealPath
+        ? this.opts.bootstrap.storage
+        : workspaceStorage(entry.realPath);
     return new RunHost({
       workspaceRoot: entry.realPath,
-      dbPath: entry.dbPath,
-      traceDir: entry.traceDir,
+      dbPath: storage.dbPath,
+      traceDir: storage.traceDir,
       endpoint: this.opts.endpoint,
       ...(this.opts.composeOverrides ? { composeOverrides: this.opts.composeOverrides } : {}),
     });

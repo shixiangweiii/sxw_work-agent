@@ -488,16 +488,13 @@ async function main(): Promise<void> {
   const eff = new DeclarativeEffectResolver().resolve(
     {
       kind: "DECLARATIVE",
-      version: "1.0.0",
-      rules: [
-        {
-          pointer: "/url",
-          effectType: "NETWORK",
-          scopeKind: "URL",
-          reversibility: "REVERSIBLE",
-          operation: "fetch",
-        },
-      ],
+      rule: {
+        pointer: "/url",
+        effectType: "NETWORK",
+        scopeKind: "URL",
+        reversibility: "REVERSIBLE",
+        operation: "fetch",
+      },
     },
     { url: "https://example.com/x?a=1" },
     "/tmp",

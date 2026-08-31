@@ -82,26 +82,19 @@ export const readFileDefinition: ToolDefinition = {
     },
     required: ["path"],
   },
-  // 【定】本字段当前零消费，授权层推到 bugfix 阶段（阶段 3 方案 S12）。
-  requiredCapabilities: ["fs.read"],
   effectResolution: {
     kind: "DECLARATIVE",
-    version: "1.0.0",
-    rules: [
-      {
-        pointer: "/path",
-        effectType: "READ",
-        scopeKind: "FILE",
-        reversibility: "REVERSIBLE",
-        operation: "read",
-      },
-    ],
+    rule: {
+      pointer: "/path",
+      effectType: "READ",
+      scopeKind: "FILE",
+      reversibility: "REVERSIBLE",
+      operation: "read",
+    },
   },
   redaction: { profile: "STANDARD" },
-  retryPolicy: { maxAttempts: 2, backoffMs: 200 },
   idempotency: { isIdempotent: true, isReadOnly: true },
   timeoutPolicy: { timeoutMs: 30_000 },
-  cancellation: { cooperative: true },
   /**
    * 【定】NONE，不是 HEARTBEAT。
    *
@@ -113,8 +106,8 @@ export const readFileDefinition: ToolDefinition = {
    * 要真做，得先把读改成流式分块。那时再改这个字段，**连同实现一起**。
    */
   progressReporting: { mode: "NONE" },
-  verification: { mode: "NONE", requiredForSuccess: false, observationCost: "LOW" },
-  recoveryObservation: { kind: "TARGET_EXISTS", requiresPreFingerprint: false },
+  verification: { mode: "NONE", requiredForSuccess: false },
+  recoveryObservation: { requiresPreFingerprint: false },
 };
 
 export async function executeReadFile(
@@ -248,6 +241,5 @@ export async function executeReadFile(
 export const readFileSnapshot: ToolSnapshot = {
   toolId: readFileDefinition.id,
   version: readFileDefinition.version,
-  contentHash: `${readFileDefinition.name}@${readFileDefinition.version}`,
   definition: readFileDefinition,
 };

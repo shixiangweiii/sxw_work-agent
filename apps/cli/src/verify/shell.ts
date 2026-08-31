@@ -90,7 +90,6 @@ function policyFor(command: string, allowNetwork = false) {
     verdict: evaluatePolicy({
       action,
       approvalPolicy: TRUSTED_PERSONAL,
-      hasUntrustedContext: false,
     }).decision,
   };
 }
@@ -720,7 +719,6 @@ async function main(): Promise<void> {
     // 注入一个未配对的 run_shell tool_use —— 硬崩在 transcript 上留下的形态。
     await composed.ports.transcript.append({
       runId: runId as RunId,
-      schemaVersion: 1,
       kind: "MESSAGE",
       message: {
         role: "assistant",

@@ -43,7 +43,6 @@ import {
   ToolRegistry,
   type ContextMessage,
   type RunId,
-  type ToolSnapshot,
 } from "@workagent/harness-runtime";
 import { commonMechanismTools, commonSceneTools, commonTools, renderText } from "@workagent/tools-common";
 import { runSegment } from "@workagent/testkit";

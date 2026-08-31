@@ -63,24 +63,18 @@ export const writeFileDefinition: ToolDefinition = {
     },
     required: ["path", "content"],
   },
-  // 【定】本字段当前零消费，授权层推到 bugfix 阶段（阶段 3 方案 S12）。
-  requiredCapabilities: ["fs.write"],
   effectResolution: {
     kind: "DECLARATIVE",
-    version: "1.0.0",
-    rules: [
-      {
-        pointer: "/path",
-        effectType: "WRITE",
-        scopeKind: "FILE",
-        // 覆盖写。不是 IRREVERSIBLE（文件还在），但也不是完全可逆（旧内容没了）。
-        reversibility: "PARTIALLY_REVERSIBLE",
-        operation: "write",
-      },
-    ],
+    rule: {
+      pointer: "/path",
+      effectType: "WRITE",
+      scopeKind: "FILE",
+      // 覆盖写。不是 IRREVERSIBLE（文件还在），但也不是完全可逆（旧内容没了）。
+      reversibility: "PARTIALLY_REVERSIBLE",
+      operation: "write",
+    },
   },
   redaction: { profile: "STANDARD" },
-  retryPolicy: { maxAttempts: 1, backoffMs: 0 },
   /**
    * 【定】幂等。消息级恢复下这个声明是恢复正确性的前提（原则十五）。
    *
@@ -105,20 +99,17 @@ export const writeFileDefinition: ToolDefinition = {
    */
   idempotency: { isIdempotent: true, isReadOnly: false },
   timeoutPolicy: { timeoutMs: 60_000 },
-  cancellation: { cooperative: true },
   progressReporting: { mode: "NONE" },
   verification: {
     mode: "REOBSERVE",
     // 唯一能把 SUCCESS 降级为 COMPLETED_WITH_LIMITS 的开关
     requiredForSuccess: true,
-    observationCost: "LOW",
-    timeoutMs: 5_000,
   },
   /**
    * 覆盖写崩溃后可观察，且**不需要**执行前指纹（决 6）：
    * 目标内容是绝对的（== 计划内容），不像 append 那样取决于起始状态。
    */
-  recoveryObservation: { kind: "TARGET_CONTENT_HASH", requiresPreFingerprint: false },
+  recoveryObservation: { requiresPreFingerprint: false },
 };
 
 /**
@@ -245,6 +236,5 @@ export async function verifyWriteFile(
 export const writeFileSnapshot: ToolSnapshot = {
   toolId: writeFileDefinition.id,
   version: writeFileDefinition.version,
-  contentHash: `${writeFileDefinition.name}@${writeFileDefinition.version}`,
   definition: writeFileDefinition,
 };

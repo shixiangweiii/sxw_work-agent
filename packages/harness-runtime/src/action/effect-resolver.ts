@@ -8,14 +8,13 @@
  * 它应该拿到一个已经规范化、已经确定落在哪个 Mount 内的语义对象。
  */
 
-import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import type {
   DeclarativeScopeRule,
   EffectResolutionDescriptor,
   ResolvedEffect,
 } from "../types/tool.js";
-import type { JsonValue } from "../types/ids.js";
+import { digest, type JsonValue } from "../types/ids.js";
 import type { EffectResolverPort, TrustedEffectResolver } from "../ports/index.js";
 
 export class DeclarativeEffectResolver implements EffectResolverPort {
@@ -58,11 +57,7 @@ export class DeclarativeEffectResolver implements EffectResolverPort {
       return impl.resolve(normalizedInput, workspaceRoot);
     }
 
-    const rule = descriptor.rules[0];
-    if (!rule) {
-      return noEffect(descriptor.version);
-    }
-
+    const rule = descriptor.rule;
     const raw = readPointer(normalizedInput, rule.pointer);
     const scopeValue = normalizeScope(rule, raw, workspaceRoot);
 
@@ -71,11 +66,10 @@ export class DeclarativeEffectResolver implements EffectResolverPort {
       operation: rule.operation,
       scope: { kind: rule.scopeKind, value: scopeValue },
       reversibility: rule.reversibility,
-      targetFingerprints: [{ target: scopeValue }],
       riskFacts: riskFactsFor(rule, scopeValue, workspaceRoot),
-      // 护栏 3（阶段 3 决 3 修订 2）：这次调用把数据发去了哪里。
+      // 护栏 3（决 3 修订 2）：这次调用把数据发去了哪里。
+      // 【定】它与 riskFacts 一起进 ActionProposed 事件 —— 见 settle-batch。
       ...(dataMovementFor(rule, scopeValue) ?? {}),
-      resolverVersion: descriptor.version,
       digest: "",
     };
     effect.digest = digestOf(effect);
@@ -83,7 +77,7 @@ export class DeclarativeEffectResolver implements EffectResolverPort {
   }
 }
 
-/** JSON Pointer 的极简子集：只支持 /key 形式。够阶段 1 用。 */
+/** JSON Pointer 的极简子集：只支持 /key 形式。 */
 function readPointer(input: JsonValue, pointer: string): string {
   const key = pointer.replace(/^\//, "");
   if (input === null || typeof input !== "object" || Array.isArray(input)) return "";
@@ -211,24 +205,6 @@ function queryOf(scopeValue: string): string {
   }
 }
 
-function noEffect(version: string): ResolvedEffect {
-  const e: ResolvedEffect = {
-    effectType: "NONE",
-    operation: "none",
-    scope: { kind: "NONE", value: "" },
-    reversibility: "REVERSIBLE",
-    targetFingerprints: [],
-    riskFacts: [],
-    resolverVersion: version,
-    digest: "",
-  };
-  e.digest = digestOf(e);
-  return e;
-}
-
 function digestOf(e: ResolvedEffect): string {
-  return createHash("sha256")
-    .update([e.effectType, e.operation, e.scope.kind, e.scope.value, e.reversibility].join("|"))
-    .digest("hex")
-    .slice(0, 32);
+  return digest([e.effectType, e.operation, e.scope.kind, e.scope.value, e.reversibility].join("|"));
 }

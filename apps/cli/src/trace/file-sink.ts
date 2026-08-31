@@ -3,14 +3,10 @@
  *
  * ══════════════════════════════════════════════════════════════════════
  * 起因：2026-08-24 的评测报告在「可观测与可审计」一项上扣分，理由是
- * CLI 用 `NullTraceSink` ＋ `InMemoryTranscriptStore`，进程退出后只剩一句
- * 「transcript: 21 条」，没有任何可重读的 run artifact。
- *
- * 两者性质不同，只有后半句是缺陷：
- *
- *   · transcript 内存态是**阶段 1 的定义**，SQLite 是阶段 2 的事，不该在这儿修；
- *   · 而 `CollectingTraceSink` 早就存在，三条 verify 脚本都在用 ——
- *     **唯一没有 trace 的路径，恰好是唯一跑真实端点的路径**。这个不对称没有理由。
+ * CLI 当时装的是 `NullTraceSink`，进程退出后只剩一句「transcript: 21 条」，
+ * 没有任何可重读的 run artifact —— 而 `CollectingTraceSink` 早就存在，
+ * 三条 verify 脚本都在用。**唯一没有 trace 的路径，恰好是唯一跑真实端点的路径。**
+ * 这个不对称没有理由。
  *
  * 所以这里补的是 trace 落盘，不是持久化 transcript。两者不要混为一谈：
  * 事件不是恢复的来源（恢复只读 transcript），它是诊断与评测的来源。

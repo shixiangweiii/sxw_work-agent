@@ -375,7 +375,7 @@ class AnthropicMessagesProtocol implements ModelProtocolPort {
       });
     }
 
-    if (status !== undefined && status >= 500) {
+    if (status >= 500) {
       return makeError({
         code: "MODEL_UNAVAILABLE",
         source: "MODEL_PROVIDER",
@@ -400,13 +400,14 @@ class AnthropicMessagesProtocol implements ModelProtocolPort {
       });
     }
 
+    // 走到这里 status 一定是数字：上面 `status === undefined` 那一支已经 return 了。
     return makeError({
       code: "MODEL_UNKNOWN",
-      source: status === undefined ? "RUNTIME" : "MODEL_PROVIDER",
+      source: "MODEL_PROVIDER",
       category: "UNKNOWN",
       retryability: "SAME_INPUT_BACKOFF",
       sideEffectState: "UNKNOWN",
-      safeMessage: `未分类的模型错误${status ? `（HTTP ${status}）` : ""}：${message.slice(0, 200)}`,
+      safeMessage: `未分类的模型错误（HTTP ${status}）：${message.slice(0, 200)}`,
       endpointId: this.profile.endpointId,
     });
   }
@@ -436,8 +437,7 @@ class AnthropicMessagesProtocol implements ModelProtocolPort {
  *
  * Anthropic 形状的一个结构约束：tool_result 必须放在 user 消息里，
  * 而 tool_use 在 assistant 消息里。翻译在这里完成，Context 层不需要知道。
- */
-/**
+ *
  * 返回类型是具体的（不是 `unknown[]`）：`buildRequest` 要往**最后一个 block**
  * 上挂 cache_control，拿 `unknown[]` 就只能靠断言硬转。
  * `toBlock()` 每次都新建对象，所以那次挂载是安全的局部改写，不会串到别的请求上。

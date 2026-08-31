@@ -12,36 +12,27 @@
  */
 
 import { createHash } from "node:crypto";
-import type { BlobPage, BlobStorePort, RunId } from "@workagent/harness-runtime";
+import type { BlobPage, BlobStorePort } from "@workagent/harness-runtime";
 import type { Db } from "./db.js";
 import { inTransaction } from "./db.js";
 
 export class SqliteBlobStore implements BlobStorePort {
   constructor(private readonly db: Db) {}
 
-  async put(input: {
-    content: string;
-    runId?: RunId;
-    toolName?: string;
-  }): Promise<{ ref: string; hash: string; size: number }> {
-    const hash = sha256(input.content);
-    const size = Buffer.byteLength(input.content, "utf8");
+  async put(content: string): Promise<{ ref: string; hash: string; size: number }> {
+    const hash = sha256(content);
+    const size = Buffer.byteLength(content, "utf8");
     // ref 里带 hash 前缀是刻意的：模型在帧里看到 `blob_a1b2c3…`，
     // 两次相同的结果一眼看得出是同一份东西，不必去比对内容。
     const ref = `blob_${hash.slice(0, 12)}_${Math.random().toString(36).slice(2, 8)}`;
-    const now = Date.now();
 
     inTransaction(this.db, () => {
       this.db
-        .prepare(
-          "INSERT OR IGNORE INTO blobs (content_hash, size_bytes, content, created_at) VALUES (?, ?, ?, ?)",
-        )
-        .run(hash, size, input.content, now);
+        .prepare("INSERT OR IGNORE INTO blobs (content_hash, size_bytes, content) VALUES (?, ?, ?)")
+        .run(hash, size, content);
       this.db
-        .prepare(
-          "INSERT INTO blob_refs (ref, content_hash, run_id, tool_name, created_at) VALUES (?, ?, ?, ?, ?)",
-        )
-        .run(ref, hash, input.runId ? String(input.runId) : null, input.toolName ?? null, now);
+        .prepare("INSERT INTO blob_refs (ref, content_hash) VALUES (?, ?)")
+        .run(ref, hash);
     });
 
     return { ref, hash, size };

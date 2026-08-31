@@ -409,7 +409,13 @@ export interface CommonVerifierOptions {
   recoveryObservationEnabled?: boolean;
 }
 
-/** 需要观察的工具 → 它的目标路径在入参的哪个字段上。 */
+/**
+ * 哪些工具需要拍执行前指纹 / 做崩溃后观察。
+ *
+ * 【定】目标路径固定读入参的 `path` 字段（见 `observePre`）——
+ * 加一个路径字段不叫 `path` 的工具时，这里要一起改成 `工具名 → 字段名` 的表。
+ * 此前这行注释写的正是那张表，而实现是一个只有工具名的 Set。
+ */
 const OBSERVED_TOOLS = new Set(["write_file", "edit_file"]);
 
 export class CommonVerifier implements VerificationPort {
