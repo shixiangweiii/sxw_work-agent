@@ -23,7 +23,7 @@ import type { EndpointCapabilityProfile } from "../types/endpoint.js";
 import type { RuntimeErrorRecord } from "../types/error.js";
 import type { RunEvent } from "../types/event.js";
 import type { ContextMessage, TranscriptEntry } from "../types/transcript.js";
-import type { ModelUsage, RunSpec, RunStatus } from "../types/run.js";
+import type { ExecutionPrivilege, ModelUsage, RunSpec, RunStatus } from "../types/run.js";
 import type {
   EffectResolutionDescriptor,
   ExecutionAttempt,
@@ -203,6 +203,18 @@ export interface ToolExecutionContext {
    * 办法发现这件事。Replay 也要求时区随 Run 冻结而不是随重放机器变。
    */
   timezone: string;
+  /**
+   * 随 AgentSpec 冻结的执行特权档位（ADR-0012）。
+   *
+   * 【定】与 `timezone` 同一条理由，也同一条纪律：**工具不得自己去读宿主
+   * 的档位**（环境变量、全局单例、模块级 let）。那样的档位是 transcript
+   * 之外的隐藏状态 —— 与阶段 3.5 拒绝持久 cwd 是同一形态，
+   * 而这次那个隐藏状态决定的是「这次副作用有没有边界」。
+   *
+   * Runtime 传的是一个档位，**不理解它意味着什么**（同 `artifactChecks`）。
+   * 沙箱怎么落地是 `tools/common/src/exec/` 的事，边界 grep 第 7 条守着。
+   */
+  executionPrivilege: ExecutionPrivilege;
 }
 
 export interface ToolExecutionOutcome {

@@ -110,7 +110,13 @@ export interface UiToolActivity extends UiEntryBase {
   durationMs?: number;
   /** 被 Policy 直接拒绝时的原因（`ActionRejected`）。 */
   rejected?: { stage: string; reason: string };
-  approval?: { requested: boolean; approved?: boolean; reason?: string };
+  /**
+   * `decidedBy` 是 ADR-0012 加的：**谁做的这个决定**。
+   *
+   * 少了它，一条 AUTO 档跑完的 Run 与一条被逐步审视过的 Run 在界面上
+   * 完全一样 —— 而白盒界面的全部意义就是不让这种事发生。
+   */
+  approval?: { requested: boolean; approved?: boolean; reason?: string; decidedBy?: string };
   verification?: { status: string; required: boolean; detail: string };
   progress: string[];
   /** 大结果外置（§11.4）。有它说明 transcript 上那条 stub 不是全部内容。 */
@@ -126,6 +132,8 @@ export interface UiApproval extends UiEntryBase {
   reason: string;
   approved?: boolean;
   decisionReason?: string;
+  /** 谁做的这个决定（ADR-0012）。`UNDECLARED` = decider 没声明，**不猜**。 */
+  decidedBy?: string;
 }
 
 export interface UiInteraction extends UiEntryBase {
@@ -299,7 +307,26 @@ export interface UiServiceInfo {
   endpointHost: string;
   profileId: string;
   modelId: string;
+  /** 人读的一句话，由 `describeModes()` 唯一给出。 */
   approvalMode: string;
+  /**
+   * 机器读的档位（ADR-0012）。
+   *
+   * 【定】与上面那句人话**分成两个字段**，不让界面去解析 `approvalMode`。
+   * 从一句给人读的话里 parse 出状态，是"第二事实来源"最常见的长法：
+   * 那句话为了读着顺改一个字，界面的开关就会静默停在错误的位置上。
+   */
+  approvalModeId: "CONFIRM" | "DEFAULT" | "AUTO";
+  /** 同上，第二条轴。**界面上只读** —— 它随 Run 冻结，改它要重启服务。 */
+  executionPrivilege: "SANDBOXED" | "UNRESTRICTED";
+  /**
+   * 边界让渡的警告（`fullAccessWarning()`）。没有就不出现。
+   *
+   * 【定】它是一个**独立字段**而不是塞进 `notices` —— notices 是装配期的
+   * 提示流水，会被划过去；这一条要常驻在界面顶部，因为它描述的是
+   * 「此刻这台机器上没有闸门」，而那不是一条一次性通知。
+   */
+  fullAccessWarning?: string;
   toolNames: string[];
   /** 工具数 × 180（§16.1【定·实测】）。过拟合警报，随工具数线性增长。 */
   fixedOverheadTokens: number;
@@ -375,6 +402,14 @@ export interface UiRunDetail {
     modelId: string;
     endpointProfileRef: string;
     timezone: string;
+    /**
+     * 这个 Run **当时**的执行特权档位（ADR-0012 二次评审 P2-5）。
+     *
+     * 【定】它与 `UiServiceInfo.executionPrivilege`（当前服务档位）是
+     * **两个字段**，界面必须分栏显示。重启换过档之后，用当前服务档位
+     * 去解释一条历史 Run，答案会是错的 —— 而那个错看起来完全正常。
+     */
+    executionPrivilege: string;
     toolCount: number;
     createdAt: number;
     /** 冻结的 system prompt。白盒的一部分：模型到底被告知了什么。 */

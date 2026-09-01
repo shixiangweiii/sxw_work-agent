@@ -10,12 +10,23 @@
 
 import type { ActionBatchId, ActionId, RunId, Timestamp } from "./ids.js";
 import type { Continue, Terminal } from "./loop.js";
-import type { ModelUsage, RunOutcome } from "./run.js";
+import type { ExecutionPrivilege, ModelUsage, RunOutcome } from "./run.js";
 import type { RuntimeErrorRecord } from "./error.js";
-import type { DataMovementDescriptor } from "./tool.js";
+import type { ApprovalDecidedBy, DataMovementDescriptor } from "./tool.js";
 
 export type RunEvent =
-  | Ev<"RunStarted", { task: string; endpointId: string; modelId: string }>
+  /**
+   * `executionPrivilege` 是 ADR-0012 收口补的（二次评审 P2-5）。
+   *
+   * 【定】它必须上**事件流**，而不是只躺在 SQLite 的 RunSpec 里。
+   * 少了它，拿到一份 trace JSONL 的人回答不了「这个 Run 当时有没有沙箱」——
+   * 而那正是本仓反复在修的形态：`dataMovement` 与 `replacedBytes` 两次，
+   * 都是「撑着结论的依据从未离开产生它的函数」。
+   * 更糟的是它有一个**看起来对**的替代品：界面上的"当前服务档位"，
+   * 而那个值在重启换档之后与历史 Run 无关。
+   */
+  | Ev<"RunStarted",
+      { task: string; endpointId: string; modelId: string; executionPrivilege: ExecutionPrivilege }>
   | Ev<"TurnStarted", { turn: number }>
   | Ev<"LoopContinued", { transition: Continue }>
   | Ev<"LoopTerminated", { terminal: Terminal; outcome: RunOutcome }>
@@ -63,7 +74,13 @@ export type RunEvent =
       }>
   | Ev<"ActionRejected", { actionId: ActionId; stage: string; reason: string }>
   | Ev<"ApprovalRequested", { actionId: ActionId; effect: string; reason: string }>
-  | Ev<"ApprovalDecided", { actionId: ActionId; approved: boolean; reason?: string }>
+  /**
+   * `decidedBy` 是**必填**的（ADR-0012）。见 `ApprovalDecidedBy` 的说明 ——
+   * 少了它，一条自动跑完的 Run 与一条被逐步审视过的 Run 事后不可区分。
+   * 决策者没声明时这里落 `"UNDECLARED"`，不落 `"HUMAN"`。
+   */
+  | Ev<"ApprovalDecided",
+      { actionId: ActionId; approved: boolean; reason?: string; decidedBy: ApprovalDecidedBy }>
   | Ev<"AttemptStarted", { actionId: ActionId; toolName: string }>
   | Ev<"AttemptCompleted",
       { actionId: ActionId; status: string; sideEffectState: string; durationMs: number }>

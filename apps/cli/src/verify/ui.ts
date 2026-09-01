@@ -145,6 +145,8 @@ async function waitFor<T>(
 
 interface PendingItem {
   pendingId: string;
+  /** D4c 段要按它查逐 Run 提升状态。`UiPending` 一直带着它。 */
+  runId: string;
   kind: string;
   approval?: { toolName: string; effectType: string; why: string };
   question?: { question: string; options: string[] };
@@ -461,6 +463,28 @@ async function main(): Promise<void> {
 
     const detail = finished ?? (await call(svc, `/api/runs/${runId}`)).body;
 
+    /**
+     * ── ADR-0012：这一段人是**亲手点的**，所以必须记 `HUMAN` ────────────────
+     *
+     * 【定】它与 D4 那条（AUTO 档必须记 `AUTO`）是**一对**，缺任何一半都没有
+     * 判别力：只验 AUTO 那条的话，一个恒填 `"AUTO"` 的实现照样全绿；
+     * 只验 HUMAN 那条的话，一个恒填 `"HUMAN"` 的实现照样全绿。
+     * 而恒填 `"HUMAN"` 正是这条特性最容易被写出来的错 ——
+     * 它把「谁批的」这个新字段变回一句永远为真的客套话。
+     */
+    const humanApprovals = (
+      (detail["timeline"] as Array<{ kind: string; decidedBy?: string }> | undefined) ?? []
+    ).filter((e) => e.kind === "APPROVAL");
+    fact(
+      "人亲手点的那次，decidedBy",
+      humanApprovals.map((a) => a.decidedBy ?? "(缺)").join(",") || "（没有审批条目）",
+    );
+    verdict(
+      humanApprovals.length > 0 && humanApprovals.every((a) => a.decidedBy === "HUMAN"),
+      "浏览器上点「批准」记的是 decidedBy=HUMAN —— 与 D4 段的 AUTO 构成**一对**：" +
+        "少任何一半，一个恒填某个值的实现都能全绿",
+    );
+
     // ══════════════════════════════ D2. 取消之后 resume，审批还能不能等到人
     section("D2. 第二段的审批：取消 → resume 之后，闸门必须还活着");
     console.log(
@@ -654,6 +678,387 @@ async function main(): Promise<void> {
       );
     } finally {
       await svcAuto.close();
+    }
+
+    // ══════════════════════ D4. AUTO 档（ADR-0012）
+    section("D4. AUTO 档：EXECUTE 也不停下来问，且「谁批的」事后可区分");
+    console.log(
+      "   D3 验的是**默认档位**覆盖到的那一类（workspace 内的可逆写）。EXECUTE 与\n" +
+        "   IRREVERSIBLE 不在它的射程内 —— 而实测里被问十几次的恰恰就是这两类\n" +
+        "   （一次「下载网页图片打包成 zip」的真实任务，10 条 shell 命令**每条都含\n" +
+        "   元字符**，于是 10 次审批）。AUTO 档就是为这个加的。\n" +
+        "\n" +
+        "   【定】这一段必须**成对**：只验「没弹卡片」的话，一个「Run 根本没跑到\n" +
+        "   那一步」的实现照样全绿 —— 那正是 D3 上一版栽的跤（空数组的 every()\n" +
+        "   恒真）。所以配一条「那个 IRREVERSIBLE 的动作真的执行了」。\n",
+    );
+
+    const svcAutoMode = await startService({
+      workspaceRoot,
+      storageOverride: { dbPath: ":memory:", traceDir: join(tmp, "runs-automode") },
+      endpoint: "bailian",
+      token: TOKEN,
+      // 【定】服务以**默认档**起，档位靠 HTTP 拨过去 —— 这样测到的是
+      // 「运行中随时切」那条链路（路由 → RunHost → decider 的读函数），
+      // 而不只是「启动参数传对了」。少了这一跳，界面上那个开关可以是死的。
+      composeOverrides: {
+        modelPortOverride: new ScriptedModelPort([
+          {
+            text: "追加一条日志",
+            toolCalls: [
+              { toolCallId: "a1", name: "append_log", input: { path: "auto-mode.log", line: "x" } },
+            ],
+          },
+          { text: "好了。", toolCalls: [] },
+        ]),
+        tools: toolsFor(["append_log"]),
+      },
+    });
+    try {
+      const modeResp = await call(svcAutoMode, "/api/approval-mode", {
+        method: "POST",
+        body: { mode: "auto" },
+      });
+      const st0 = await call(svcAutoMode, "/api/state");
+      const svcInfo = st0.body["service"] as Record<string, unknown>;
+      fact("POST /api/approval-mode", `${modeResp.status} ${JSON.stringify(modeResp.body)}`);
+      fact("state 里的 approvalModeId", String(svcInfo["approvalModeId"]));
+
+      const started = await call(svcAutoMode, "/api/runs", { method: "POST", body: { task: "AUTO 档" } });
+      const rid = String(started.body["runId"] ?? "");
+      let sawPending = 0;
+      const done = await waitFor(async () => {
+        const s0 = await call(svcAutoMode, "/api/state");
+        sawPending += ((s0.body["pending"] as unknown[]) ?? []).length;
+        const d = await call(svcAutoMode, `/api/runs/${rid}`);
+        const st = String(d.body["status"] ?? "");
+        return st === "COMPLETED" || st === "FAILED" ? d.body : undefined;
+      }, 6000);
+      const timeline =
+        (done?.["timeline"] as Array<{ kind: string; approved?: boolean; decidedBy?: string }> | undefined) ?? [];
+      const approvals = timeline.filter((e) => e.kind === "APPROVAL");
+      // 【定】配对项：那条 IRREVERSIBLE 的动作**真的执行了**。
+      // 少了它，「Run 挂在第一步」与「AUTO 档放行了」不可区分。
+      const logWritten = existsSync(join(workspaceRoot, "auto-mode.log"));
+      fact("轮询期间出现过的等人卡片", sawPending);
+      fact("审批事件", `${approvals.length} 条，decidedBy=${approvals.map((a) => a.decidedBy).join(",")}`);
+      fact("append_log 的产物落盘", logWritten ? "是" : "否 ← Run 没跑到那一步");
+
+      verdict(
+        String(svcInfo["approvalModeId"]) === "AUTO" && modeResp.status === 200,
+        "档位经 HTTP 拨到 AUTO 之后，/api/state 报的就是 AUTO —— 界面读的是这个机器字段，不是那句人话",
+      );
+      verdict(
+        !!done && sawPending === 0 && logWritten,
+        "AUTO 档下 IRREVERSIBLE 的 append_log **一次都没停下来问**，而且那个动作真的执行了 —— " +
+          "两条缺一不可：只验前者的话，一个卡在第一步的 Run 照样全绿",
+      );
+      /**
+       * 【定】ADR-0012 的核心判据：**AUTO 批准与人工批准事后可区分**。
+       *
+       * 在此之前 `--yes-all` 的无条件批准与一个人亲手敲 y，在
+       * `ApprovalDecided` 上一个字都不差（都是不带 reason 的 `{approved:true}`）。
+       * 这一条钉住的就是那件事：AUTO 档留下的必须是 `AUTO`，
+       * 而 D / D2 段里人点按钮留下的必须是 `HUMAN`（下面 D5 验另一半）。
+       */
+      verdict(
+        approvals.length > 0 && approvals.every((a) => a.decidedBy === "AUTO"),
+        "自动放行在事实表上记 decidedBy=AUTO —— 一条自动跑完的 Run 与一条被逐步审视过的 Run 事后可区分，" +
+          "而这正是加 AUTO 档必须同时付的那笔账",
+      );
+    } finally {
+      await svcAutoMode.close();
+    }
+
+    // ══════════ D4b. AUTO 档下 ask_user 不停下来，request_handoff 照样等人
+    section("D4b. AUTO 档下 ask_user 不问，而 request_handoff **仍然**等人");
+    console.log(
+      "   ADR-0008 那张对照表的直接后果，也是二次复核补上的一条：上一版实现了这个\n" +
+        "   行为、写进了交付说明，**却一条判据都没有**。而它恰恰是最容易被下一个人\n" +
+        "   「统一」掉的地方 —— 两者表面上都是「停下来等人」。\n" +
+        "\n" +
+        "     ask_user        「你来定」→ 没人回答**不是**失败 → AUTO 下立刻 NO_ANSWER\n" +
+        "     request_handoff 「你去做」→ 没人接管**就是**失败 → AUTO 下**照样等人**\n" +
+        "\n" +
+        "   【定】判据必须**成对**：只验前者的话，一个把两条通道都自动化掉的实现\n" +
+        "   照样全绿，而那正是 ADR-0008 要防的那次错误合并。\n",
+    );
+
+    const svcAsk = await startService({
+      workspaceRoot,
+      storageOverride: { dbPath: ":memory:", traceDir: join(tmp, "runs-ask") },
+      endpoint: "bailian",
+      token: TOKEN,
+      approvalMode: "AUTO",
+      composeOverrides: {
+        modelPortOverride: new ScriptedModelPort([
+          {
+            text: "我拿不准，问一下",
+            toolCalls: [
+              {
+                toolCallId: "q1",
+                name: "ask_user",
+                /**
+                 * 【定】`options` 是**换行分隔的字符串**，不是数组
+                 * （`JsonSchemaProperty` 只支持标量，见 ask-user.ts 那段【定】）。
+                 *
+                 * ⚠️ 我第一版在这里传了数组，于是 `validateAndNormalize` 丢掉它、
+                 * `executeAskUser` 在 options 解析出 0 个候选时就报错返回 ——
+                 * **根本没走到 QuestionChannel**。那时把 AUTO 那一支摘掉做注入实测，
+                 * 这条判据照样是绿的：夹具跨不过出事的那一跳，
+                 * 与 `read_blob.line_offset` 那次一字不差。
+                 */
+                input: { question: "images/ 放什么？", options: "只放内容图\n全部图片" },
+              },
+            ],
+          },
+          {
+            text: "那我请你去做一件我做不了的事",
+            toolCalls: [
+              {
+                toolCallId: "h1",
+                name: "request_handoff",
+                input: {
+                  instructions: "去后台把合同号抄过来",
+                  expected_completion: "workspace 下出现 contract-id.txt",
+                },
+              },
+            ],
+          },
+          { text: "好了。", toolCalls: [] },
+        ]),
+        tools: toolsFor(["ask_user", "request_handoff"]),
+      },
+    });
+    try {
+      await call(svcAsk, "/api/runs", { method: "POST", body: { task: "AUTO 下的两条通道" } });
+      // AUTO 档下 ask_user 不该弹卡片，而 handoff 该弹 —— 等到 handoff 那张就说明
+      // 前面那次提问确实是自己走掉的（否则会先卡在 QUESTION 上等人）。
+      const pend = await nextPending(svcAsk, "HANDOFF");
+      const seenKinds = svcAsk.host.pending().map((x) => x.kind);
+      fact("等到的第一张卡片", pend ? pend.kind : "（没等到）");
+      fact("此刻还在等的", seenKinds.join(",") || "（无）");
+      verdict(
+        !!pend,
+        "AUTO 档下 ask_user **没有**停下来（否则会先卡在 QUESTION 上），" +
+          "Run 直接走到了下一轮 —— 没人回答不是失败，模型自己定（阶段 3.5 决 3 的正常降级路径）",
+      );
+      /**
+       * 【定】配对的那一半：`request_handoff` 在 AUTO 档下**仍然**等人。
+       * 少了它，一个「AUTO 就把三条通道全自动化」的实现照样让上一条绿，
+       * 而那会让「去登录一下」这种 Atlas 真做不了的事被静默判成"没人 → 失败"。
+       */
+      verdict(
+        pend?.kind === "HANDOFF" && !!pend.handoff?.expectedCompletion,
+        "而 request_handoff **照样**停下来等人，并带着可观察的完成判据 —— " +
+          "自动化的是「要不要问你」，不是「要不要有人去做那件事」（ADR-0008）",
+      );
+      if (pend) {
+        await call(svcAsk, `/api/pending/${pend.pendingId}`, {
+          method: "POST",
+          body: { kind: "HANDOFF", note: "做完了" },
+        });
+      }
+    } finally {
+      await svcAsk.close();
+    }
+
+    // ══════════ D4c. 失败的请求不得留下安全状态变化（二次评审 P1-2 / P2-3）
+    section("D4c. 失败的请求不得改变审批状态");
+    console.log(
+      "   两条同源的原子性缺陷，都是「一个失败的请求改变了别人的安全边界」：\n" +
+        "\n" +
+        "     P1-2  POST /api/runs 先 setApprovalMode 再 startRun，而 startRun 会在\n" +
+        "           已有前台 Run 时抛 —— Run B 启动失败，**Run A 静默变成 AUTO**；\n" +
+        "     P2-3  按 pendingId 找到任意 kind 就 elevate，之后才校验 kind ——\n" +
+        "           向 HANDOFF 卡片发伪造的 APPROVAL 拿到 409，**提升已经落下了**。\n" +
+        "\n" +
+        "   与「应答一个已经不在等的请求返回 409 而不是 200」是同一条纪律。\n",
+    );
+
+    const svcAtomic = await startService({
+      workspaceRoot,
+      storageOverride: { dbPath: ":memory:", traceDir: join(tmp, "runs-atomic") },
+      endpoint: "bailian",
+      token: TOKEN,
+      composeOverrides: {
+        modelPortOverride: new ScriptedModelPort([
+          {
+            text: "问一句",
+            toolCalls: [
+              {
+                toolCallId: "h9",
+                name: "request_handoff",
+                input: { instructions: "去做一件事", expected_completion: "出现 x.txt" },
+              },
+            ],
+          },
+          { text: "好了。", toolCalls: [] },
+        ]),
+        tools: toolsFor(["request_handoff"]),
+      },
+    });
+    try {
+      await call(svcAtomic, "/api/runs", { method: "POST", body: { task: "占住前台" } });
+      const held = await nextPending(svcAtomic, "HANDOFF");
+
+      // ── P1-2：前台被占住时提交第二个 Run 并选 AUTO
+      const before = String(
+        ((await call(svcAtomic, "/api/state")).body["service"] as Record<string, unknown>)[
+          "approvalModeId"
+        ],
+      );
+      const rejected = await call(svcAtomic, "/api/runs", {
+        method: "POST",
+        body: { task: "第二个 Run", approvalMode: "auto" },
+      });
+      const after = String(
+        ((await call(svcAtomic, "/api/state")).body["service"] as Record<string, unknown>)[
+          "approvalModeId"
+        ],
+      );
+      fact("前台被占住时提交第二个 Run", `HTTP ${rejected.status}`);
+      fact("档位（提交前 → 提交后）", `${before} → ${after}`);
+      verdict(
+        rejected.status !== 200 && after === before && before !== "AUTO",
+        "启动失败时**全局档位不变** —— 一个失败的请求不得把正在跑的那个 Run 切成 AUTO",
+      );
+
+      // ── P2-3：向 HANDOFF 卡片发伪造的 APPROVAL
+      const fake = held
+        ? await call(svcAtomic, `/api/pending/${held.pendingId}`, {
+            method: "POST",
+            body: { kind: "APPROVAL", approved: true, alwaysForRun: true },
+          })
+        : undefined;
+      const elevated = held ? svcAtomic.host.isRunElevated(held.runId) : true;
+      fact("向 HANDOFF 卡片发伪造 APPROVAL", `HTTP ${fake?.status}`);
+      fact("那个 Run 被提升了吗", elevated ? "是 ← 失败请求留下了状态" : "否");
+      /**
+       * ── ⚠️ 【定】这条判据测的是**合取**，不是某一道守卫（M4 那次的形态）──────
+       *
+       * 实测过三种注入，结果必须原样记在这里，否则下一个人会以为它能单独
+       * 打死其中一道：
+       *
+       *   只摘 kind 校验          → **不红**（被回滚兜住）
+       *   只摘失败回滚            → **不红**（被 kind 校验挡住）
+       *   两道同时摘             → 翻红 ✅
+       *
+       * 【定】这**不是冗余，是纵深** —— 两道防的是不同的事：
+       *   kind 校验：对着 HANDOFF / QUESTION 卡片发伪造的 APPROVAL；
+       *   失败回滚：卡片在 elevate 与 answer 之间被 abort 清掉（Run 被取消）。
+       * 第二种 kind 校验挡不住，第一种回滚兜得住 —— 它们只是在
+       * 「最终有没有留下提升」这一个可观察量上重合。
+       *
+       * 所以措辞只声称它测得到的那件事：**失败的应答不留下提升**。
+       * 一条不准的 kills 比没有更糟（阶段 3.5 那次的原话）。
+       */
+      verdict(
+        fake?.status === 409 && !elevated,
+        "kind 不匹配的应答返回 409，且**没有留下逐 Run 提升** —— 注意这条测的是" +
+          "「最终不留状态」这个合取：单摘 kind 校验或单摘失败回滚都不会红，两道同摘才红",
+      );
+
+      // ── P1-3：切到 CONFIRM 必须收回已有的提升
+      if (held) svcAtomic.host.elevateRun(held.runId);
+      const beforeRevoke = svcAtomic.host.isRunElevated(held?.runId ?? "");
+      await call(svcAtomic, "/api/approval-mode", { method: "POST", body: { mode: "confirm" } });
+      const afterRevoke = svcAtomic.host.isRunElevated(held?.runId ?? "");
+      fact("切到 CONFIRM 前后的提升状态", `${beforeRevoke} → ${afterRevoke}`);
+      verdict(
+        beforeRevoke && !afterRevoke,
+        "切到 CONFIRM **收回**逐 Run 提升 —— 判别式是 `AUTO || isElevated`，不收的话" +
+          "界面回一句「已切到 CONFIRM」而这个 Run 继续自动放行（安全状态与显示相反）",
+      );
+
+      if (held) {
+        await call(svcAtomic, `/api/pending/${held.pendingId}`, {
+          method: "POST",
+          body: { kind: "HANDOFF", note: "收尾" },
+        });
+      }
+    } finally {
+      await svcAtomic.close();
+    }
+
+    // ══════════════ D5. 「批准，且本次 Run 不再问」（ADR-0012）
+    section("D5. 「本次 Run 不再问」：第一次仍是人批的，之后的才是自动");
+    console.log(
+      "   它是用户那句「太麻烦了」最直接的落点：跑到一半才发现要点十几次，\n" +
+        "   而此时改全局档位太重（下一个 Run 也跟着变）。\n" +
+        "\n" +
+        "   【定】判据的重点不是「后面不问了」，是**第一次与后面留下的事实不同**：\n" +
+        "   人只看过第一条命令，后面那些他没看过。把两者都记成 HUMAN，\n" +
+        "   等于替他宣称「我逐条批准过全部」—— 而那是一句他没说过的话。\n",
+    );
+
+    const svcAlways = await startService({
+      workspaceRoot,
+      storageOverride: { dbPath: ":memory:", traceDir: join(tmp, "runs-always") },
+      endpoint: "bailian",
+      token: TOKEN,
+      composeOverrides: {
+        modelPortOverride: new ScriptedModelPort([
+          {
+            text: "第一条",
+            toolCalls: [
+              { toolCallId: "l1", name: "append_log", input: { path: "always.log", line: "one" } },
+            ],
+          },
+          {
+            // 【定】第二条必须是**另一次审批**，不能只发一条。
+            // 只发一条的话，「不再问生效了」与「Run 结束了」不可区分。
+            text: "第二条",
+            toolCalls: [
+              { toolCallId: "l2", name: "append_log", input: { path: "always.log", line: "two" } },
+            ],
+          },
+          { text: "好了。", toolCalls: [] },
+        ]),
+        tools: toolsFor(["append_log"]),
+      },
+    });
+    try {
+      const st = await call(svcAlways, "/api/runs", { method: "POST", body: { task: "不再问" } });
+      const rid = String(st.body["runId"] ?? "");
+      const first = await nextPending(svcAlways, "APPROVAL");
+      fact("第一次审批弹出来了吗", first ? `是（${first.approval?.toolName}）` : "否");
+      const ans = first
+        ? await call(svcAlways, `/api/pending/${first.pendingId}`, {
+            method: "POST",
+            // 这就是界面上那颗「批准，本次 Run 不再问」按钮发的东西。
+            body: { kind: "APPROVAL", approved: true, alwaysForRun: true },
+          })
+        : undefined;
+
+      let sawSecondPending = 0;
+      const done = await waitFor(async () => {
+        const s0 = await call(svcAlways, "/api/state");
+        sawSecondPending += ((s0.body["pending"] as unknown[]) ?? []).length;
+        const d = await call(svcAlways, `/api/runs/${rid}`);
+        const s1 = String(d.body["status"] ?? "");
+        return s1 === "COMPLETED" || s1 === "FAILED" ? d.body : undefined;
+      }, 8000);
+      const tl =
+        (done?.["timeline"] as Array<{ kind: string; decidedBy?: string }> | undefined) ?? [];
+      const apps = tl.filter((e) => e.kind === "APPROVAL");
+      const decided = apps.map((a) => a.decidedBy ?? "(缺)");
+      fact("应答第一次", `${ans?.status}`);
+      fact("此后还弹过几张卡片", sawSecondPending);
+      fact("两次审批的 decidedBy", decided.join(" → "));
+
+      verdict(
+        !!done && !!first && sawSecondPending === 0 && apps.length >= 2,
+        "第一次停下来问、人点了「本次 Run 不再问」之后，**第二次没有再弹**，而两次审批都发生了 —— " +
+          "「至少两条」这一项不能省：只发一条的话，「不再问生效了」与「Run 结束了」不可区分",
+      );
+      verdict(
+        decided[0] === "HUMAN" && decided.slice(1).every((d) => d === "AUTO"),
+        "第一次记 HUMAN、之后记 AUTO —— 人只看过第一条命令，把后面那些也记成 HUMAN " +
+          "等于替他宣称「我逐条批准过全部」",
+      );
+    } finally {
+      await svcAlways.close();
     }
 
     // ══════════════════════════ G. 失败的 resume 不留幻影、不锁死服务
@@ -927,6 +1332,69 @@ async function main(): Promise<void> {
         allowed,
         "指回原 workspace 时照常放行 —— 配对判据，少了它「一律拒绝」也能让上一条绿" +
           "（阶段 3.5 沙箱那次栽的就是这一跤）",
+      );
+    }
+
+    // ═════════════ J2. §18.3 第三维：换执行特权档 resume 必须被拒（ADR-0012）
+    section("J2. 换执行特权档 resume 必须被拒（§18.3 的第三维）");
+    console.log(
+      "   端点、workspace 之后的第三维，守的是最硬的那件事：**那些副作用当时有没有边界**。\n" +
+        "\n" +
+        "   两个方向都很难看 ——\n" +
+        "     冻结 UNRESTRICTED → 用 SANDBOXED 接：模型接着一个「没有沙箱」的计划往下写，\n" +
+        "       命令突然开始被内核拒，而拒绝理由指向一条它读不到的规则；\n" +
+        "     冻结 SANDBOXED → 用 UNRESTRICTED 接：一条**在有沙箱的前提下被批准过**的计划，\n" +
+        "       后半段跑在没有沙箱的机器上 —— 人当时批准的不是这件事。\n" +
+        "\n" +
+        "   它同时是 `ShellEffectResolver` 那个构造期档位的正确性前提：resolver 拿的是\n" +
+        "   当前进程的档位、policy 与工具拿的是冻结的那一档，这道闸门保证两者必然相等。\n",
+    );
+    {
+      const wsP = join(tmp, "ws-priv");
+      mkdirSync(wsP, { recursive: true });
+      const privDb = join(tmp, "priv.db");
+      // 夹具用默认档（SANDBOXED）起一个留着未配对 tool_use 的 Run。
+      const runIdP = await buildRecoveryFixture(wsP, privDb);
+
+      const resumeWith = async (privilege: "SANDBOXED" | "UNRESTRICTED"): Promise<string | undefined> => {
+        const c = compose({
+          workspaceRoot: wsP,
+          dbPath: privDb,
+          executionPrivilege: privilege,
+          approvalDecider: async () => ({ approved: true }),
+          trace: { emit: () => {} },
+          tools: toolsFor(["append_log"]),
+          modelPortOverride: new ScriptedModelPort([{ text: "收工。", toolCalls: [] }]),
+        });
+        let err: string | undefined;
+        try {
+          const g = c.runtime.resume(asId<RunId>(runIdP));
+          let r = await g.next();
+          while (!r.done) r = await g.next();
+        } catch (e) {
+          err = (e as Error).message;
+        }
+        c.db.close();
+        return err;
+      };
+
+      const refusedPriv = await resumeWith("UNRESTRICTED");
+      fact("Run 冻结的档位", "SANDBOXED（夹具用默认档起的）");
+      fact("换成 UNRESTRICTED 恢复", refusedPriv ? `拒绝：${refusedPriv.split("\n")[0]}` : "**放行了 —— 闸门不存在**");
+      verdict(
+        refusedPriv !== undefined && refusedPriv.includes("执行特权"),
+        "在 SANDBOXED 下跑出来的 Run，用 UNRESTRICTED 恢复 → **被拒绝**（§18.3 第三维）",
+      );
+
+      /**
+       * 【定】配对判据。少了它，「resume 一律拒绝」也能让上面那条绿 ——
+       * 这正是 J 段与阶段 3.5 沙箱那次都栽过的同一跤，本段不再栽第三次。
+       */
+      const allowedPriv = await resumeWith("SANDBOXED");
+      fact("用同一档恢复", allowedPriv ? `**也被拒了**：${allowedPriv.split("\n")[0]}` : "放行");
+      verdict(
+        allowedPriv === undefined,
+        "档位相同时照常放行 —— 配对判据，少了它一个「resume 一律拒绝」的实现也能让上一条绿",
       );
     }
 

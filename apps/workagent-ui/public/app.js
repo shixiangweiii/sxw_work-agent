@@ -141,7 +141,49 @@ function renderService() {
   // 它是随时可读的过拟合警报 ——「一个 Case 一套工具」会直接反映在这个数字上。
   box.appendChild(item("工具", s.toolNames.length + " 个 / 起步价 ≈ " + s.fixedOverheadTokens + " token"));
   box.appendChild(item("workspace", s.workspaceRoot));
+  /**
+   * ── 两条档位轴的常驻徽章（ADR-0012）────────────────────────────────────
+   *
+   * 【定】档位必须**一直看得见**，不是提交任务时看一眼就算了。
+   *
+   * AUTO 档最危险的形态不是"批准了不该批准的"，是**忘了自己开着它** ——
+   * 一个昨天为了打包图片开的 AUTO，今天跑一句"清理一下这个目录"。
+   * 徽章是这件事唯一会说话的地方。
+   *
+   * 【定】读 `approvalModeId` / `executionPrivilege` 这两个机器字段，
+   * **不解析** `approvalMode` 那句人话 —— 那句话为了读着顺改一个字，
+   * 徽章就会静默停在错误的位置上。
+   */
+  box.appendChild(
+    item(
+      "审批",
+      s.approvalModeId === "AUTO"
+        ? "AUTO（不会停下来问）"
+        : s.approvalModeId === "CONFIRM"
+          ? "逐次确认"
+          : "默认",
+      s.approvalModeId === "AUTO" ? "warn" : "",
+    ),
+  );
+  box.appendChild(
+    item(
+      "执行",
+      s.executionPrivilege === "UNRESTRICTED" ? "UNRESTRICTED（无沙箱）" : "沙箱内",
+      s.executionPrivilege === "UNRESTRICTED" ? "warn" : "",
+    ),
+  );
+  /**
+   * 【定】它排在 notices 之前，而且**不是** notices 的一条。
+   * notices 是装配期的提示流水，会被划过去；这一条描述的是
+   * 「此刻这台机器上没有闸门」，那不是一次性通知。
+   */
+  if (s.fullAccessWarning) box.appendChild(item("⚠️", s.fullAccessWarning, "warn"));
   for (const n of s.notices || []) box.appendChild(item("⚠️", n, "warn"));
+
+  // 提交栏那个选择器要跟着服务端的真实档位走 —— 它是同一个开关的第二个入口，
+  // 显示成别的值就等于界面上有两个互相矛盾的"当前档位"。
+  const picker = document.getElementById("approvalmode");
+  if (picker && s.approvalModeId) picker.value = s.approvalModeId;
 }
 
 /**
@@ -407,6 +449,30 @@ function renderEntry(e) {
         ? el("span", { class: "chip warn", text: "等待中" })
         : el("span", { class: "chip " + (e.approved ? "ok" : "bad"), text: e.approved ? "已批准" : "已拒绝" }),
     );
+    /**
+     * 【定】**谁**做的这个决定（ADR-0012）。
+     *
+     * 少了它，一条 AUTO 档跑完的 Run 与一条被你逐步审视过的 Run 在这条
+     * 时间线上完全一样 —— 而白盒界面的全部意义就是不让这种事发生。
+     *
+     * 【定】`UNDECLARED` 要如实显示成「未声明」，不许美化成「已批准」。
+     * 那是 decider 没说，不是有人说过。
+     */
+    if (e.decidedBy !== undefined) {
+      head.appendChild(
+        el("span", {
+          class: "chip " + (e.decidedBy === "HUMAN" ? "ok" : "warn"),
+          text:
+            e.decidedBy === "HUMAN"
+              ? "你本人"
+              : e.decidedBy === "AUTO"
+                ? "自动（AUTO 档 / 不再问）"
+                : e.decidedBy === "AUTO_GRANT"
+                  ? "自动（默认档位放行）"
+                  : "来源未声明",
+        }),
+      );
+    }
     box.appendChild(el("div", { class: "body", text: e.effect + "｜" + e.reason }));
     if (e.decisionReason) box.appendChild(el("div", { class: "kv", text: e.decisionReason }));
   } else if (e.kind === "INTERACTION") {
@@ -663,6 +729,29 @@ function renderBudget(view, d) {
   view.appendChild(el("h4", { text: "审批策略（随 RunSpec 冻结）" }));
   view.appendChild(
     el("p", { class: "mono", text: d.spec.approvalPolicy.requiresApprovalFor.join(", ") || "（无）" }),
+  );
+  /**
+   * ── 执行特权：**这个 Run 当时**的档位（ADR-0012，二次评审 P2-5）─────────
+   *
+   * 【定】它与顶栏那个「当前服务档位」是**两栏**，且当两者不同时必须说出来。
+   *
+   * 只显示当前档位的话，重启换过档之后，用它去解释一条历史 Run 的答案是错的
+   * —— 而那个错看起来完全正常（一个合理的值，只是属于另一个时刻）。
+   * 这与 `liveInThisProcess` 那条同源：**如实显示两个事实，让人自己比对**，
+   * 投影不替他合并。
+   */
+  const frozenPriv = d.spec.executionPrivilege;
+  const currentPriv = S.service && S.service.executionPrivilege;
+  view.appendChild(el("h4", { text: "执行特权（随 RunSpec 冻结）" }));
+  view.appendChild(
+    el("p", {
+      class: "mono " + (frozenPriv === "UNRESTRICTED" ? "warn" : ""),
+      text:
+        (frozenPriv === "UNRESTRICTED" ? "UNRESTRICTED（这个 Run 当时没有沙箱）" : "SANDBOXED") +
+        (currentPriv && currentPriv !== frozenPriv
+          ? "　⚠️ 当前服务是 " + currentPriv + "，与它不同 —— 别拿现在的档位解释这个 Run"
+          : ""),
+    }),
   );
   /**
    * 入口身份。它在这里不是为了好看 —— `RunSpec.origin` 曾经有一个生产者
@@ -938,9 +1027,22 @@ function approvalCard(p) {
         class: a.allowNetwork ? "kv bad" : "kv",
         // 与 CLI 的 main.ts、run_shell 的 description ① 是同一句话的三处；
         // 分叉过一次（description 承诺「系统临时目录」而实现只放行 per-call $TMPDIR）。
+        /**
+         * 【定】这句话必须跟着**执行特权档位**变（ADR-0012）。
+         *
+         * 它此前是一句写死的保证。UNRESTRICTED 档下那句话是假的 ——
+         * 而这里是 EXECUTE 唯一的人工边界，一个在批准的那一刻给出
+         * 方向相反的保证的界面，比不给保证更糟。
+         * 与 CLI 的 main.ts、run_shell 的 description ① 是同一句话的三处；
+         * 分叉过一次（description 承诺「系统临时目录」而实现只放行
+         * per-call $TMPDIR），所以这三处必须一起改。
+         */
         text:
-          "沙箱：只能写 workspace 与本次调用的 $TMPDIR；" +
-          (a.allowNetwork ? "本次允许联网" : "禁止联网"),
+          S.service && S.service.executionPrivilege === "UNRESTRICTED"
+            ? "⚠️ 本次运行无沙箱（UNRESTRICTED）：这条命令可写任意路径、可联网，" +
+              "直接作用在这台机器上"
+            : "沙箱：只能写 workspace 与本次调用的 $TMPDIR；" +
+              (a.allowNetwork ? "本次允许联网" : "禁止联网"),
       }),
     );
     /**
@@ -981,6 +1083,25 @@ function approvalCard(p) {
         class: "primary",
         text: "批准",
         onclick: () => answer(p.pendingId, { kind: "APPROVAL", approved: true }),
+      }),
+      /**
+       * 「批准，且本次 Run 不再问」（ADR-0012）。
+       *
+       * 【定】它与「批准」是**两个**按钮，不是一个带勾选框的。
+       * 两者留下的事实不同（这一次记 HUMAN，之后那些记 AUTO），
+       * 而一个默认勾上的复选框会让人在没注意的情况下把后者也选了 ——
+       * 那等于替他宣称"我逐条批准过全部"。
+       *
+       * 【定】它只提升**这一个 Run**，不动全局档位。全局档位有它自己的
+       * 开关，两个入口做同一件事迟早出现说不清的状态。
+       */
+      el("button", {
+        text: "批准，本次 Run 不再问",
+        title:
+          "只对这个 Run 生效、不落盘。之后的放行会记为 decidedBy=AUTO —— " +
+          "与你亲手批准的那些在时间线上可以区分。",
+        onclick: () =>
+          answer(p.pendingId, { kind: "APPROVAL", approved: true, alwaysForRun: true }),
       }),
       el("button", {
         class: "danger",
@@ -1193,7 +1314,8 @@ document.getElementById("newrun").addEventListener("submit", async (ev) => {
   btn.disabled = true;
   state.textContent = "正在启动……";
   try {
-    const r = await api("/api/runs", { method: "POST", body: { task } });
+    const mode = document.getElementById("approvalmode").value;
+    const r = await api("/api/runs", { method: "POST", body: { task, approvalMode: mode } });
     state.textContent = "";
     document.getElementById("task").value = "";
     await refresh();
@@ -1209,6 +1331,39 @@ document.getElementById("refresh").addEventListener("click", () => void refresh(
 
 document.getElementById("wspicker").addEventListener("change", (ev) => {
   void switchWorkspace(ev.target.value);
+});
+
+/**
+ * 运行中随时拨审批档位（ADR-0012）。
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ * 【定】提交栏那个选择器**同时**是运行中的开关，只有这一个控件。
+ *
+ * 做成两个（一个"这次用什么档"、一个"现在改成什么档"）的直接后果是界面上
+ * 出现两个都自称当前档位的东西，而它们对"下一次审批会不会弹"给出不同答案。
+ * 一个控件、一个事实来源：改它就立刻生效，不管有没有 Run 在跑。
+ *
+ * 【定】它不会让**已经弹出来**的那个审批请求消失（服务端那侧同一条【定】）。
+ * 那一条已经问出口了、人看得见它，让它凭空消失比多问一次更糟。
+ * 档位管的是「下一次要不要问」。
+ * ══════════════════════════════════════════════════════════════════════
+ */
+document.getElementById("approvalmode").addEventListener("change", async (ev) => {
+  const mode = ev.target.value;
+  const state = document.getElementById("startstate");
+  try {
+    await api("/api/approval-mode", { method: "POST", body: { mode } });
+    state.textContent =
+      mode === "AUTO"
+        ? "已切到 AUTO：从下一次起不再询问（正在等的那一条仍需你处理）"
+        : "审批档位已切到 " + mode;
+    await refresh();
+  } catch (err) {
+    state.textContent = err.message;
+    // 【定】失败要把选择器**拨回去**。留在用户选的那个值上，界面就会显示
+    // 一个服务端并不认可的档位 —— 而他会据此以为自己不会再被打扰。
+    await refresh();
+  }
 });
 
 const wsForm = document.getElementById("wsform");

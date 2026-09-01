@@ -18,7 +18,7 @@
  */
 
 import type { PreparedAction } from "../types/tool.js";
-import type { ApprovalPolicySnapshot } from "../types/run.js";
+import type { ApprovalPolicySnapshot, ExecutionPrivilege } from "../types/run.js";
 import { makeError, type RuntimeErrorRecord } from "../types/error.js";
 
 export type PolicyVerdict =
@@ -29,10 +29,18 @@ export type PolicyVerdict =
 export interface PolicyInput {
   action: PreparedAction;
   approvalPolicy: ApprovalPolicySnapshot;
+  /**
+   * 随 RunSpec 冻结的执行特权档位（ADR-0012）。
+   *
+   * 【定】它是**冻结值**，不是「当前设置」。判定必须对同一条 transcript
+   * 恒定：一次 resume 若用今天的档位去判昨天的 Action，同一个操作会得到
+   * 相反的裁决，而盘上看不出来（§18.3 那两维闸门是同一条理由）。
+   */
+  executionPrivilege: ExecutionPrivilege;
 }
 
 export function evaluatePolicy(input: PolicyInput): PolicyVerdict {
-  const { action, approvalPolicy } = input;
+  const { action, approvalPolicy, executionPrivilege } = input;
   const effect = action.resolvedEffect;
 
   /**
@@ -61,20 +69,55 @@ export function evaluatePolicy(input: PolicyInput): PolicyVerdict {
     effect.effectType === "WRITE" ||
     effect.effectType === "DELETE" ||
     effect.effectType === "EXECUTE";
-  if (mutates && effect.riskFacts.includes("OUTSIDE_WORKSPACE")) {
+  const outsideWorkspace = mutates && effect.riskFacts.includes("OUTSIDE_WORKSPACE");
+
+  /**
+   * ── ADR-0012：`UNRESTRICTED` 档把这条 DENY 换成 REQUIRE_APPROVAL ──────
+   *
+   * 上面那句「不能通过单次审批放行」在 `SANDBOXED` 档下**一个字没改**。
+   * ADR-0012 推翻的不是它的理由，而是它的**适用前提**：那句话说的是
+   * 「授权边界不该退化成每次问一下」，而 `UNRESTRICTED` 恰恰是一次
+   * **显式的、有名字的、写在启动参数里的**范围授权 —— 它不是单次审批。
+   *
+   * 【定】换成 `REQUIRE_APPROVAL` 而不是 `ALLOW`。理由是失败方向：
+   * 越界写在任何档位下都必须**至少经过审批这一跳**，这样它才会出现在
+   * `ApprovalRequested` / `ApprovalDecided` 事件对上、进 Trace、进界面。
+   * 直接 ALLOW 的话，一次写到 `$HOME` 的操作在事件流上与一次写到
+   * workspace 内的操作长得一模一样 —— 而这两件事的可挽回程度差着数量级。
+   *
+   * （AUTO 审批档下这一跳当然会被自动放行，但它**留下了记录**，
+   * 且 `decidedBy` 会如实写 `AUTO`。见 `ApprovalDecidedBy`。）
+   *
+   * 【定】`requiresApprovalFor` 恰好覆盖 WRITE/DELETE/EXECUTE，与 `mutates`
+   * 的定义重合，所以下面那条 `if` 本来就会接住它。这里**仍然显式写一支**，
+   * 而不是靠「反正会落到下面」—— 靠重合的两处定义维持正确性，
+   * 是本仓反复清理的形态（改了其中一个，另一个不会有任何征兆）。
+   */
+  if (outsideWorkspace) {
+    if (executionPrivilege === "SANDBOXED") {
+      return {
+        decision: "DENY",
+        error: makeError({
+          code: "POLICY_OUTSIDE_WORKSPACE",
+          source: "POLICY",
+          category: "AUTHORIZATION",
+          retryability: "AFTER_MODEL_CORRECTION",
+          sideEffectState: "NOT_STARTED",
+          safeMessage:
+            `写入目标 "${effect.scope.value}" 落在 workspace 授权范围之外，拒绝执行。` +
+            `读操作可以越界，写不行 —— 读错文件是信息问题，写错文件是不可逆损失。` +
+            `扩大写入范围需要新的明确授权，不能通过单次审批放行。`,
+        }),
+      };
+    }
     return {
-      decision: "DENY",
-      error: makeError({
-        code: "POLICY_OUTSIDE_WORKSPACE",
-        source: "POLICY",
-        category: "AUTHORIZATION",
-        retryability: "AFTER_MODEL_CORRECTION",
-        sideEffectState: "NOT_STARTED",
-        safeMessage:
-          `写入目标 "${effect.scope.value}" 落在 workspace 授权范围之外，拒绝执行。` +
-          `读操作可以越界，写不行 —— 读错文件是信息问题，写错文件是不可逆损失。` +
-          `扩大写入范围需要新的明确授权，不能通过单次审批放行。`,
-      }),
+      decision: "REQUIRE_APPROVAL",
+      // 【定】理由里必须点名「在 workspace 之外」。它会原样进审批面 ——
+      // 而这正是人在那一刻最需要知道、且从 `scope.value` 一行里看不出来的事。
+      reason:
+        `${effect.operation} → ${effect.scope.value}` +
+        `（**在 workspace 之外**；本次运行为 UNRESTRICTED 档，越界写不再被直接拒绝）` +
+        (effect.reversibility === "IRREVERSIBLE" ? "（不可逆）" : ""),
     };
   }
 

@@ -19,6 +19,76 @@ import type { ContextBudgetPolicy } from "./context.js";
 
 // ───────────────────────────────────────────────────────── AgentSpec
 
+/**
+ * 本次 Run 的执行特权档位（ADR-0012）。
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ * 【定】Runtime 只认得这两个值，**不知道"沙箱"是怎么实现的**。
+ *
+ * 名字刻意是 Runtime 自己的词而不是 `sandboxMode`：sbpl profile 的生成、
+ * `sandbox-exec` 的调用、命令解析全都住在 `tools/common/src/exec/`，
+ * 边界 grep 第 7 条（`sandbox-exec|analyzeCommand|sbpl` 不得进 packages）
+ * 守的就是这条。这里传递的是一个**档位**，工具侧自己决定它意味着什么 ——
+ * 与 `VerificationPort` / `artifactChecks` 同构。
+ *
+ * 【定】它必须**随 RunSpec 冻结**，理由与隔壁的 `timezone` 一字不差：
+ * resume 会用今天的档位去接一条昨天的 transcript，而盘上看不出来。
+ * 更糟的是这个字段决定的是"那些副作用当时有没有边界"——
+ * 一条在 UNRESTRICTED 下跑出来的 transcript，若 resume 时被当成 SANDBOXED，
+ * 事后没有任何东西能说出真相。
+ *
+ * 【定】不给"每次调用一个档位"的自由度。逐次可变意味着同一个工具在同一个
+ * Run 里声明相同而行为不同，而 §18.2 的三条恢复分支读的是冻结的工具声明。
+ * ══════════════════════════════════════════════════════════════════════
+ */
+export type ExecutionPrivilege =
+  /** 默认。工具侧的沙箱与 workspace 写边界全部生效。 */
+  | "SANDBOXED"
+  /** ADR-0012：沙箱不生效，`policy` 不再拒绝越界写。唯一还在的闸门是审批和人。 */
+  | "UNRESTRICTED";
+
+/**
+ * 从一份可能来自旧库的 AgentSpec 里读出执行特权档位。
+ *
+ * 【定】缺省是 `SANDBOXED`，而这**不是一个猜测**：`executionPrivilege`
+ * 之前，`UNRESTRICTED` 这个档位在本仓不存在 —— 任何一条没有这个字段的
+ * transcript，当时必然跑在沙箱里。所以这个默认值是一条**事实**，
+ * 与 `assertResumeWorkspaceMatches` 那个 `UNKNOWN_LEGACY` 不同类
+ * （那一条是"我无法核对"，这一条是"我知道当时是什么"）。
+ *
+ * 【定】收敛在这一个函数里，不要在读取点各写一个 `?? "SANDBOXED"` ——
+ * 那样每多一个读取点就多一个可能写错方向的地方，而写错的方向是
+ * "把一条无沙箱的记录读成有沙箱"。
+ */
+export function executionPrivilegeOf(agentSpec: AgentSpecSnapshot): ExecutionPrivilege {
+  const raw = agentSpec.executionPrivilege as unknown;
+  /**
+   * ── 【定】缺字段 → SANDBOXED（事实）；**非法值 → 抛**（二次评审 P2-2）──
+   *
+   * 这两件事必须分开，而第一版把它们折叠成了一句
+   * `=== "UNRESTRICTED" ? … : "SANDBOXED"` —— 于是 `null`、拼错的枚举、
+   * 被截断的字符串统统变成 SANDBOXED，**掩盖数据库损坏**。
+   *
+   * 后果具体：一条本来 UNRESTRICTED 的 Run 记录损坏后被读成 SANDBOXED，
+   * 而 §18.3 第三维闸门比的正是这个值 —— 于是它用 `--sandbox on` 恢复时
+   * **闸门会放行**，那条 transcript 从此在盘上自称"一直有沙箱"。
+   * 这与 current-only 那批「不保留兼容层、损坏数据 fail-fast」是同一条纪律。
+   *
+   * 【定】缺字段那一支**保留**，它不是兼容层：`UNRESTRICTED` 这一档在
+   * ADR-0012 之前不存在，所以「没有这个字段」推出「当时在沙箱里」是一条
+   * **事实**，不是猜测。与 workspace 那条 `UNKNOWN_LEGACY` 不同类
+   * （那一条是"我无法核对"，这一条是"我知道当时是什么"）。
+   */
+  if (raw === undefined || raw === null) return "SANDBOXED";
+  if (raw === "SANDBOXED" || raw === "UNRESTRICTED") return raw;
+  throw new Error(
+    `RunSpec 的 executionPrivilege 是一个非法值：${JSON.stringify(raw)}（agentSpec ` +
+      `${String(agentSpec.agentSpecId)}）。合法值只有 "SANDBOXED" / "UNRESTRICTED"。\n` +
+      `这条记录已经损坏 —— 不按 SANDBOXED 兜底，因为兜底会让「这个 Run 当时到底` +
+      `有没有沙箱」永久失真，而 §18.3 的第三维闸门比的正是这个值。`,
+  );
+}
+
 export interface ModelConfigurationSnapshot {
   endpointId: EndpointId;
   modelId: string;
@@ -39,6 +109,15 @@ export interface AgentSpecSnapshot {
    * 必须随 RunSpec 冻结，否则 Replay 会在不同时区下重放出不同的上下文。
    */
   timezone: string;
+  /**
+   * 本次 Run 的执行特权档位（ADR-0012）。见 `ExecutionPrivilege`。
+   *
+   * 【定】读它一律走 `executionPrivilegeOf()`，不要直接解构 ——
+   * 旧库里的 RunSpec 没有这个字段，而直接解构拿到的是 `undefined`，
+   * 它在 `=== "SANDBOXED"` 与 `=== "UNRESTRICTED"` 两个判别式下**都是假**，
+   * 于是两条分支都不走，落到哪一支取决于是谁先写的那个 if。
+   */
+  executionPrivilege: ExecutionPrivilege;
   toolSnapshots: ToolSnapshot[];
   contextPolicy: ContextBudgetPolicy;
   loopPolicy: LoopPolicySnapshot;

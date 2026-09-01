@@ -17,6 +17,7 @@ import type {
   TrustSummary,
 } from "../types/context.js";
 import type { ContextMessage } from "../types/transcript.js";
+import type { ExecutionPrivilege } from "../types/run.js";
 import type { ModelProtocolPort } from "../ports/index.js";
 import type { IdGeneratorPort } from "../ports/index.js";
 import { asId, type ContextFrameId, type ModelInvocationId, type RunId } from "../types/ids.js";
@@ -40,6 +41,16 @@ export interface CompileDeps {
    * 验收脚本用 FakeClock，硬编码当前时间会让帧内容不可复现。
    */
   timezone: string;
+  /**
+   * 随 AgentSpec 冻结的执行特权档位（ADR-0012）。
+   *
+   * 【定】它只在 `UNRESTRICTED` 时产生一条 SYSTEM_NOTICE。理由不是省 token，
+   * 是**只有那一档才需要更正一句已经说出口的话**：`run_shell` 的
+   * description 里写着三条沙箱规则，而那三条在 UNRESTRICTED 下不成立。
+   * M1 那条教训（description 承诺「系统临时目录」而实现只放行 per-call
+   * $TMPDIR，模型照着写 /tmp 白花一轮）说的就是**模型是那句话唯一的读者**。
+   */
+  executionPrivilege: ExecutionPrivilege;
   /**
    * 输出预算恢复用（V05 §16.1）。
    *
@@ -237,6 +248,33 @@ function buildFrame(messages: ContextMessage[], deps: CompileDeps): ContextFrame
    * 【定】不得反过来 —— 删掉这条注入、改由模型自己调 now，
    * 那正是上面那句实测记录否掉过的方案。
    */
+  /**
+   * ── 执行特权档位（ADR-0012）─────────────────────────────────────────────
+   *
+   * 【定】排在时间事实**之前**。时间事实每段都变，是前缀缓存的第一个断点；
+   * 而这一条在一个 Run 内恒定 —— 放在它后面等于把一段本可稳定的前缀
+   * 挪到断点之后，白白让它每段重算（端点声明 cacheMatching = STRICT_PREFIX）。
+   *
+   * 【定】只在 UNRESTRICTED 时出现，且措辞必须是**更正**而不是补充。
+   * 模型手里同时有 `run_shell` description 里那三条沙箱规则，两者冲突时
+   * 它得知道听谁的 —— 说不清楚的话，一个"保守"的模型会继续按沙箱规划命令，
+   * 而那正好让这个档位白开。
+   */
+  if (deps.executionPrivilege === "UNRESTRICTED") {
+    items.push(
+      finishItem(
+        {
+          kind: "SYSTEM_NOTICE",
+          source: { kind: "SYSTEM" },
+          trust: "SYSTEM_TRUSTED",
+          protocolRole: "ORDINARY",
+          content: { type: "text", text: UNRESTRICTED_FACT },
+        },
+        deps,
+      ),
+    );
+  }
+
   items.push(
     finishItem(
       {
@@ -289,6 +327,26 @@ function buildFrame(messages: ContextMessage[], deps: CompileDeps): ContextFrame
   frame.contentHash = hashFrame(frame);
   return frame;
 }
+
+/**
+ * UNRESTRICTED 档的更正声明（ADR-0012）。
+ *
+ * 【定】它是一条**常量**，不拼任何运行期变量 —— 一个 Run 内恒定是前缀缓存
+ * 能覆盖它的前提（见上面插入点的说明）。
+ *
+ * 【定】不写"你现在可以为所欲为"这类鼓励性措辞。它要传达的是两件事实
+ * （旧规则失效、你仍然要对后果负责），不是一句授权。措辞往鼓励方向偏，
+ * 换来的是模型更愿意用 `rm -rf` 这种一步到位的写法 —— 而这一档下
+ * 没有任何东西会拦住它。
+ */
+const UNRESTRICTED_FACT =
+  "[系统事实] 本次运行的执行特权档位是 UNRESTRICTED（无沙箱）。\n" +
+  "run_shell 的工具说明里那几条沙箱规则本次**不生效**：写入不再限于 workspace 与 $TMPDIR、" +
+  "命令默认可以联网（不需要传 allow_network）、写到 workspace 之外也不会被系统拒绝。\n" +
+  "仍然生效的是：读不到凭证文件（.env / .ssh / .aws），以及 read_file / search 的读黑名单。\n" +
+  "这意味着你的命令会直接作用在用户的真实机器上，没有任何沙箱兜底。" +
+  "删除、覆盖、移动这类操作请先确认目标路径，优先把产物写在 workspace 里；" +
+  "只有任务确实要求时才动 workspace 之外的东西。";
 
 /**
  * 把 ClockPort 的时间戳渲染成模型能直接引用的事实。

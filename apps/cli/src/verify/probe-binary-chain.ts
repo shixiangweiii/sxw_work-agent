@@ -35,6 +35,7 @@ const ctx: ToolExecutionContext = {
   workspaceRoot: process.cwd(),
   onProgress: (m: string) => console.log(`  [progress] ${m}`),
   timezone: "Asia/Shanghai",
+  executionPrivilege: "SANDBOXED",
 };
 
 const out = await executeFetchUrl({ url }, ctx);

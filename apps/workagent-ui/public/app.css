@@ -73,6 +73,12 @@ main { display: grid; grid-template-columns: 290px 1fr; height: calc(100vh - 45p
 
 #newrun { display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px; }
 #newrun label { font-size: 12px; color: var(--fg-dim); }
+/*
+ * 审批档位选择器（ADR-0012）。样式与 #wspicker 一致 —— 两者都是
+ * 「换一个会改变后续所有行为」的选择器，看起来就该是同一类控件。
+ */
+#approvalmode { width: 100%; background: var(--bg-2); color: var(--fg);
+  border: 1px solid var(--line); border-radius: 4px; padding: 5px 6px; font: inherit; }
 
 textarea, input[type="text"] {
   width: 100%;

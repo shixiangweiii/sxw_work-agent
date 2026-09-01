@@ -35,7 +35,7 @@ import type {
 } from "@workagent/harness-runtime";
 import { asId, makeError } from "@workagent/harness-runtime";
 import { artifactKindOf } from "../artifact-checks/index.js";
-import { classifyFsError, isInsideWorkspace, outsideWorkspaceError, resolveToolPath } from "./fs-common.js";
+import { classifyFsError, resolveToolPath, writeBoundaryRefusal } from "./fs-common.js";
 
 export const writeFileDefinition: ToolDefinition = {
   id: asId("tool_write_file"),
@@ -136,13 +136,11 @@ export async function executeWriteFile(
 
   // 【定】写保留 workspace 边界（决 3）。这是执行侧的第二道，
   // EffectResolver ＋ Policy 已经算过一次 —— 两道都不能省（V05 §22.1）。
-  if (!isInsideWorkspace(ctx.workspaceRoot, target)) {
-    return {
-      ok: false,
-      output: "",
-      sideEffectState: "NO_EFFECT",
-      error: outsideWorkspaceError(input.path, "写入"),
-    };
+  // 【定】判定走 `writeBoundaryRefusal`（唯一一份），不要在这里内联 ——
+  // ADR-0012 加了 executionPrivilege 这一维，四个写工具漏改任何一处就会分叉。
+  const refusal = writeBoundaryRefusal(ctx, target, "写入", input.path);
+  if (refusal) {
+    return { ok: false, output: "", sideEffectState: "NO_EFFECT", error: refusal };
   }
 
   if (ctx.signal.aborted) {

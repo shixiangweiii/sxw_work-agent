@@ -21,6 +21,7 @@
  */
 
 import { existsSync, realpathSync } from "node:fs";
+import type { ExecutionPrivilege } from "@workagent/harness-runtime";
 import {
   DENIED_BASENAMES,
   DENIED_BASENAME_PREFIXES,
@@ -110,6 +111,29 @@ export interface SandboxProfileOptions {
   tmpDir: string;
   /** 是否放行网络。默认 false。 */
   allowNetwork: boolean;
+  /**
+   * 执行特权档位（ADR-0012）。默认 `SANDBOXED`。
+   *
+   * ══════════════════════════════════════════════════════════════════════
+   * 【定】`UNRESTRICTED` **不是"不套沙箱"**，是一份只剩凭证读禁的窄 profile。
+   *
+   * 这一条是被自己的判据（B10）逼出来的。第一版实现的是"档位为
+   * UNRESTRICTED 就直接 spawn /bin/bash"，理由写得也很像那么回事：
+   * 「留着 sandbox-exec、给一份 allow-all 的 profile，会让它在 ps 里、
+   * 在读代码的人眼里都还是『跑在沙箱里』」。
+   *
+   * 那段话本身没错 —— 但它论证的是**allow-all** profile，
+   * 而 ADR-0012 拍板的范围表里凭证读禁（第 4 条）是**保留**的。
+   * 直接 spawn 的后果是把它一起拆了：实测 `cat .env.local` 当场读到 SECRET。
+   * 也就是说那个"更诚实"的写法，恰恰让实现与已经写下的范围表不符 ——
+   * 本仓管这叫「声明与实现不符」，而这次声明是我自己在同一批里写的。
+   *
+   * 现在的 UNRESTRICTED profile 真的在拦一件事，所以它不是装饰：
+   *   拆掉：`deny file-write*`（写边界）、`deny network*`（网络）
+   *   保留：`deny file-read*` 那批（.env / .ssh / .aws …）
+   * ══════════════════════════════════════════════════════════════════════
+   */
+  executionPrivilege?: ExecutionPrivilege;
 }
 
 /**
@@ -124,6 +148,21 @@ export interface SandboxProfileOptions {
  */
 export function buildSandboxProfile(opts: SandboxProfileOptions): string {
   const lines: string[] = ["(version 1)", "(allow default)"];
+
+  /**
+   * ── ADR-0012：UNRESTRICTED 只保留读黑名单那一段 ────────────────────────
+   *
+   * 【定】提前 return，**不要**写成「在下面每一条 deny 上挂一个 if」。
+   * 那样这个函数会变成"两份 profile 交织在一起"，而读的人要在脑子里
+   * 分别求值两次才知道任一档实际生成了什么 —— 沙箱是本仓唯一一处
+   * "判错就真的没有边界"的地方，它的可读性是安全属性的一部分。
+   */
+  if (opts.executionPrivilege === "UNRESTRICTED") {
+    for (const rule of toSandboxDenyRules()) {
+      lines.push(`(deny file-read* ${rule})`);
+    }
+    return lines.join("\n");
+  }
 
   /**
    * ── 写：全禁，然后只开 workspace 与 tmp ──

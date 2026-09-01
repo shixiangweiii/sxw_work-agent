@@ -37,7 +37,7 @@ import { realpathSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import type { WorkspaceId } from "../types/ids.js";
 import { asId } from "../types/ids.js";
-import type { WorkspaceExecutionSnapshot } from "../types/run.js";
+import type { ExecutionPrivilege, WorkspaceExecutionSnapshot } from "../types/run.js";
 
 /**
  * 目录的真实路径。目标不存在时向上找**最近一个存在的祖先**再拼回去 ——
@@ -63,6 +63,35 @@ export function canonicalWorkspacePath(root: string): string {
       probe = parent;
     }
   }
+}
+
+/**
+ * 这个路径落在 workspace 内吗 —— **Artifact 归属判定专用**（ADR-0012 收口）。
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ * 【定】它与 `tools/common` 的 `isInsideWorkspace` **不是重复的两份**，
+ * 因为它们问的不是同一个问题，而且从 ADR-0012 起会**刻意给出不同答案**：
+ *
+ *   tools/common  「这个工具能不能往这里写？」→ UNRESTRICTED 下**能**
+ *   这里           「这份东西算不算本 Run 的交付物？」→ 任何档位下**都不算**
+ *
+ * 把两者合成一个函数，等于把 ADR-0012 刚刚分开的两件事重新并回去 ——
+ * 那正好是本仓反复清理的形态（一个函数同时回答两个问题，
+ * 改其中一个语义时另一个静默跟着变）。
+ *
+ * 【定】它住在 Runtime 侧而不是工具侧，因为它守的是一条 **Runtime 不变量**：
+ * `deliveredArtifactIds` 里不许出现 Atlas 无法证明其归属的东西（§17）。
+ * 工具侧那道（`run_shell` 早就有）是第二道，两道都不能省（V05 §22.1）。
+ *
+ * 【定】解析走 `canonicalWorkspacePath`，**不新写一套 realpath**。
+ * 词法前缀不够：`effect-resolver.ts` 的 `riskFactsFor` 就是纯词法的，
+ * 而一个 workspace 内指向外面的符号链接能从那里一路走到底。
+ * ══════════════════════════════════════════════════════════════════════
+ */
+export function isPathInsideWorkspace(root: string, target: string): boolean {
+  const realRoot = canonicalWorkspacePath(root);
+  const realTarget = canonicalWorkspacePath(resolve(root, target));
+  return realTarget === realRoot || realTarget.startsWith(`${realRoot}/`);
 }
 
 /**
@@ -125,5 +154,48 @@ export function assertResumeWorkspaceMatches(
       `后续所有相对路径的读写、以及自动放行的 workspace 判定，全部会以新目录为根 ——` +
       `**旧 Run 会在错误的地方产生副作用，而盘上看不出来**。\n` +
       `要么把服务切回原 workspace，要么另起一个新 Run。`,
+  );
+}
+
+/**
+ * §18.3 的**第三维**：执行特权档位（ADR-0012）。
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ * 【定】它与端点、workspace 两道并排，理由同构：恢复一条旧 transcript 之前，
+ * 要先确认「当时的执行条件今天还成立」。而这一维守的是最硬的那件事 ——
+ * **那些副作用当时有没有边界**。
+ *
+ * 不守会怎样，两个方向都很难看：
+ *
+ *   冻结 UNRESTRICTED → 今天用 SANDBOXED 接
+ *     模型接着上一轮的计划往下写（它在受信事实里被告知过没有沙箱），
+ *     命令突然开始被内核拒 —— 而拒绝理由指向一条它读不到的规则。
+ *
+ *   冻结 SANDBOXED → 今天用 UNRESTRICTED 接
+ *     更糟：一条**在有沙箱的前提下被批准过**的计划，后半段跑在没有沙箱的
+ *     机器上。人当时批准的那次审批，批的不是这件事。
+ *
+ * 【定】没有 `UNKNOWN_LEGACY` 这一档。旧库里读不到这个字段时
+ * `executionPrivilegeOf()` 返回 `SANDBOXED`，而那是一条**事实**不是猜测
+ * （那一档之前不存在）—— 所以这里永远拿得到一个确定的值可比。
+ * ══════════════════════════════════════════════════════════════════════
+ */
+export function assertResumeExecutionPrivilegeMatches(
+  frozen: ExecutionPrivilege,
+  current: ExecutionPrivilege,
+): void {
+  if (frozen === current) return;
+  throw new Error(
+    `拒绝 resume：执行特权档位与这个 Run 启动时不是同一档。\n` +
+      `  Run 冻结的是   ${frozen}\n` +
+      `  当前进程装配的 ${current}\n` +
+      (frozen === "UNRESTRICTED"
+        ? `这个 Run 是在**无沙箱**下跑的，现在的进程有沙箱：后半段会开始撞上一条` +
+          `模型读不到的规则，而它已经按无沙箱规划过命令。\n` +
+          `  用 --sandbox off 恢复它。\n`
+        : `这个 Run 是在**沙箱内**跑的，现在的进程没有沙箱：一条在有边界的前提下` +
+          `被批准过的计划，后半段会跑在没有边界的机器上 —— 人当时批准的不是这件事。\n` +
+          `  用 --sandbox on 恢复它（那是默认值，去掉 --sandbox off 即可）。\n`) +
+      `要么换回原来那一档，要么另起一个新 Run。`,
   );
 }

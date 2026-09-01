@@ -26,9 +26,11 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import {
   asId,
+  executionPrivilegeOf,
   readBudgetAxes,
   readRunFacts,
   ToolRegistry,
+  type ExecutionPrivilege,
   type RecoveryItem,
   type RunEvent,
   type RunId,
@@ -41,9 +43,12 @@ import { isInsideWorkspace } from "@workagent/tools-common";
 import {
   autoGrantVerdict,
   compose,
+  describeModes,
+  fullAccessWarning,
   gitProvenance,
   hostOf,
   REPO_ROOT,
+  type ApprovalMode,
   type Composed,
   type ComposeOptions,
   type EndpointChoice,
@@ -65,6 +70,23 @@ export interface RunHostOptions {
   endpoint: EndpointChoice;
   /** trace JSONL 的目录。与 CLI 同一个约定（`.workagent-runs/<runId>.jsonl`）。 */
   traceDir: string;
+  /**
+   * 服务启动时的审批档位（ADR-0012）。默认 `DEFAULT`。
+   *
+   * 【定】它只是**初值**。之后由界面上的开关改，权威副本是
+   * `RunHost.approvalMode` 那个字段 —— 而不是这里。
+   * 两处都当权威的话，一次 workspace 切换（会重建 RunHost）就会把
+   * 用户拨过的档位悄悄弹回启动值。
+   */
+  approvalMode?: ApprovalMode;
+  /**
+   * 执行特权档位（ADR-0012）。默认 `SANDBOXED`。
+   *
+   * 【定】与 `approvalMode` 不同，它**不能在运行中改**：它随 RunSpec 冻结
+   * （见 `ExecutionPrivilege`），改了只能对下一个 Run 生效。
+   * 服务这一层因此把它当成不可变配置 —— 要换得重启 `npm run ui`。
+   */
+  executionPrivilege?: ExecutionPrivilege;
   /** 验收脚本用：注入脚本化 ModelPort、子集工具、固定时区等。 */
   composeOverrides?: Pick<
     ComposeOptions,
@@ -160,18 +182,46 @@ export class RunHost {
    */
   private foregroundHolder = "";
 
+  /**
+   * 当前审批档位。**可变，且这是它的权威副本**（ADR-0012）。
+   *
+   * 【定】它不落盘。与 CLI 那个 `elevated` 集合同一条理由：一个跨进程
+   * 存活的「已经不问了」，会让下次启动时的闸门状态取决于上次的某句话，
+   * 而盘上看不出来。重启 `npm run ui` 一律回到启动参数给的那一档。
+   *
+   * 【定】它不进 `RunSpec`。审批档位不参与任何恢复语义 ——
+   * 每一次决定的真实来源由 `ApprovalDecided.decidedBy` 逐条记着，
+   * 那比一个 Run 级的概括字段准确（人可以跑到一半才切）。
+   */
+  private approvalMode: ApprovalMode;
+  /**
+   * 被人说过「本次 Run 不再问」的 Run。
+   *
+   * 【定】进了这个集合的 Run，其后续放行记 `decidedBy: "AUTO"` —— 与人
+   * 逐条点的 `HUMAN` 事后可区分。人只看过那一条命令，后面那些他没看过。
+   */
+  private readonly elevatedRuns = new Set<string>();
+
   constructor(private readonly opts: RunHostOptions) {
+    this.approvalMode = opts.approvalMode ?? "DEFAULT";
     this.composed = compose({
       workspaceRoot: opts.workspaceRoot,
       dbPath: opts.dbPath,
       endpoint: opts.endpoint,
+      // ADR-0012：随 RunSpec 冻结的那一档。服务这一层视为不可变配置。
+      executionPrivilege: opts.executionPrivilege ?? "SANDBOXED",
       // 【定】三条通道全部走浏览器，用的是与 CLI 同一批注入点（决 4）。
       approvalDecider: this.pendingHub.approvalDecider(
         (a) => autoGrantVerdict(a, opts.workspaceRoot),
+        () => this.approvalMode,
+        (runId) => this.elevatedRuns.has(runId),
         (runId) => this.aborterFor(runId).signal,
       ),
       handoff: this.pendingHub.handoffChannel(() => this.foregroundHolder),
-      question: this.pendingHub.questionChannel(() => this.foregroundHolder),
+      question: this.pendingHub.questionChannel(
+        () => this.foregroundHolder,
+        () => this.approvalMode,
+      ),
       /**
        * 【定】Trace 仍然落盘，Web 入口不例外。
        *
@@ -187,6 +237,79 @@ export class RunHost {
     });
   }
 
+  // ──────────────────────────────────────── 档位（ADR-0012）
+
+  /** 【定】唯一出处：`opts` 里那个不可变配置。不缓存第二份。 */
+  private executionPrivilege(): ExecutionPrivilege {
+    return this.opts.executionPrivilege ?? "SANDBOXED";
+  }
+
+  /**
+   * 拨审批档位。**立刻对正在跑的 Run 生效**（decider 每次调用重新读）。
+   *
+   * ── 【定】它不影响已经在等的那些审批请求 ────────────────────────────────
+   *
+   * 一个已经弹出来的 `UiPending` 是一个**正在 await 的 Promise**，
+   * 拨档位不会把它 resolve 掉。这是对的：那一条已经问出口了，人看得见它，
+   * 让它凭空消失比多问一次更糟（界面上一个请求自己不见了，
+   * 而用户不知道它被批了还是被拒了）。要处理它就点按钮。
+   *
+   * 换句话说，档位管的是「**下一次**要不要问」。
+   */
+  setApprovalMode(mode: ApprovalMode): void {
+    this.approvalMode = mode;
+    /**
+     * 【定】切到 CONFIRM **同时清掉所有逐 Run 提升**（二次评审 P1-3）。
+     *
+     * 判别式是 `mode === "AUTO" || isElevated(runId)`，所以不清的话，
+     * 一个点过「本次 Run 不再问」的 Run 会无视用户明确切回来的 CONFIRM ——
+     * 界面说"每一步都问"，而它一步都不问。
+     *
+     * 【定】只在 CONFIRM 时清，不在 DEFAULT 时清。DEFAULT 的语义是
+     * 「有限自动放行」，它对"我已经看过这个 Run 的命令了"这句话没有异议；
+     * CONFIRM 是**用户明确要求收紧**，那句话必须压过之前的任何放宽。
+     */
+    if (mode === "CONFIRM") this.elevatedRuns.clear();
+  }
+
+  /**
+   * 「本次 Run 不再问」。
+   *
+   * ══════════════════════════════════════════════════════════════════════
+   * ⚠️ **这段注释此前描述了一个不存在的机制**（二次评审 P1-3，R-11 同形态）。
+   *
+   * 原文写的是「只加不减、不提供撤销入口 —— 撤销等价于把档位拨回去，
+   * 已经有入口了」。回源：decider 的判别式是
+   * `mode === "AUTO" || isElevated(runId)`，**拨回 CONFIRM 根本盖不住 elevation**。
+   * 于是用户点了「不再问」之后又明确切回 CONFIRM，界面回一句
+   * 「审批档位已切到 CONFIRM」，而这个 Run 继续自动放行 ——
+   * **界面显示的安全状态与真实行为相反，且没有任何恢复闸门的入口。**
+   *
+   * 处置是**把那个入口真的做出来**（`revokeRunElevation`），不是改注释：
+   * 「切到更严的档位应当恢复审批」是用户唯一可能的预期，
+   * 而一条闸门如果只能单向打开，它就不是闸门。
+   * ══════════════════════════════════════════════════════════════════════
+   */
+  elevateRun(runId: string): void {
+    this.elevatedRuns.add(runId);
+  }
+
+  /**
+   * 撤销逐 Run 提升。
+   *
+   * 【定】两个调用点，语义不同但方向一致：
+   *   · `setApprovalMode(CONFIRM)` —— 用户明确要求"每一步都问"，
+   *     那句话必须对**正在跑的这个 Run** 也成立；
+   *   · 应答失败回滚（server.ts 的 P2-3）—— 那次提升从来没被人要过。
+   */
+  revokeRunElevation(runId: string): void {
+    this.elevatedRuns.delete(runId);
+  }
+
+  isRunElevated(runId: string): boolean {
+    return this.elevatedRuns.has(runId);
+  }
+
   // ──────────────────────────────────────────────────────────── 只读
 
   info(): UiServiceInfo {
@@ -200,6 +323,8 @@ export class RunHost {
      * 这种错看起来很正常（数字合理，只是偏小），最难被发现。
      */
     const tools = this.composed.tools;
+    const privilege = this.executionPrivilege();
+    const warning = fullAccessWarning(this.approvalMode, privilege);
     return {
       workspaceRoot: this.opts.workspaceRoot,
       dbPath: this.opts.dbPath,
@@ -209,8 +334,20 @@ export class RunHost {
       endpointHost: hostOf(this.composed.endpointBaseUrl),
       profileId: String(this.composed.profile.id),
       modelId: this.composed.profile.modelId,
-      approvalMode:
-        "workspace 内的写自动放行；IRREVERSIBLE（追加/删除）与 EXECUTE 停下来问；越界写直接拒绝",
+      /**
+       * 【定】由档位推出，**不是硬编码描述串**（关掉 S4-6）。
+       *
+       * 它此前是一句写死的话 —— `autoGrantVerdict` 的第二事实来源，
+       * 档位改了它会悄悄漂移，而漂移的形态是「界面上写着一句关于闸门的、
+       * 听起来很确定的假话」。现在两个入口读的是同一个 `describeModes()`。
+       */
+      approvalMode: describeModes(this.approvalMode, privilege),
+      approvalModeId: this.approvalMode,
+      executionPrivilege: privilege,
+      // 【定】算一次、判一次。原来这里连调三次并用 `!` 断非空 ——
+      // 而本仓刚因为 `renderError(outcome.error!)` 那个非空断言吃过亏
+      // （一个可选字段上的断言掩着一条真实的崩溃路径）。
+      ...(warning ? { fullAccessWarning: warning } : {}),
       toolNames: tools.map((t) => t.definition.name),
       // 【定】调 `ToolRegistry` 的那一份，**不抄公式**。
       // 这里此前写着 `tools.length * 180`，而 §16.1 那个系数的权威副本在
@@ -373,6 +510,8 @@ export class RunHost {
         modelId: spec.agentSpec.model.modelId,
         endpointProfileRef: spec.agentSpec.model.endpointProfileRef,
         timezone: spec.agentSpec.timezone,
+        // 【定】冻结值，不是 `this.executionPrivilege()`（那是当前服务档位）。
+        executionPrivilege: executionPrivilegeOf(spec.agentSpec),
         toolCount: spec.agentSpec.toolSnapshots.length,
         createdAt: spec.createdAt,
         systemPrompt: spec.agentSpec.systemPrompt,
@@ -948,6 +1087,9 @@ export class RunHost {
         // 任务原文由 header 承载；Web 段起跑时它已经在 RunSpec 里。
         task: this.taskOf(rec.runId),
         workspaceRoot: this.opts.workspaceRoot,
+        // 【定】与 CLI header 同一个字段（P2-5）。两个入口的 trace 要能
+        // 用同一套字段读，否则「Web 段有没有沙箱」得去翻另一处。
+        executionPrivilege: this.executionPrivilege(),
         timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
         startedAt: new Date().toISOString(),
         // 【定】标出这一段是谁跑的。CLI 段与 Web 段在同一个文件里，

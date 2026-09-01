@@ -16,6 +16,179 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 当前状态
 
+### auto 模式 / 完全权限（2026-09-01）：审批与执行特权拆成两条正交的轴
+
+依据 [ADR-0012](sxw_aicoding/ADR/0012-审批与执行特权是两条正交的档位轴.md)。
+起因是**一次真实的实测抱怨**：跑「把 B 站 opus 页的图片下载下来打包成 images.zip」
+（Run `run_75f0d6afafa6`）被要求点了十几次确认。
+
+```bash
+npm run ui  -- --approval auto                    # 不再问，沙箱仍在
+npm run dev -- --approval auto --sandbox off      # 完全权限：**没有任何闸门**
+```
+
+`verify:all` **198 → 221 条**。
+
+> ### 【定】逐条回源之后，真正的缺口不是"没有 auto 档"，是**Web 侧一个逃生口都没有**
+>
+> CLI 一直有 `--yes-all`；Web 的 `RunHost` 把 `autoGrantVerdict` 写死注入，
+> service 的参数表里根本没有这个开关。而浏览器任务**必须**用 `npm run ui`
+> （MCP 进程绑会话）。**于是用户被逼到了唯一没有逃生口的那个入口上。**
+>
+> 十几次里 ≈10 次来自 `run_shell`：`analyzeCommand` 判 EXECUTE 的规则是
+> 「有任一 shell 元字符」，而那次 10 条命令**每条都含元字符**。
+> 其余来自 MCP 浏览器工具（`tierOf` 默认 `execute`）。
+
+> ### 【定】"拆沙箱"底下捆着**七件**事，只拆其中三件
+>
+> | # | 限制 | 决定 |
+> |---|---|---|
+> | 1 | `run_shell` 写不出 workspace ＋ `$TMPDIR` | **拆** |
+> | 2 | `run_shell` 默认禁网 | **拆** |
+> | 3 | 子进程 env 白名单 | 不拆 |
+> | 4 | 读不到 `.env` / `.ssh` / `.aws` | 不拆 |
+> | 5 | workspace 外的写被 policy `DENY` | **拆**（改走审批） |
+> | 6 | `read_file` / `search` 读黑名单 | 不拆 |
+> | 7 | `fetch_url` 拒私网 | 不拆 |
+>
+> **第 5 条真正的消费者是四个路径域的写工具**（`write_file` / `edit_file` /
+> `append_log` / `slow_write`），**不是 `run_shell`** —— 二次复核回源更正的：
+> `OUTSIDE_WORKSPACE` 只由 `effect-resolver.ts` 为路径域工具产出，
+> `ShellEffectResolver` 从不产出它，`run_shell` 一直只被沙箱拦。
+> 第 3/4/6 不拆的理由是同一条：对任何真实任务零收益，拆了只增加凭证泄漏面。
+> **第 7 条明确不动** —— ADR-0011 刚拍板"两个工具对同一件事给出相反答案是刻意的，
+> 否则下一个人会来统一其中一个"，拆它就是那个"下一个人"。
+
+> ### 【定】UNRESTRICTED **不是**「不套沙箱」，是一份只剩凭证读禁的窄 profile
+>
+> **这一条是被我自己写的判据（`verify:shell` B10）当场逼出来的。**
+> 第一版实现的是「档位为 UNRESTRICTED 就直接 `spawn("/bin/bash")`」，
+> 理由写得也很像那么回事：「留着 sandbox-exec 给一份 allow-all 的 profile，
+> 会让它在 `ps` 里、在读代码的人眼里都还是『跑在沙箱里』」。
+>
+> 那段话没错，**但它论证的是 allow-all profile，而范围表里凭证读禁是「不拆」的**。
+> 直接 spawn 把它一起拆了：`cat .env.local` 当场读到 SECRET。
+> 那个看起来"更诚实"的写法，恰恰让实现与**同一批里我自己刚写下的范围表**不符。
+>
+> 连带：`isSandboxAvailable()` 那道闸门**两档都要过**——
+> 少了它，UNRESTRICTED 会在非 darwin 上悄悄退化成"连凭证读禁也没有"。
+
+> ### 【定】两条轴的生命周期不同，这是代码事实不是设计偏好
+>
+> | | 启动参数 | 提交时选 | 运行中切 | 「本次 Run 不再问」 |
+> |---|---|---|---|---|
+> | 审批 | ✅ | ✅ | ✅ | ✅ |
+> | 执行特权 | ✅ | ✅ | ❌ 只对下一个 Run | 不适用 |
+>
+> 审批档位住在 `ApprovalDecider` 注入点上，不进 RunSpec —— 技术前提是
+> **档位传的是读函数不是值**（传值＝钉死在 compose 那一刻，界面开关会是死的）。
+>
+> 执行特权不行：`commonTools` 是模块级常量数组，`run_shell` 拿得到的只有执行期
+> `ctx`。先例是 `ToolExecutionContext.timezone`（「随 AgentSpec 冻结…Replay 要求
+> 时区随 Run 冻结而不是随重放机器变」），而这里的理由更硬：它决定的是
+> **那些副作用当时有没有边界**。于是 §18.3 多了**第三维**闸门
+> （`assertResumeExecutionPrivilegeMatches`），与端点、workspace 并排。
+>
+> 【定】旧库缺这个字段时按 `SANDBOXED` 读，而那**不是猜测**：那一档之前不存在。
+> 与 workspace 那条 `UNKNOWN_LEGACY` 不同类（那是"我无法核对"，这是"我知道"）。
+
+> ### 【定】必须同时付的账：**谁批的，事后要能区分**
+>
+> 在此之前 `--yes-all` 的无条件批准与一个人亲手敲 `y`，在 `ApprovalDecided` 上
+> **一个字都不差**（都是不带 reason 的 `{approved:true}`）。
+> 新增 `decidedBy`：`HUMAN` / `AUTO` / `AUTO_GRANT` / `UNDECLARED`。
+>
+> **Runtime 不给它兜底成 `HUMAN`** —— 没声明就记 `UNDECLARED`，那是一句真话；
+> 记 `HUMAN` 是假话，而假话在事实表里比空白贵得多。
+> 「本次 Run 不再问」的**第一次仍记 `HUMAN`**、之后记 `AUTO`：人只看过那一条，
+> 都记 HUMAN 等于替他宣称"我逐条批准过全部"。
+
+> ### 【定】AUTO 档下另两条通道的处置**相反**（ADR-0008 的直接后果）
+>
+> `ask_user`「你来定」→ 没人回答不是失败 → **立刻 NO_ANSWER**；
+> `request_handoff`「你去做」→ 没人接管就是失败 → **照样等人**。
+> 自动化的是"要不要问你"，不是"要不要有人去做那件事"。
+> AUTO 档跑浏览器任务时模型请你去登录，那一停是有价值的。
+
+> ### 【定】UNRESTRICTED 下「这条命令没联网」是一句说不出口的话
+>
+> `allow_network` 在 SANDBOXED 下是被内核强制的开关，所以「没传＝没联网」是事实；
+> UNRESTRICTED 下没有那条 deny，进程无条件有网。照旧只按 `allow_network` 记
+> `DATA_LEAVES_HOST` 的话，一条 `curl` 了半个互联网的命令与一条纯本地命令
+> 在 `riskFacts` 上**完全一样**。处置是**如实记「无法排除」**
+> （先例：`effect-resolver.ts` 对解析不了的 URL 写 `"(无法解析)"`）。
+
+> ⚠️ **五条代价，写在 ADR-0012 里**：① AUTO ＋ UNRESTRICTED 时**没有任何闸门**
+> （处置是响一声 ＋ 档位不进任何持久配置，重启回到启动值）；
+> ② AUTO 下 `ask_user` 的犹豫对模型是无声的；
+> ③ 交付物登记**仍限 workspace 内**（第二层检查读的是 `workspaceRoot` 下那一份）；
+> ④ 非 darwin 上 UNRESTRICTED 仍然没有 `run_shell`（工具面那道闸门是模块级的）；
+> ⑤ 切 workspace 会把界面上拨过的审批档位弹回启动值（刻意的）。
+
+> ⚠️ **新增 10 条判据每条都做过注入实测**，其中两组是**成对**的：
+> `verify:shell` B9/B10（UNRESTRICTED 越界写必须**成功** ＋ 凭证读禁仍在）、
+> `verify:ui` D4/D5/J2（AUTO 记 AUTO ＋ 人点记 HUMAN；不再问的 `HUMAN → AUTO`；
+> 换档 resume 被拒 ＋ **同档放行**）。
+> 少了配对的那一半，「档位根本没接线」「resume 一律拒绝」「`decidedBy` 恒填一个值」
+> 三种实现都能全绿 —— 前两种正是 `sandbox.ts` 与 J 段各自记过的教训。
+>
+> ⚠️ **B9 的探针写临时目录并清理，不写 `$HOME`**：B2 那条的教训是实测出来的
+> （故障注入摘掉 `deny file-write*` 那次真的在 `$HOME` 建出文件，判据被永久毒化），
+> 而 B9 是**故意**要让写成功的 —— 写 `$HOME` 就不是"万一"，是每次都留痕。
+
+> ### 【定】同日二次复核抓到四条，**三条是我在同一批里自己造的**
+>
+> | 发现 | 形态 |
+> |---|---|
+> | policy 放行越界写，而**四个写工具自己那道 `isInsideWorkspace` 没跟着改** | 探针：`policy=REQUIRE_APPROVAL` → 工具 `TOOL_PATH_ESCAPE` → 文件没写出来。**问了人、批了、然后照样失败** —— 比原来的 DENY 更糟 |
+> | 我给「第 5 条必须一起拆」写的**因果是错的** | `ShellEffectResolver` 从不产出 `OUTSIDE_WORKSPACE`，run_shell 从来没被那条 policy 拦过。与 M4「清 effect 噪声能减少审批」同形态 |
+> | CLI 在「无人应答」时记 `decidedBy: "HUMAN"` | **我自己写的【定】禁止的那句假话**，而 Web 那侧写对了。**一个新字段最容易错的地方是它的缺省分支** |
+> | `verify:ui` D4b 第一版是**装饰判据** | 夹具给 `ask_user` 传了数组而它要换行字符串 → 在到达 `QuestionChannel` 之前就报错。摘掉 AUTO 那一支，判据照样绿 —— 与 `read_blob.line_offset` 一字不差：**判据打在下游，跨不过出事的那一跳** |
+>
+> 处置：四个写工具的边界判定收敛成 `fs-common.ts` 的 `writeBoundaryRefusal()`
+> **一份**（各写一遍的后果不是重复，是**分叉**）；两条错误表述都回源改正；
+> 顺手删掉两个零消费者的导出。判据 198 → **221 条**。
+>
+> **第 1、4 两条都是注入实测抓到的，读代码看不出来。**
+
+> ### 【定】二次评审（codex，NO-GO）：6 项 P1 里混着**三类性质不同**的东西
+>
+> 逐条回源之后成立的全部修完，但**分级重排过** —— 把「我引入的」与
+> 「一直如此的」记成一笔，是这个仓库最不愿意留下的账。
+>
+> | 类 | 项 |
+> |---|---|
+> | **本批引入（阻断）** | 交付物 containment（P1-1）· CLI 审批面反向保证（P1-4）· elevation 不可撤销（P1-3）· 失败请求改变安全状态（P1-2 / P2-3）· 冻结档位不进审计面（P2-5）· 判据缺口（5.1 / 5.3） |
+> | **既有账**（一并修，分开记） | CONFIRM ≠「每一步都问」（措辞，行为是决 3 的设计）· `USER_REJECTED` 归责 · 带值参数缺值 · 自动批准日志不剥字符 |
+> | **打折** | P2-2 只采纳「非法值 fail-fast」（缺字段仍按事实读）· P2-7 降 P3 · 「elevation 不覆盖 ask_user」是产品语义不是缺陷 |
+>
+> **最重的两条都是"我自己写的话被实现推翻"**：
+> ① `write_file` 在 UNRESTRICTED 下写到 workspace 外后，产物**通过 hash 检查、
+> 进 `deliveredArtifactIds`** —— 检查器算 `resolve(workspaceRoot, path)`，
+> 而绝对路径原样返回自己。它直接推翻本文代价③。
+> ② CLI 审批面照旧打印「只能写 workspace 与 $TMPDIR」，而**警告就写在那段
+> 注释里**（「与 description ①、Web 审批卡是同一句话的三处，必须一起改」）。
+
+> ### 【定】同一天三次「判据落在守卫重叠区」——**注入实测是唯一发现方式**
+>
+> | 判据 | 症状 |
+> |---|---|
+> | P2-3（失败请求不留提升） | 单摘 kind 校验不红（回滚兜住），单摘回滚也不红（kind 校验挡住），**两道同摘才红**。两道防的是不同的事（伪造 kind ／ 两步之间被 cancel），只在一个可观察量上重合 —— 已如实写明它测的是合取 |
+> | P2-4（带值参数缺值） | 三个用例全被**枚举校验**先接走，缺值检查从没被触发。只有「参数是 argv 最后一项」那种形态它才承重 |
+> | 归责（P1-6） | 夹具用了 `append_log`（`requiredForSuccess: false`），拒绝它不产生未完成的必需项，**两侧都判 SUCCESS** |
+>
+> M4 那条（一条不准的 kills 比没有更糟）在同一天出现三次。
+> 结论不是"要记住"，是**每加一条判据就必须做一次注入实测** —— 三次都是跑完才发现的。
+
+> ⚠️ **仍然开着的门槛（要花钱）**：用真实端点在 `--approval auto` 下把那道
+> B 站的题跑完。当前证据全部来自脚本化模型，链路形状成立，
+> **不证明模型在 UNRESTRICTED 受信事实下的真实行为**（它会不会更爱用 `rm -rf`
+> 这类一步到位的写法，只能靠 live 复跑观察）。
+>
+> ⚠️ **CLI 审批提示里的 `a` 键（本次 Run 不再问）没有机械判据**（S6-6）。
+> Web 那一侧有 D5 端到端覆盖，CLI 这条只有代码审读 —— 登记而不是假装它测过。
+
+
 ### 通用 MCP 客户端能力（2026-08-31）：外部工具面接进来了
 
 依据 [ADR-0011](sxw_aicoding/ADR/0011-通过外部-MCP-接入浏览器能力.md)。
@@ -657,8 +830,13 @@ images 目录的 zip」（Run `run_9610d44d3a62`）：**19 轮（预算 20）、
 
 > ⚠️ **默认档位下无人值守跑批时 EXECUTE 全灭**（非 TTY 审批按拒绝处置）。
 > 这是 E-3 那个坑的形状，本批**不新增 `--yes-exec` 档位**去绕它 ——
-> 那会又造一条没有证据支撑的闸门。复跑用 `--yes-all`，
+> 那会又造一条没有证据支撑的闸门。复跑用 `--approval auto`，
 > **此时沙箱是唯一还在的闸门 —— 这就是决 1 坚持要真沙箱的全部价值。**
+>
+> **2026-09-01 收口**：那条「等复跑数据说话」等到了数据（十几次点击），
+> 处置见 [ADR-0012](sxw_aicoding/ADR/0012-审批与执行特权是两条正交的档位轴.md) ——
+> 不是加第三条闸门，是把审批做成一条有名字的轴。上面那句
+> 「沙箱是唯一还在的闸门」在 `--sandbox off` 下**不再成立**，见下。
 
 ### 阶段 3.5 的另两个工具（同批，2026-08-30）
 
@@ -855,6 +1033,8 @@ npm install                        # Node 24＋（.nvmrc / engines 都写了）
 npm run typecheck                  # tsc --noEmit ＋ noUnusedLocals/Parameters，必须干净
 npm run ui                         # ★阶段 4：白盒界面。打印一个带会话 Token 的 loopback URL
 npm run ui -- --port 7788 --endpoint deepseek      # 端口/端点与 CLI 同一套参数
+npm run ui -- --approval auto                      # ★ADR-0012：不再逐次确认（沙箱仍在）
+npm run dev -- --approval auto --sandbox off --task "..."   # ★完全权限：**没有任何闸门**
 npm run dev -- --task "看看根目录里有什么，然后写一份 summary.txt"
 npm run dev -- --list-runs         # 库里有哪些 Run
 npm run dev -- --resume <runId>    # 接上一个没跑完的 Run
@@ -885,11 +1065,20 @@ npm run dev -- --endpoint deepseek --task "..."   # 换对照端点（受枚举�
 > ⚠️ **`tools` 段里的工具名拼错会报错**，并列出服务器真实提供的工具 ——
 > 不这么做的话 `tierOf()` 会静默落回默认档：那行配置**看起来生效了**、实际什么都没变。
 
-**审批档位（决 3）**：默认**自动放行 workspace 内、非 IRREVERSIBLE 的写**；
-`append_log` 这类不可逆操作与 EXECUTE 仍逐次问；**越界写由 Policy 直接拒绝，不给审批机会**。
-`--confirm` 恢复「每一步都问」；`--yes-all` 是显式的「批准一切」。
-> **没有 `--yes`**，而且**未知参数一律报错**：一个被静默吞掉的参数与一个生效的参数，
-> 在用户那里完全不可区分（M-5 那条教训的形态）。
+**两条档位轴（ADR-0012）**：它们**正交**，各一个参数，CLI 与界面同一套。
+
+```bash
+--approval confirm|default|auto     # 审批：要不要停下来问人（运行中可改）
+--sandbox  on|off                   # 执行：跑起来能碰到什么（随 Run 冻结）
+```
+
+`default`（默认）＝ 决 3 那一档：自动放行 workspace 内、非 IRREVERSIBLE 的写；
+不可逆操作与 EXECUTE 逐次问；**越界写由 Policy 直接拒绝**。
+`auto` ＝ 一律自动批准。`--sandbox off` ＝ 无沙箱、可写任意路径、越界写改走审批。
+
+> **没有 `--yes` / `--confirm` / `--yes-all` / `--yolo`**，而且**未知参数一律报错**
+> （service 入口这条是 ADR-0012 补的，它此前是裸 `indexOf`）：一个被静默吞掉的参数
+> 与一个生效的参数，在用户那里完全不可区分（M-5 那条教训的形态）。
 > 【定】改这段前先读 `main.ts` 里 `autoGrant` 的注释 —— 那条规则曾经因为
 > `REVERSIBLE` vs `PARTIALLY_REVERSIBLE` 的一字之差，从来没覆盖过 `write_file`。
 
@@ -921,8 +1110,13 @@ npm run verify:progress            # 批 3：进展 ＋ 无进展 ＋ 真实慢�
 npm run verify:scenarios           # S13：三场景 smoke（决 7 的判据）＋ 三条护栏在场性总校验
 npm run verify:shell               # ★阶段 3.5：两道闸门 ＋ 沙箱实测 ＋ 分支三 ＋ 边界 7
                                    #   ＋ ★$TMPDIR/tmp 双侧 ＋ effect 不得抄进 URL
+                                   #   ＋ ★ADR-0012 B9/B10：UNRESTRICTED 越界写必须**成功**
+                                   #     （B2 的配对）＋ 凭证读禁与 env 白名单仍在
 npm run verify:ui                  # ★阶段 4：边界判别力 ＋ 投影幂等 ＋ 三条等人通道走 HTTP ＋ 自动放行正分支
                                    #   ＋ 失败 resume ＋ 恢复项可见 ＋ **跨 workspace 闸门** ＋ workspace 隔离 ＋ §22.6 ＋ SSE 游标
+                                   #   ＋ ★ADR-0012 D4/D5：AUTO 档不弹卡片**且动作真的执行了** ＋
+                                   #     decidedBy 的 AUTO / HUMAN **成对** ＋「本次 Run 不再问」的 HUMAN→AUTO
+                                   #   ＋ ★J2：换执行特权档 resume 被拒 ＋ **同档放行**（§18.3 第三维）
 npm run verify:mcp                 # ★ADR-0011：通用 MCP 客户端。边界 12 判别力 ＋ 默认最保守档
                                    #   ＋ read/execute 两侧 ＋ array/嵌套 object 逐字送达 ＋ 分页
                                    #   ＋ isError 分流 ＋ image 块不假装 ＋ list_changed 必须被忽略
@@ -932,7 +1126,7 @@ npm run verify:mcp                 # ★ADR-0011：通用 MCP 客户端。边界
                                    #   ＋ 未知 content 块不得废掉工具 ＋ 握手卡住不留孤儿进程
                                    #   ＋ resume 说出「外部工具核对不了」＋ 示例配置必须真能解析
                                    #   用**手写的假 MCP 服务器**，不依赖 Playwright、不联网、不弹窗口
-npm run verify:all                 # 15 条脚本 / 198 条判据
+npm run verify:all                 # 15 条脚本 / 221 条判据
 ```
 
 > **【定】`verify:ui` 必须真的起 HTTP 服务**，不能直接调 `PendingHub` 的方法测。
@@ -1290,7 +1484,8 @@ apps/workagent-ui/public/    ★阶段 4。Layer 1。**没有 src/、没有构�
 | `WorkAgent调研/ProviderProtocolFacts_*.md` | Spike 0 三轮实测事实（75 份证据 / 4 个端点） |
 | `代码评审/` | 按日期分目录。`2026-08-24/` 两份阶段 1 评审；`2026-08-25/` 一份 Bugfix 批次评审 |
 | [ADR-0011 外部 MCP](sxw_aicoding/ADR/0011-通过外部-MCP-接入浏览器能力.md) | **通用 MCP 客户端能力的实现依据**。四条代价、与 opencode 的对照、为什么不读 annotations |
-| `ADR/` | 决策记录。阶段 2 三份（[0001](sxw_aicoding/ADR/0001-outcome-kind-不区分是谁没做成.md) / [0002](sxw_aicoding/ADR/0002-恢复可观测性改为-action-级事实.md) / [0003](sxw_aicoding/ADR/0003-受信时间事实冻结到执行段.md)）＋ 阶段 3 三份（[0004 工具归属](sxw_aicoding/ADR/0004-通用工具归属与两类分拣标准.md) / [0005 lease 不做](sxw_aicoding/ADR/0005-PARKED-lease-不做的理由.md) / [0006 读放开的护栏](sxw_aicoding/ADR/0006-读放开的护栏边界.md)）＋ **阶段 3.5 两份**（[0007 结构转换 vs 语义挑选](sxw_aicoding/ADR/0007-html-结构转换可内置语义挑选不可.md) / [0008 ask_user 与 handoff 是两个洞](sxw_aicoding/ADR/0008-ask-user-与-request-handoff-是两个洞.md)）＋ **阶段 4 一份**（[0009 UI 不引入前端框架与 Electron](sxw_aicoding/ADR/0009-阶段4-UI-不引入前端框架与-Electron.md)）＋ **2026-08-31 两份**（[0010 二进制交付物走字节通道与按路径声明](sxw_aicoding/ADR/0010-二进制交付物走字节通道与按路径声明.md) / [0011 通过外部 MCP 接入浏览器能力](sxw_aicoding/ADR/0011-通过外部-MCP-接入浏览器能力.md)）；**阶段 1 的四份欠了三个阶段了** |
+| [ADR-0012 两条档位轴](sxw_aicoding/ADR/0012-审批与执行特权是两条正交的档位轴.md) | **auto 模式与完全权限的实现依据**。七条限制只拆三条、两条轴的生命周期为何不同、`decidedBy` 那笔账 |
+| `ADR/` | 决策记录。阶段 2 三份（[0001](sxw_aicoding/ADR/0001-outcome-kind-不区分是谁没做成.md) / [0002](sxw_aicoding/ADR/0002-恢复可观测性改为-action-级事实.md) / [0003](sxw_aicoding/ADR/0003-受信时间事实冻结到执行段.md)）＋ 阶段 3 三份（[0004 工具归属](sxw_aicoding/ADR/0004-通用工具归属与两类分拣标准.md) / [0005 lease 不做](sxw_aicoding/ADR/0005-PARKED-lease-不做的理由.md) / [0006 读放开的护栏](sxw_aicoding/ADR/0006-读放开的护栏边界.md)）＋ **阶段 3.5 两份**（[0007 结构转换 vs 语义挑选](sxw_aicoding/ADR/0007-html-结构转换可内置语义挑选不可.md) / [0008 ask_user 与 handoff 是两个洞](sxw_aicoding/ADR/0008-ask-user-与-request-handoff-是两个洞.md)）＋ **阶段 4 一份**（[0009 UI 不引入前端框架与 Electron](sxw_aicoding/ADR/0009-阶段4-UI-不引入前端框架与-Electron.md)）＋ **2026-08-31 两份**（[0010 二进制交付物走字节通道与按路径声明](sxw_aicoding/ADR/0010-二进制交付物走字节通道与按路径声明.md) / [0011 通过外部 MCP 接入浏览器能力](sxw_aicoding/ADR/0011-通过外部-MCP-接入浏览器能力.md)）＋ **2026-09-01 一份**（[0012 审批与执行特权是两条正交的档位轴](sxw_aicoding/ADR/0012-审批与执行特权是两条正交的档位轴.md)）；**阶段 1 的四份欠了三个阶段了** |
 | `spikes/s0-provider-protocol/` | 一次性探针，已完成，不进主干依赖（`tsconfig.json` 已 exclude） |
 
 V04 及更早的架构设计、`V03_Spike0回填清单.md` **不再作为实现依据**，只作过程记录。

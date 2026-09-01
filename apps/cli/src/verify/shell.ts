@@ -19,10 +19,11 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, resolve } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import {
+  type ExecutionPrivilege,
   type PreparedAction,
   type RunId,
   NullTraceSink,
@@ -32,6 +33,7 @@ import {
   findUnpairedToolUses,
 } from "@workagent/harness-runtime";
 import {
+  CommonToolHandler,
   ShellEffectResolver,
   analyzeCommand,
   buildSandboxProfile,
@@ -43,7 +45,9 @@ import {
   runShellDefinition,
   toSandboxDenyRules,
 } from "@workagent/tools-common";
-import { compose } from "../compose.js";
+import { compose, REPO_ROOT } from "../compose.js";
+import { CompositeToolHandler } from "../composite.js";
+import { MicroCaseToolHandler } from "@workagent/micro-cases";
 import {
   ScriptedModelPort,
   banner,
@@ -56,12 +60,24 @@ import {
 
 const resolver = new ShellEffectResolver();
 
-function ctxFor(workspaceRoot: string, signal?: AbortSignal) {
+/**
+ * 【定】档位是**参数**，默认保守档（ADR-0012）。
+ *
+ * 写死成 SANDBOXED 的话，B 段那批「越界写被拦」的判据就永远只测得到一侧，
+ * 而本仓自己记着「一个拒绝一切的沙箱与一个正确的沙箱，在那条判据下
+ * 不可区分」—— UNRESTRICTED 这一侧现在是它的配对判据（B9/B10）。
+ */
+function ctxFor(
+  workspaceRoot: string,
+  signal?: AbortSignal,
+  executionPrivilege: ExecutionPrivilege = "SANDBOXED",
+) {
   return {
     signal: signal ?? new AbortController().signal,
     workspaceRoot,
     onProgress: () => {},
     timezone: "Asia/Shanghai",
+    executionPrivilege,
   };
 }
 
@@ -90,6 +106,7 @@ function policyFor(command: string, allowNetwork = false) {
     verdict: evaluatePolicy({
       action,
       approvalPolicy: TRUSTED_PERSONAL,
+      executionPrivilege: "SANDBOXED",
     }).decision,
   };
 }
@@ -576,6 +593,172 @@ async function main(): Promise<void> {
       : "description 没提 $TMPDIR：模型无从知道可写的临时目录在哪，只会去试 /tmp 并静默失败",
   );
 
+  /**
+   * ══════════════════════════════════════════════════════════════════════
+   * B9 / B10：UNRESTRICTED 档（ADR-0012）—— **B2 的配对判据**
+   * ══════════════════════════════════════════════════════════════════════
+   *
+   * 【定】只有 B2（越界写被拦）是不够的，理由与 B2 自己写的那条一字不差：
+   * **一个拒绝一切的沙箱与一个正确的沙箱，在那条判据下不可区分。**
+   * 镜像过来就是这一段要防的东西 ——
+   * **一个「档位根本没生效」的实现，在只有 B2 的情况下照样全绿。**
+   *
+   * 所以这里验的是「UNRESTRICTED 档下越界写必须**成功**」。它是本仓
+   * 少有的、以"副作用真的发生了"为通过条件的判据，因此仪器纪律加倍：
+   *
+   * 【定】探针写在**临时目录**，不写 `$HOME`。B2 那条的教训是实测出来的：
+   * 故障注入摘掉 `deny file-write*` 的那一次真的在 `$HOME` 建出了文件，
+   * 之后每次 `existsSync` 都为真，判据被**永久毒化**。而这一段是**故意**
+   * 要让写成功的 —— 写 `$HOME` 就不是"万一"，是每次都留痕。
+   */
+  const outsideDir = mkdtempSync(join(tmpdir(), "wa-verify-unrestricted-"));
+  const unrestrictedTarget = resolve(outsideDir, "written-outside-workspace.txt");
+  const unrestrictedCtx = ctxFor(ws.root, undefined, "UNRESTRICTED");
+
+  // B9 UNRESTRICTED：越界写必须**成功**（档位真的生效了）
+  const uWrite = await executeRunShell(
+    { command: `echo unrestricted-ok > ${unrestrictedTarget} && cat ${unrestrictedTarget}` },
+    unrestrictedCtx,
+  );
+  const uBody = uWrite.ok ? JSON.parse(uWrite.output) : {};
+  const uWroteOutside =
+    uWrite.ok && uBody.exitCode === 0 && existsSync(unrestrictedTarget);
+  fact("UNRESTRICTED 越界写 exitCode", uBody.exitCode);
+  fact(
+    "workspace 外的目标文件",
+    existsSync(unrestrictedTarget) ? "已生成 ← 档位生效" : "不存在 ← 档位没生效",
+  );
+  verdict(
+    uWroteOutside && outsideBlocked,
+    uWroteOutside && outsideBlocked
+      ? "两档在同一条越界写上给出相反结果：SANDBOXED 被内核拒、UNRESTRICTED 成功 —— " +
+          "**配对**才有判别力，只留 B2 的话一个「--sandbox off 根本没接线」的实现照样全绿"
+      : `档位没有判别力：UNRESTRICTED 写成功=${uWroteOutside}，SANDBOXED 被拦=${outsideBlocked}`,
+  );
+
+  /**
+   * B10 UNRESTRICTED **不放开**凭证读（决定表里的第 3/4 条）。
+   *
+   * 【定】"拆沙箱"在本仓不等于"拆掉一切"。ADR-0012 明确只拆
+   * ①写边界 ②网络 ⑤policy 越界拒绝，而 env 白名单与凭证读禁**保留** ——
+   * 它们对任何一个真实任务零收益，拆了只增加凭证泄漏面。
+   *
+   * 这条判据的作用是把那个决定钉在代码上：将来有人"顺手把 UNRESTRICTED
+   * 做成完全不套任何限制"，这里会红。
+   */
+  const uReadEnv = await executeRunShell({ command: "cat .env.local" }, unrestrictedCtx);
+  const uReadEnvBody = uReadEnv.ok ? JSON.parse(uReadEnv.output) : {};
+  const uEnvStillBlocked = !String(uReadEnvBody.stdout ?? "").includes("SECRET");
+  const uEnvVarBlocked = await executeRunShell(
+    { command: "printenv dashscope_api_key || echo __ABSENT__" },
+    unrestrictedCtx,
+  );
+  const uEnvVarBody = uEnvVarBlocked.ok ? JSON.parse(uEnvVarBlocked.output) : {};
+  const uNoCredEnv = String(uEnvVarBody.stdout ?? "").includes("__ABSENT__");
+  fact("UNRESTRICTED 读 .env.local", uEnvStillBlocked ? "读不到（保留）" : "读到了 ← 护栏被一起拆了");
+  fact("UNRESTRICTED 的 dashscope_api_key", uNoCredEnv ? "不在子进程 env 里（保留）" : "在 ← 白名单被绕过");
+  verdict(
+    uEnvStillBlocked && uNoCredEnv,
+    uEnvStillBlocked && uNoCredEnv
+      ? "UNRESTRICTED 只拆写边界与网络，**凭证读禁与 env 白名单仍在** —— " +
+          "ADR-0012 的范围表因此有机械判据，而不只是一段散文"
+      : `凭证面被一起拆了：.env 仍拦=${uEnvStillBlocked}，env 白名单仍在=${uNoCredEnv}`,
+  );
+  /**
+   * ══════════════════════════════════════════════════════════════════════
+   * B11 / B12：**写工具**那道边界也必须跟着档位走（ADR-0012 二次复核）
+   * ══════════════════════════════════════════════════════════════════════
+   *
+   * 【定】这两条补的是一个二次复核才发现的洞，而它的形态值得记：
+   * ADR-0012 把 `policy.ts` 的越界写 DENY 改成了 REQUIRE_APPROVAL，
+   * 而 `write_file` / `edit_file` / `append_log` / `slow_write` **四个写工具
+   * 自己那道 `isInsideWorkspace` 没跟着改**。探针原始输出：
+   *
+   *     policy(SANDBOXED   ) : DENY
+   *     policy(UNRESTRICTED) : REQUIRE_APPROVAL
+   *     UNRESTRICTED 下工具执行 : 失败 → TOOL_PATH_ESCAPE
+   *     文件真的写出来了吗       : 否
+   *
+   * **停下来问了人，人批准了，然后照样失败。** 那比原来的 DENY 更糟。
+   *
+   * 顺带纠正一条我自己写错的因果：ADR 里说「只摘 seatbelt 是白摘的，
+   * 因为 policy 在工具执行之前就 DENY 了」—— 回源后不成立，
+   * `ShellEffectResolver` **从不产出** `OUTSIDE_WORKSPACE`，
+   * run_shell 从来没被那条 policy 拦过。policy 那条改动真正的消费者
+   * 是这四个路径域的写工具，而它们当时还各自拒着。
+   */
+  /**
+   * 【定】**四个写工具逐个测**，不是只测 `write_file`（二次评审 5.1）。
+   *
+   * 上一版的注释点名了四个，夹具却硬编码 `write_file` —— 于是另外三个里
+   * 任何一个把 `writeBoundaryRefusal()` 换回内联的 `isInsideWorkspace`，
+   * 判据照样全绿。**「注释说测了四个」与「真的测了四个」之间没有任何东西**，
+   * 而这正是本仓反复抓的「判据测的不是它声称在测的东西」。
+   */
+  const writeTools: Array<{ tool: string; input: (p: string) => Record<string, unknown> }> = [
+    { tool: "write_file", input: (t) => ({ path: t, content: "x" }) },
+    // edit_file 要求目标已存在且能匹配到 old_string —— 但越界判定排在那之前，
+    // 所以夹具不需要真的准备一个可编辑的文件（判据只看它拒不拒越界）。
+    { tool: "edit_file", input: (t) => ({ path: t, old_string: "a", new_string: "b" }) },
+    { tool: "append_log", input: (t) => ({ path: t, line: "x" }) },
+    { tool: "slow_write", input: (t) => ({ path: t, content: "x", delay_ms: 0 }) },
+  ];
+  const wfProbeDir = mkdtempSync(join(tmpdir(), "wa-verify-writeboundary-"));
+  const handler = new CompositeToolHandler([
+    new CommonToolHandler({ blobs: undefined as never }),
+    new MicroCaseToolHandler(),
+  ]);
+  const runWrite = async (
+    tool: string,
+    target: string,
+    privilege: ExecutionPrivilege,
+  ): Promise<{ label: string; escaped: boolean }> => {
+    const spec = writeTools.find((w) => w.tool === tool)!;
+    const out = await handler.execute(
+      { toolName: tool, normalizedInput: spec.input(target) } as never,
+      ctxFor(ws.root, undefined, privilege),
+    );
+    // 【定】判别式是 `TOOL_PATH_ESCAPE` 这个**具体错误码**，不是「ok 为假」——
+    // edit_file 在越界之外还会因为「文件不存在」失败，两者不能混为一谈。
+    return { label: out.ok ? "成功" : `失败 → ${out.error?.code}`, escaped: out.error?.code !== "TOOL_PATH_ESCAPE" };
+  };
+
+  const sandboxedRows: string[] = [];
+  let allBlocked = true;
+  for (const { tool } of writeTools) {
+    const target = resolve(wfProbeDir, `${tool}-sandboxed.txt`);
+    const r = await runWrite(tool, target, "SANDBOXED");
+    const blocked = !r.escaped && !existsSync(target);
+    allBlocked &&= blocked;
+    sandboxedRows.push(`${tool}=${r.label}${existsSync(target) ? "（文件竟然存在）" : ""}`);
+  }
+  fact("SANDBOXED 下四个写工具越界", sandboxedRows.join("　"));
+  verdict(
+    allBlocked,
+    "SANDBOXED 档下**四个写工具**的越界写全部被 TOOL_PATH_ESCAPE 拒（执行侧第二道，§22.1 要求两道都在）",
+  );
+
+  const unrestrictedRows: string[] = [];
+  let allWrote = true;
+  for (const { tool } of writeTools) {
+    const target = resolve(wfProbeDir, `${tool}-unrestricted.txt`);
+    // append_log / edit_file 在越界判定之后还有各自的前置条件，
+    // 判据只问一件事：**那道边界有没有让路**（不再返回 TOOL_PATH_ESCAPE）。
+    const r = await runWrite(tool, target, "UNRESTRICTED");
+    allWrote &&= r.escaped;
+    unrestrictedRows.push(`${tool}=${r.label}`);
+  }
+  fact("UNRESTRICTED 下四个写工具越界", unrestrictedRows.join("　"));
+  verdict(
+    allWrote,
+    "UNRESTRICTED 档下**四个写工具**都不再返回 TOOL_PATH_ESCAPE —— 与上一条**成对**：" +
+      "四个里任何一个把判定换回内联的 isInsideWorkspace，这一条就红",
+  );
+  rmSync(wfProbeDir, { recursive: true, force: true });
+
+  // 【定】仪器不得留痕。这一段是**故意**写成功的，所以清理不是"万一"，是必须。
+  rmSync(outsideDir, { recursive: true, force: true });
+
   // ══════════════════════════════════════════════════ C 段：执行语义
   section("C. 执行语义 —— 工具故障与「世界就是这样」必须分得开");
 
@@ -767,6 +950,51 @@ async function main(): Promise<void> {
 
   // ══════════════════════════════════════════════ E 段：装配与边界
   section("E. 装配 —— 未接线的闸门比没有闸门更糟");
+
+  /**
+   * E0：带值参数缺值必须**失败**，不得静默回落默认档（二次评审 P2-4）。
+   *
+   * 【定】它属于本段（「未接线的闸门比没有闸门更糟」）——
+   * `--sandbox` 写在末尾时静默回落成"有沙箱"，用户以为自己关掉了；
+   * `--approval` 写在末尾时静默回落成 DEFAULT，自动化任务以为开了 AUTO，
+   * 实际跑到一半停下来等一个不存在的人。M-5 那条教训的形状，
+   * 而这次被吞掉的那个开关关的是边界。
+   */
+  /**
+   * ⚠️ 【定】用例必须是**参数真的排在最后**那一种，且不能在后面补别的参数。
+   *
+   * 第一版写的是 `["--task","x","--approval"]` 再由脚本补一个 `--list-runs`，
+   * 于是 `--approval` 拿到的"值"是 `--list-runs` —— 那会被
+   * `parseApprovalMode()` 的**枚举校验**先接走。做注入实测（把缺值检查
+   * 改成恒假）时三条**照样全绿**：用例落在两道守卫的重叠区，
+   * 我的那道从没被触发过。M4 那次一字不差，而这是今天第三次。
+   *
+   * 真正只有缺值检查能挡的形态是「参数是 argv 的最后一项」——
+   * 那时 `get()` 返回 `undefined`，枚举校验会把它当成"没传"而回落默认档。
+   */
+  const argCases: Array<{ argv: string[]; label: string }> = [
+    { argv: ["--list-runs", "--approval"], label: "--approval 是最后一项（枚举校验看不见）" },
+    { argv: ["--list-runs", "--sandbox"], label: "--sandbox 是最后一项（枚举校验看不见）" },
+  ];
+  const argResults = argCases.map((c) => {
+    let failed = false;
+    try {
+      execFileSync("npx", ["tsx", "apps/cli/src/main.ts", ...c.argv], {
+        cwd: REPO_ROOT,
+        stdio: "pipe",
+      });
+    } catch {
+      failed = true;
+    }
+    return { ...c, failed };
+  });
+  for (const r of argResults) fact(r.label, r.failed ? "报错（对）" : "静默接受 ← 回落默认档");
+  verdict(
+    argResults.every((r) => r.failed),
+    "带值参数缺值一律报错 —— 静默回落的后果是「一个被静默吞掉的参数与一个生效的参数不可区分」，" +
+      "而 --sandbox 那一次吞掉的是边界",
+  );
+
 
   /**
    * E1 RESOLVER 查不到注册项必须抛，不得回退 noEffect。

@@ -25,7 +25,11 @@ import { extname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { RunEvent } from "@workagent/harness-runtime";
 import { join } from "node:path";
-import { workspaceStorage } from "../../cli/src/compose.js";
+import {
+  parseApprovalMode,
+  workspaceStorage,
+  type ApprovalMode,
+} from "../../cli/src/compose.js";
 import { RunHost, type RunHostOptions } from "./run-host.js";
 import { WorkspaceHosts } from "./workspace-hosts.js";
 import { LocalGuard, SECURITY_HEADERS } from "./security.js";
@@ -92,6 +96,8 @@ export async function startService(opts: ServiceOptions): Promise<RunningService
   const workspaces = new WorkspaceHosts({
     registryFile: opts.registryFile ?? join(opts.workspaceRoot, ".workagent", "workspaces.json"),
     endpoint: opts.endpoint,
+    ...(opts.approvalMode ? { approvalMode: opts.approvalMode } : {}),
+    ...(opts.executionPrivilege ? { executionPrivilege: opts.executionPrivilege } : {}),
     ...(opts.composeOverrides ? { composeOverrides: opts.composeOverrides } : {}),
     bootstrap: {
       path: opts.workspaceRoot,
@@ -343,8 +349,66 @@ async function handle(
       sendJson(res, 400, { error: "任务为空" });
       return;
     }
+    /**
+     * ── 「提交任务时选档位」（ADR-0012）─────────────────────────────────────
+     *
+     * 【定】它**拨的就是那一个开关**，不是一个逐 Run 的第二字段。
+     *
+     * 做成逐 Run 字段的话，界面上会同时存在两个都自称当前档位的东西
+     * （顶部开关 ＋ 这次提交选的），而它们对"下一个 Run 用哪一档"给出
+     * 不同答案 —— 那正是本仓反复清理的「一个事实两个出处」。
+     * 所以提交栏那个选择器是同一个开关的第二个入口，选完它就留在那一档。
+     */
+    /**
+     * ── 【定】顺序：**先校验值 → 再起 Run → 最后才拨档位**（二次评审 P1-2）─
+     *
+     * 第一版写的是「先 `setApprovalMode()` 再 `startRun()`」，而 `startRun()`
+     * 会在已有前台 Run 时抛（§6.4 同时只允许一个前台 Run）。后果具体而危险：
+     *
+     *   Run A 正在 DEFAULT 下跑 → 另一个标签页提交 Run B 并选 AUTO →
+     *   B 启动失败返回 500，**而 A 已经静默变成 AUTO**，
+     *   它后续所有需要审批的副作用从此自动放行。
+     *
+     * **一个失败的请求改变了另一个 Run 的安全边界。** 这条与
+     * 「应答一个已经不在等的请求返回 409 而不是 200」是同一条纪律：
+     * 失败的请求不得留下任何状态变化。
+     *
+     * 【定】值的校验仍然排在最前 —— 拼错的档位应该 400，而不是先起一个
+     * Run 再告诉你参数不对（那时 Run 已经在跑了，回滚不掉）。
+     */
+    const rawMode = body["approvalMode"];
+    let requested: ApprovalMode | undefined;
+    if (rawMode !== undefined) {
+      try {
+        requested = parseApprovalMode(String(rawMode));
+      } catch (e) {
+        sendJson(res, 400, { error: (e as Error).message });
+        return;
+      }
+    }
     const r = await host().startRun(task);
+    if (requested !== undefined) host().setApprovalMode(requested);
     sendJson(res, 200, r);
+    return;
+  }
+
+  /**
+   * 拨审批档位（ADR-0012）。**运行中随时可拨**，下一次审批起生效。
+   *
+   * 【定】没有对应的"拨执行特权"路由，而那是刻意的：`ExecutionPrivilege`
+   * 随 RunSpec 冻结（见那个类型的说明）。给它一个 HTTP 入口的话，
+   * 界面上会出现一个点了之后"看起来生效了、实际对正在跑的 Run 什么都没变"
+   * 的开关 —— 而那正是 M-5 那条教训的形状。要换它得重启服务。
+   */
+  if (req.method === "POST" && path === "/api/approval-mode") {
+    const body = await readJsonBody(req);
+    try {
+      const mode = parseApprovalMode(String(body["mode"] ?? ""));
+      host().setApprovalMode(mode);
+      sendJson(res, 200, { ok: true, mode });
+    } catch (e) {
+      sendJson(res, 400, { error: (e as Error).message });
+    }
     return;
   }
 
@@ -354,11 +418,50 @@ async function handle(
     const kind = String(body["kind"] ?? "");
     const ok =
       kind === "APPROVAL"
-        ? host().answerPending(pendingMatch[1]!, {
-            kind: "APPROVAL",
-            approved: body["approved"] === true,
-            ...(typeof body["reason"] === "string" ? { reason: body["reason"] } : {}),
-          })
+        ? (() => {
+            /**
+             * 「批准，且本次 Run 不再问」（ADR-0012）。
+             *
+             * 【定】提升**先于**应答。反过来写的话，被放行的这一次会先
+             * 落进 `ApprovalDecided`，而那一瞬间 Run 可能已经走到了下一个
+             * 需要审批的 Action —— 于是它照样弹一次，用户会以为按钮没生效。
+             *
+             * 【定】这一次仍然记 `HUMAN`（人确实看了这一条），
+             * 之后那些记 `AUTO`。见 `human-channels` 里 `a` 键那段。
+             */
+            /**
+             * 【定】提升前必须**先确认这张卡片真的是一个 APPROVAL**
+             * （二次评审 P2-3）。
+             *
+             * 第一版按 pendingId 找到任意 kind 就 elevate，之后才由
+             * `answerPending()` 去校验 kind —— 于是向一张 HANDOFF / QUESTION
+             * 卡片发一个伪造的 APPROVAL 应答，会拿到 409，
+             * **而那个 Run 已经进入了后续审批自动放行的状态**。
+             * 又一次「失败的请求留下了状态变化」，与上面 P1-2 同源。
+             */
+            const p = host().pending().find((x) => x.pendingId === pendingMatch[1]);
+            const elevate =
+              body["alwaysForRun"] === true && body["approved"] === true && p?.kind === "APPROVAL";
+            /**
+             * 【定】提升仍然**先于**应答（这一条第一版是对的，保留）：
+             * 反过来写的话，被放行的这一次会先落进 `ApprovalDecided`，
+             * 而那一瞬间 Run 可能已经走到了下一个需要审批的 Action ——
+             * 于是它照样弹一次，用户会以为按钮没生效。
+             */
+            if (elevate) host().elevateRun(p!.runId);
+            const answered = host().answerPending(pendingMatch[1]!, {
+              kind: "APPROVAL",
+              approved: body["approved"] === true,
+              ...(typeof body["reason"] === "string" ? { reason: body["reason"] } : {}),
+            });
+            /**
+             * 【定】应答失败要把提升**收回**。走到这里说明 waiter 在这两步
+             * 之间被取消了（Run 被 cancel）—— 留着一个没有人要过的提升，
+             * 会让这个 Run 之后所有审批静默自动放行。
+             */
+            if (elevate && !answered) host().revokeRunElevation(p!.runId);
+            return answered;
+          })()
         : kind === "HANDOFF"
           ? host().answerPending(pendingMatch[1]!, {
               kind: "HANDOFF",

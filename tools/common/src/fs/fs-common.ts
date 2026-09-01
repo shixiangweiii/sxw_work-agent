@@ -14,7 +14,11 @@
 
 import { realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, resolve, sep } from "node:path";
-import { makeError, type RuntimeErrorRecord } from "@workagent/harness-runtime";
+import {
+  makeError,
+  type RuntimeErrorRecord,
+  type ToolExecutionContext,
+} from "@workagent/harness-runtime";
 
 /**
  * target 是否落在 workspace 根之内。
@@ -186,6 +190,48 @@ export function classifyFsError(err: unknown, what: string): RuntimeErrorRecord 
 }
 
 /** 越界写的统一拒绝（决 3：写保留 workspace 边界）。 */
+/**
+ * 写工具的 workspace 边界判定 —— **唯一一份**（ADR-0012）。
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ * 【定】四个写工具（`write_file` / `edit_file` / `append_log` / `slow_write`）
+ * 必须调它，**不要各自写一遍 `if (!isInsideWorkspace(...)) return ...`**。
+ *
+ * 各写一遍的后果不是重复，是**分叉**：ADR-0012 加了 `executionPrivilege`
+ * 这一维之后，四处里漏改任何一处，就会出现「同一个越界写，`write_file`
+ * 放行而 `edit_file` 拒绝」—— 而两边都不会报错，只是行为不同。
+ * 这个文件头已经因为「边界判定的唯一事实源」写过一次同样的话。
+ *
+ * ── 【定】UNRESTRICTED 下放行，而这一条是被一次探针逼出来的 ──────────────
+ *
+ * ADR-0012 把 `policy.ts` 那条越界写 DENY 改成了 REQUIRE_APPROVAL，
+ * 而这里的判定当时**没跟着改**。实测那条路径的原始输出：
+ *
+ *     policy(SANDBOXED   ) : DENY
+ *     policy(UNRESTRICTED) : REQUIRE_APPROVAL
+ *     UNRESTRICTED 下工具执行 : 失败 → TOOL_PATH_ESCAPE
+ *     文件真的写出来了吗       : 否
+ *
+ * 也就是说：**停下来问了人，人批准了，然后照样失败。**
+ * 那比原来的 DENY 更糟 —— DENY 至少是快速失败、理由明确、
+ * `retryability: AFTER_MODEL_CORRECTION` 告诉模型换个路径；
+ * 而「问了再失败」既浪费了人的一次决定，又把那次决定变成了空的。
+ *
+ * 【定】`SANDBOXED` 那一档的语义**一个字没改**：越界写由 Policy 直接拒绝，
+ * 这里是第二道（V05 §22.1 要求两道都在）。变的只是「有没有第三种档位」。
+ * ══════════════════════════════════════════════════════════════════════
+ */
+export function writeBoundaryRefusal(
+  ctx: Pick<ToolExecutionContext, "workspaceRoot" | "executionPrivilege">,
+  target: string,
+  op: string,
+  shownPath: string,
+): RuntimeErrorRecord | undefined {
+  if (ctx.executionPrivilege === "UNRESTRICTED") return undefined;
+  if (isInsideWorkspace(ctx.workspaceRoot, target)) return undefined;
+  return outsideWorkspaceError(shownPath, op);
+}
+
 export function outsideWorkspaceError(path: string, op: string): RuntimeErrorRecord {
   return makeError({
     code: "TOOL_PATH_ESCAPE",

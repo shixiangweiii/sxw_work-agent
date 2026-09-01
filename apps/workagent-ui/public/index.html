@@ -57,6 +57,23 @@
         <form id="newrun">
           <label for="task">新任务</label>
           <textarea id="task" rows="4" placeholder="例如：盘点 2026Q2归档/ 下的四个子目录，写一份交接清单"></textarea>
+          <!--
+            审批档位（ADR-0012）。
+
+            【定】它拨的就是顶栏那一个开关，不是一个逐 Run 的第二字段 ——
+            两个都自称"当前档位"的东西会对"下一个 Run 用哪一档"给出不同答案。
+            选完它就留在那一档，顶栏的徽章会跟着变。
+
+            【定】这里**没有**执行特权的选择器。那一档随 RunSpec 冻结，
+            界面上给它一个开关等于给一个"点了看起来生效、实际什么都没变"
+            的控件 —— M-5 那条教训的形状。要换它得重启服务改 --sandbox。
+          -->
+          <label for="approvalmode" class="inline">审批档位</label>
+          <select id="approvalmode">
+            <option value="DEFAULT">默认：workspace 内的写自动放行</option>
+            <option value="CONFIRM">逐次确认：每个需要审批的操作都问</option>
+            <option value="AUTO">AUTO：一律自动批准，不打扰我</option>
+          </select>
           <button type="submit" id="startbtn">开始</button>
           <p class="hint" id="startstate"></p>
         </form>

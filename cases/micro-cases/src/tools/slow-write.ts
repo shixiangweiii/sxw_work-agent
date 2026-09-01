@@ -37,8 +37,7 @@ import type {
 import { asId, makeError } from "@workagent/harness-runtime";
 import {
   classifyFsError,
-  isInsideWorkspace,
-  outsideWorkspaceError,
+  writeBoundaryRefusal,
   resolveToolPath,
 } from "@workagent/tools-common";
 
@@ -95,13 +94,12 @@ export async function executeSlowWrite(
 ): Promise<ToolExecutionOutcome> {
   const target = resolveToolPath(ctx.workspaceRoot, input.path);
 
-  if (!isInsideWorkspace(ctx.workspaceRoot, target)) {
-    return {
-      ok: false,
-      output: "",
-      sideEffectState: "NO_EFFECT",
-      error: outsideWorkspaceError(input.path, "写入"),
-    };
+  // 【定】与 tools/common 的三个写工具共用**同一份**边界判定
+  // （`writeBoundaryRefusal`）。ADR-0012 加了 executionPrivilege 这一维，
+  // 四处里漏改任何一处就会出现「同一个越界写，这个工具放行那个工具拒绝」。
+  const refusal = writeBoundaryRefusal(ctx, target, "写入", input.path);
+  if (refusal) {
+    return { ok: false, output: "", sideEffectState: "NO_EFFECT", error: refusal };
   }
 
   const delay = Math.max(0, Number(input.delay_ms ?? 0));

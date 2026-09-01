@@ -26,6 +26,7 @@ import type {
   TranscriptEntry,
 } from "@workagent/harness-runtime";
 import { NullTraceSink, asId, readRunFacts } from "@workagent/harness-runtime";
+import type { ExecutionPrivilege } from "@workagent/harness-runtime";
 import { SqliteRunStore, openDb } from "@workagent/store-sqlite";
 import type { HandoffChannel, QuestionChannel } from "@workagent/tools-common";
 import { connectMcpServers } from "@workagent/tools-mcp";
@@ -33,6 +34,10 @@ import {
   autoGrantVerdict,
   compose,
   defaultMcpConfigPath,
+  describeModes,
+  fullAccessWarning,
+  parseApprovalMode,
+  parseSandboxArg,
   gitProvenance,
   hostOf,
   parseEndpointArg,
@@ -40,6 +45,7 @@ import {
   resolveDbPath,
   stripUnsafeDisplayChars,
   workspaceStorage,
+  type ApprovalMode,
   type AutoGrantVerdict,
   type EndpointChoice,
 } from "./compose.js";
@@ -54,25 +60,34 @@ interface Args {
   task: string;
   workspace: string;
   /**
-   * 每一个需要审批的操作都停下来问。
+   * 审批档位（ADR-0012）。**一条轴、三个值、一个参数名。**
    *
-   * ── 【定】没有 `--yes` ────────────────────────────────────────────────
+   * ── 【定】它取代了 `--confirm` / `--yes-all` 两个布尔开关 ────────────────
    *
-   * 决 3 起「workspace 内的可逆写自动放行」是**默认行为**，于是 `--yes`
-   * 变成了一个「显式写出默认值」的开关。而 `parseArgs` **从来没有解析过它** ——
-   * 字段是 `yes: !argv.includes("--confirm")`，两个字段编码同一个 bit，
-   * 打 `--yes` 之所以「能用」纯粹是因为默认本来就是它。
-   * 一个文档里承诺、实现里不存在的开关，正是本仓反复猎杀的形态。
+   * 两个布尔开关编码一条三值轴，必然出现「两个都打了怎么办」这种没有答案
+   * 的组合；而 `--yes` 那件事（文档里承诺、`parseArgs` 从来没解析过、
+   * 打上去"能用"只因为默认档位本来就是它）说明这类开关一旦对不上，
+   * 用户是发现不了的。现在拼错任何一个值都会立刻失败。
    *
-   * 理由（决 3）：不接 Capability 授权层时，每写一个文件就停下来问一次，
-   * 在「读一批文档 → 汇总 → 产出」这种任务里会问十几次 —— 那不是安全，
-   * 是把闸门变成噪音，用户会开始无脑回车（而无脑回车比自动放行更糟：
-   * 它看起来像是有人在把关）。边界仍在，只是位置不同：越界写由 Policy
-   * **直接拒绝**（不给审批机会），不可逆与 EXECUTE 仍然逐次问。
+   * 理由（决 3，DEFAULT 那一档不变）：不接 Capability 授权层时，每写一个
+   * 文件就停下来问一次，在「读一批文档 → 汇总 → 产出」这种任务里会问十几次
+   * —— 那不是安全，是把闸门变成噪音，用户会开始无脑回车（而无脑回车比
+   * 自动放行更糟：它看起来像是有人在把关）。
+   *
+   * AUTO 那一档是 ADR-0012 加的，动机同样来自实测：一次「下载网页图片打包成
+   * zip」的真实任务里 10 条 shell 命令**每条都含元字符**，于是 10 次审批 ——
+   * 而那正是上面那段话描述的「闸门变成噪音」在 EXECUTE 这一侧的复现。
    */
-  confirm: boolean;
-  /** 显式的「批准一切」。见 interactiveApproval 里 E-3 那段说明。 */
-  yesAll: boolean;
+  approval: ApprovalMode;
+  /**
+   * 执行特权档位（ADR-0012）。**第二条轴，与 `approval` 正交。**
+   *
+   * 【定】不做 `--yolo` 这类一键预设。想要「完全权限」就得同时打
+   * `--approval auto --sandbox off` —— 两条闸门是分开拆的，
+   * 那个决定应该有两个名字。见 `sandbox.ts` 与 `command-analysis.ts`
+   * 的分工那张表：合并这两层的第一个后果就是把边界拆掉。
+   */
+  sandbox: ExecutionPrivilege;
   /** undefined = --no-trace；string = 显式 --trace 路径；"auto" = 按 runId 定名 */
   trace: string | undefined;
   dbPath: string;
@@ -111,8 +126,8 @@ interface Args {
  * 而这正是本仓反复记的「静默忽略用户配置比不支持更糟」（M-5 的形态）。
  * ══════════════════════════════════════════════════════════════════════
  */
-const VALUE_FLAGS = ["task", "workspace", "trace", "db", "resume", "recovery-decision", "recovery-note", "endpoint", "mcp-config"];
-const BOOL_FLAGS = ["confirm", "yes-all", "no-trace", "list-runs"];
+const VALUE_FLAGS = ["task", "workspace", "trace", "db", "resume", "recovery-decision", "recovery-note", "endpoint", "mcp-config", "approval", "sandbox"];
+const BOOL_FLAGS = ["no-trace", "list-runs"];
 
 function assertKnownArgs(argv: string[]): void {
   for (let i = 0; i < argv.length; i += 1) {
@@ -121,16 +136,54 @@ function assertKnownArgs(argv: string[]): void {
     const name = raw.slice(2);
     if (BOOL_FLAGS.includes(name)) continue;
     if (VALUE_FLAGS.includes(name)) {
+      /**
+       * ── 【定】带值参数**必须真的带一个值**（二次评审 P2-4）────────────────
+       *
+       * 此前是无条件 `i += 1`：参数写在末尾（或后面紧跟另一个 `--flag`）时，
+       * `get()` 拿到 undefined，于是**静默回落到默认档**。
+       *
+       *   npm run … --approval        → 悄悄跑 DEFAULT（用户以为是 auto）
+       *   npm run … --sandbox         → 悄悄**带着沙箱**跑（用户以为关掉了）
+       *
+       * 这正是 M-5 那条「一个被静默吞掉的参数与一个生效的参数不可区分」，
+       * 而这次被吞掉的那个开关关的是边界。旧参数（--endpoint / --workspace）
+       * 一直有同一个洞，一并堵上。
+       */
+      const value = argv[i + 1];
+      if (value === undefined || value.startsWith("--")) {
+        throw new Error(
+          `参数 ${raw} 需要一个值，但${value === undefined ? "它是最后一个参数" : `后面紧跟着 ${value}`}。`,
+        );
+      }
       i += 1; // 跳过它的值，免得值本身被当成参数
       continue;
     }
+    /**
+     * ── 【定】迁移提示照 `--yes` 那条的写法，不做同义开关 ────────────────────
+     *
+     * ADR-0012 把审批做成了一条有三档的轴（`--approval`），于是布尔开关
+     * `--confirm` / `--yes-all` 各自只能表达其中一档，而两个名字与一条轴
+     * 是不同构的。留着它们做别名的代价，本仓已经记过两次：
+     * `STAGE1_ACTIVE_*` 那批的分叉，以及 `--yes` 那个「从来没被解析过、
+     * 能用只因为默认档位本来就是它」的开关。
+     *
+     * 所以是**删掉 ＋ 报错 ＋ 指出新写法**，不是悄悄接受。
+     */
+    const migrated: Record<string, string> = {
+      yes:
+        "`--yes` 已删除：workspace 内的可逆写自动放行本来就是**默认档位**，" +
+        "而这个开关从来没有被解析过。",
+      confirm: "`--confirm` 已改成 `--approval confirm`。",
+      "yes-all":
+        "`--yes-all` 已改成 `--approval auto`（ADR-0012）。" +
+        "它现在两个入口都有，界面上也能中途切。",
+    };
     throw new Error(
       `不认识的参数 ${raw}。\n` +
         `可用：${[...BOOL_FLAGS, ...VALUE_FLAGS].map((f) => `--${f}`).join(" ")}\n` +
-        (name === "yes"
-          ? `（\`--yes\` 已删除：workspace 内的可逆写自动放行本来就是**默认档位**，` +
-            `而这个开关从来没有被解析过。要逐次询问用 --confirm，要批准一切用 --yes-all。）`
-          : ""),
+        `  --approval confirm|default|auto   审批档位（默认 default）\n` +
+        `  --sandbox  on|off                 执行特权（默认 on）\n` +
+        (migrated[name] ? `\n（${migrated[name]}）` : ""),
     );
   }
 }
@@ -163,9 +216,9 @@ function parseArgs(argv: string[]): Args {
     mode,
     task: get("task") ?? "看看 workspace 根目录里有什么，然后写一份 summary.txt 说明你看到了什么。",
     workspace,
-    // 决 3：默认放行（有限 auto-grant）。`--confirm` 显式恢复逐次询问。
-    confirm: argv.includes("--confirm"),
-    yesAll: argv.includes("--yes-all"),
+    // 决 3：默认放行（有限 auto-grant）。ADR-0012 起它是三档轴的中间一档。
+    approval: parseApprovalMode(get("approval")),
+    sandbox: parseSandboxArg(get("sandbox")),
     /**
      * 【定】默认开着。
      *
@@ -191,9 +244,26 @@ function parseArgs(argv: string[]): Args {
  * 验收脚本必须能无人值守跑完。
  */
 function interactiveApproval(
-  /** 默认档位：workspace 内、非 IRREVERSIBLE 的写事先同意（决 3）。 */
-  limitedAutoGrant: boolean,
-  yesAll: boolean,
+  /**
+   * 【定】档位是**读函数**，不是构造期的值（ADR-0012）。
+   *
+   * 这一个字的差别就是「运行中能不能切档」的全部技术前提：decider 在
+   * `compose()` 的那一刻被建出来、之后整个 Run 都用同一个闭包，
+   * 传值进来就意味着档位在那一刻被钉死了。
+   *
+   * CLI 上「切档」的形态是审批提示里的 `a`（本次 Run 不再问）——
+   * 终端没有按钮，但等在提示符前的那个人有一次表达机会，
+   * 而那正好是他最想说「别再问了」的时刻。
+   */
+  approvalMode: () => ApprovalMode,
+  /**
+   * 本次运行的执行特权档位（ADR-0012）。
+   *
+   * 【定】审批面**必须**读它。这是 EXECUTE 唯一的人工授权面，而
+   * 「只能写 workspace」在 UNRESTRICTED 下是假话 —— 在批准那一刻给出一句
+   * 方向相反的保证，比不给保证更糟，且启动横幅补救不了（人看的是这一行）。
+   */
+  executionPrivilege: () => ExecutionPrivilege,
   workspaceRoot: string,
   signal: AbortSignal,
   /**
@@ -218,17 +288,29 @@ function interactiveApproval(
    *   ② 不是 IRREVERSIBLE（覆盖写算「找得回来」，追加与删除不算）；
    *   ③ 不是 EXECUTE。
    *
-   * 不满足的仍然停下来问。真要「批准一切」，得显式写 `--yes-all` ——
+   * 不满足的仍然停下来问。真要「批准一切」，得显式写 `--approval auto` ——
    * 让那个决定有名字，而不是藏在一个看起来很无害的开关后面。
    *
-   * 【定】决 3 起这是**默认档位**，`--confirm` 才回到「每一步都问」。
+   * 【定】决 3 起这是**默认档位**，`--approval confirm` 才回到「每一步都问」。
    */
-  if (yesAll) {
-    return async (a: PreparedAction) => {
-      console.log(`  \x1b[33m(--yes-all) 无条件批准\x1b[0m ${a.toolName} → ${a.resolvedEffect.effectType}`);
-      return { approved: true };
-    };
-  }
+
+  /**
+   * 「本次 Run 不再问」（ADR-0012）。
+   *
+   * ══════════════════════════════════════════════════════════════════════
+   * 【定】它是**逐 Run** 的，不是全局的，也不落盘。
+   *
+   * 逐 Run：人是在看清了某一条具体命令之后说「这类事别再问了」的 ——
+   * 把那句话扩大到下一个 Run 等于替他做了一个他没做过的决定。
+   * 不落盘：与 `PendingHub` 的 waiter 表同一条理由（§18.6【定】
+   * 「等待就是 await，进程死了所有等待一起死」）—— 一个跨进程存活的
+   * 「不再问」会让下次启动时的闸门状态取决于上次的某句话，而盘上看不出来。
+   *
+   * 它在事实表上不是隐形的：被它放行的每一次都记 `decidedBy: "AUTO"`，
+   * 与人亲手敲的 `y`（`HUMAN`）事后可区分。
+   * ══════════════════════════════════════════════════════════════════════
+   */
+  const elevated = new Set<string>();
 
   /**
    * 【定】档位判定住在 Composition Root（`compose.ts` 的 `autoGrantVerdict`），
@@ -276,12 +358,32 @@ function interactiveApproval(
       const desc = typeof input["description"] === "string" ? input["description"] : "";
       console.log(`\n  \x1b[33m即将执行的命令\x1b[0m${desc ? `（${forTerminal(desc)}）` : ""}：`);
       for (const l of forTerminal(cmd).split("\n")) console.log(`    \x1b[1m${l}\x1b[0m`);
-      // 【定】这一行与 `run_shell` 的 description ①、Web 审批卡是**同一句话的三处**，
-      // 必须一起改。分叉过一次：description 承诺「系统临时目录」而实现只放行
-      // per-call 的 $TMPDIR，模型照着写 /tmp 白花一轮（见 run-shell.ts 的说明）。
-      console.log(`  沙箱：只能写 workspace 与本次调用的 $TMPDIR；${
-        input["allow_network"] === true ? "\x1b[31m本次允许联网\x1b[0m" : "禁止联网"
-      }`);
+      /**
+       * 【定】这一行与 `run_shell` 的 description ①、Web 审批卡是**同一句话的三处**，
+       * 必须一起改。分叉过两次，两次都记在这里：
+       *
+       *   ① description 承诺「系统临时目录」而实现只放行 per-call 的 $TMPDIR，
+       *      模型照着写 /tmp 白花一轮（见 run-shell.ts 的说明）；
+       *   ② ADR-0012 加了 UNRESTRICTED 档，我改了 description（加指针）、
+       *      改了 Web 审批卡（按档位分支），**唯独漏了这一处** —— 于是
+       *      `--sandbox off` 下终端会在授权那一刻打印一句方向相反的保证。
+       *      二次评审 P1-4 抓到的，而**警告就写在这段注释里**。
+       *
+       * 【定】这里读的是 `executionPrivilege()`，也就是本进程 compose 的那一档。
+       * 它与 RunSpec 冻结的那一份**必然相等**，保证来自 §18.3 第三维闸门
+       * （换档 resume 会在产生任何 Run 事实之前被拒）。
+       */
+      if (executionPrivilege() === "UNRESTRICTED") {
+        console.log(
+          `  \x1b[31m无沙箱（UNRESTRICTED）：这条命令可写任意路径、可联网，` +
+            `直接作用在这台机器上\x1b[0m`,
+        );
+        console.log(`  仍然生效：读不到凭证文件（.env / .ssh / .aws）`);
+      } else {
+        console.log(`  沙箱：只能写 workspace 与本次调用的 $TMPDIR；${
+          input["allow_network"] === true ? "\x1b[31m本次允许联网\x1b[0m" : "禁止联网"
+        }`);
+      }
       // 这条命令自称要交付什么（ADR-0010）。与 Web 审批卡同一份内容 ——
       // 人批准的不只是「跑这条命令」，还有「它自称要交付这个文件」。
       if (typeof input["artifact_path"] === "string" && input["artifact_path"] !== "") {
@@ -336,38 +438,88 @@ function interactiveApproval(
        * 必须一致，否则「CLI 更不安全」这件事没有任何地方会说出来。
        */
       const line = await stdin.askLine(
-        `${prefix}  是否允许 ${a.toolName} 执行 ${e.effectType} → ${forTerminal(e.scope.value)} ？[y/N] `,
+        `${prefix}  是否允许 ${a.toolName} 执行 ${e.effectType} → ${forTerminal(e.scope.value)} ？` +
+          `[y/N/a=本次 Run 不再问] `,
         signal,
       );
       if (line === undefined) {
+        /**
+         * 【定】这一支记 `UNDECLARED`，**不是** `HUMAN`。
+         *
+         * 它有两种成因（等待被 Ctrl+C 打断、非交互环境无人应答），
+         * 而两种的共同点恰恰是**没有任何人做过这个决定**。
+         * 记 `HUMAN` 会让「没人在场」在事实表上长得像「有人按了否」——
+         * 那正是 E-3 那条教训的形状（结算 USER_REJECTED，
+         * 而全程没有任何人拒绝过任何东西），只是换到了 `decidedBy` 这一列。
+         *
+         * ⚠️ 我第一版就把它写成了 `HUMAN`，而同一批里 Web 那一侧写对了。
+         * 二次复核抓到的 —— 一个新字段最容易错的地方是它的**缺省分支**。
+         */
         return {
           approved: false,
           reason: stdin.isInteractive ? "等待被中断" : "非交互环境下无人应答，按拒绝处置",
+          decidedBy: "UNDECLARED",
         };
       }
       const ans = line.toLowerCase();
+      /**
+       * 【定】`a` 与 `y` 必须是**两个**决定，不能把 `a` 实现成「批准 ＋ 顺手记一下」。
+       *
+       * 它们的 `decidedBy` 不同（这一次仍然是 HUMAN，之后那些是 AUTO），
+       * 而这正是 ADR-0012 那条「事后可区分」的落点：人只看过这一条命令，
+       * 后面那些他没看过。把两者记成同一种，等于宣称他逐条批准过全部。
+       */
+      if (ans === "a" || ans === "all") {
+        elevated.add(String(a.runId));
+        console.log(
+          `  \x1b[33m本次 Run 之后不再询问\x1b[0m（仅这个 Run，不落盘；` +
+            `后续放行会记为 decidedBy=AUTO）`,
+        );
+        return { approved: true, reason: "用户批准并要求本次 Run 不再询问", decidedBy: "HUMAN" };
+      }
       return ans === "y" || ans === "yes"
-        ? { approved: true }
-        : { approved: false, reason: "用户在终端拒绝" };
+        ? { approved: true, decidedBy: "HUMAN" }
+        : { approved: false, reason: "用户在终端拒绝", decidedBy: "HUMAN" };
     } finally {
       stdin.setMode("RUNNING");
     }
   };
 
-  if (limitedAutoGrant) {
-    return async (a: PreparedAction) => {
-      const grant = autoGrant(a);
-      const e = a.resolvedEffect;
-      if (grant.ok) {
-        console.log(`  \x1b[2m(默认档位) 自动批准\x1b[0m ${a.toolName} → ${e.effectType} ${e.scope.value}`);
-        return { approved: true };
-      }
-      finishRendering();
-      console.log(`  \x1b[33m默认档位不覆盖这一步\x1b[0m：${grant.why}`);
-      return ask(a, "");
-    };
-  }
-  return async (a: PreparedAction) => ask(a, "\n");
+  return async (a: PreparedAction): Promise<ApprovalDecision> => {
+    const e = a.resolvedEffect;
+    /**
+     * 【定】档位在**每一次调用时**重新读，不在闭包外读一次。
+     * 少了这一行，`--approval` 之外的一切（界面开关、`a` 键）都不生效。
+     */
+    const mode = approvalMode();
+
+    // 逐 Run 的「不再问」等价于对这个 Run 临时进入 AUTO 档。
+    if (mode === "AUTO" || elevated.has(String(a.runId))) {
+      const why = mode === "AUTO" ? "AUTO 档" : "本次 Run 已设为不再询问";
+      // 【定】`scope.value` 含模型给的路径片段，**这里也要剥**（二次评审 P2-6）。
+       // 人工审批那条路径早就剥了，而自动批准这两条一直是原样输出 ——
+       // 一个带 ANSI / 双向 / 零宽字符的路径可以清屏、覆盖已打印内容，
+       // 甚至把启动时那行红色的「没有任何闸门」盖掉。
+      console.log(
+        `  \x1b[33m(${why}) 自动批准\x1b[0m ${forTerminal(a.toolName)} → ${e.effectType} ${forTerminal(e.scope.value)}`,
+      );
+      return { approved: true, reason: why, decidedBy: "AUTO" };
+    }
+
+    if (mode === "CONFIRM") return ask(a, "\n");
+
+    const grant = autoGrant(a);
+    if (grant.ok) {
+      // 同上（这一条在 ADR-0012 之前就没剥，一并补）。
+      console.log(
+        `  \x1b[2m(默认档位) 自动批准\x1b[0m ${forTerminal(a.toolName)} → ${e.effectType} ${forTerminal(e.scope.value)}`,
+      );
+      return { approved: true, reason: "默认档位自动放行", decidedBy: "AUTO_GRANT" };
+    }
+    finishRendering();
+    console.log(`  \x1b[33m默认档位不覆盖这一步\x1b[0m：${grant.why}`);
+    return ask(a, "");
+  };
 }
 
 /** `--list-runs`：只读一张表，不需要模型也不需要凭证。 */
@@ -421,15 +573,20 @@ async function main(): Promise<void> {
    * 决 3 把默认行为从「逐次问」改成了「workspace 内的可逆写自动放行」——
    * 这是一次对用户可见的行为变更，而没打印的行为变更等于没通知。
    */
-  console.log(
-    `approval : ${
-      args.yesAll
-        ? "--yes-all，无条件批准一切"
-        : args.confirm
-          ? "--confirm，每一步都问"
-          : "默认：workspace 内的写自动放行；IRREVERSIBLE（追加/删除）与 EXECUTE 仍逐次问；越界写直接拒绝"
-    }`,
-  );
+  /**
+   * 【定】两条轴一行打出来，内容由 `describeModes()` 唯一给出。
+   *
+   * 这里此前是一段三分支的字面量 —— 它是 `autoGrantVerdict` 的第二事实来源，
+   * 档位改了它会悄悄漂移（S4-6 在 Web 侧记的是同一个形态）。
+   */
+  console.log(`modes    : ${describeModes(args.approval, args.sandbox)}`);
+  /**
+   * 【定】UNRESTRICTED 必须响一声，AUTO ＋ UNRESTRICTED 要说出「没有任何闸门」。
+   * 一次对用户可见的边界让渡而不打印，等于没通知（决 3 那次改默认档位
+   * 就是因为这条才补的打印）。
+   */
+  const warn = fullAccessWarning(args.approval, args.sandbox);
+  if (warn) console.log(`\x1b[31m⚠️  ${warn}\x1b[0m`);
 
   // Ctrl+C 的传播源。审批等待也挂在它上面（U-2）。
   const sigint = new AbortController();
@@ -478,6 +635,11 @@ async function main(): Promise<void> {
           modelId,
           task: args.task,
           workspaceRoot: args.workspace,
+          // 【定】trace header 要能独立回答「这一段当时有没有沙箱」（P2-5）。
+          // 事件流里 RunStarted 也带了它 —— 两处不是重复：header 描述的是
+          // **这个段**的装配，事件描述的是**这个 Run** 冻结的那一份，
+          // 而 resume 换档会被闸门拒，所以两者必然一致（不一致本身就是信号）。
+          executionPrivilege: args.sandbox,
           timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
           startedAt: new Date().toISOString(),
         }),
@@ -528,18 +690,33 @@ async function main(): Promise<void> {
     mcp,
     workspaceRoot: args.workspace,
     approvalDecider: interactiveApproval(
-      !args.confirm,
-      args.yesAll,
+      () => args.approval,
+      () => args.sandbox,
       args.workspace,
       sigint.signal,
       stdin,
     ),
+    // ADR-0012：第二条轴。冻结进 RunSpec 的就是这个值。
+    executionPrivilege: args.sandbox,
     trace,
     dbPath: args.dbPath,
     endpoint: args.endpoint,
     // S10：接管通道是 stdin 三方复用里的第三方（语义在 S1 定死）。
+    /**
+     * ── 【定】AUTO 档下两条通道的处置**相反**，这是 ADR-0008 的直接后果 ─────
+     *
+     *   ask_user        「你来定」→ 没人回答**不是失败**，模型自己定。
+     *                    AUTO 档下立刻返回 NO_ANSWER，不停下来。
+     *   request_handoff 「你去做」→ 没人接管**就是失败**，那件事真的没做。
+     *                    AUTO 档下**照样等人** —— 自动化的是"要不要问你"，
+     *                    不是"要不要有人去做那件事"。
+     *
+     * 把它们做成同一种处置，正是 ADR-0008 那张对照表存在的理由。
+     * 具体到用户场景：AUTO 档跑浏览器任务时模型请你去登录一下，
+     * 那一停是有价值的 —— 人就在浏览器前面，而 Atlas 登不了那个录。
+     */
     handoff: terminalHandoff(stdin, sigint.signal),
-    question: terminalQuestion(stdin, sigint.signal),
+    question: terminalQuestion(stdin, sigint.signal, () => args.approval),
   });
   interjectInto = (runId, text) => composed.runtime.interject(asId<RunId>(runId), text);
   profileRef = `${composed.profile.id}@${composed.profile.observedAt}`;
@@ -740,9 +917,33 @@ function terminalHandoff(stdin: StdinChannel, signal: AbortSignal): HandoffChann
  * 这里不打印「失败」字样：没有人可问不是错误，是一个正常的降级路径
  * （阶段 3.5 决 3）。措辞跟着语义走，否则读日志的人会以为出了问题。
  */
-function terminalQuestion(stdin: StdinChannel, signal: AbortSignal): QuestionChannel {
+function terminalQuestion(
+  stdin: StdinChannel,
+  signal: AbortSignal,
+  approvalMode: () => ApprovalMode,
+): QuestionChannel {
   return {
     async ask(request) {
+      /**
+       * ── ADR-0012：AUTO 档下不问，直接 NO_ANSWER ──────────────────────────
+       *
+       * 【定】这**不是**「顺手把提问也自动化了」，它是 `ask_user` 本来就有的
+       * 一条正常降级路径（阶段 3.5 决 3）：没人回答不是失败，模型自己定。
+       * AUTO 档的语义就是「现在没有人愿意被问」，与非交互环境同构。
+       *
+       * 【定】仍然要打印出来。它对模型是无声的降级，但对人不能是 ——
+       * 「模型在这里犹豫过、而没有人回答」是复盘时最该看见的一类事实，
+       * 而 AUTO 档下这条事实除了这一行之外没有任何地方会说。
+       */
+      if (approvalMode() === "AUTO") {
+        finishRendering();
+        console.log(
+          `\n  \x1b[33m(AUTO 档) 模型问了一道选择题，没有停下来等你\x1b[0m：` +
+            `${forTerminal(request.question).split("\n")[0]}`,
+        );
+        console.log(`  \x1b[2m它会自己定。要参与这类决定请用 --approval default 或 confirm。\x1b[0m`);
+        return undefined;
+      }
       finishRendering();
       console.log(`\n${"─".repeat(60)}`);
       console.log(`\x1b[36m需要你定一下\x1b[0m`);

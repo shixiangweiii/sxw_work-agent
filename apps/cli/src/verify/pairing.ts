@@ -50,7 +50,8 @@ import {
   type ContextMessage,
 } from "@workagent/harness-runtime";
 import { approveExcept } from "@workagent/testkit";
-import { compose, type ComposeOptions } from "../compose.js";
+import type { ApprovalDecider, ToolSnapshot } from "@workagent/harness-runtime";
+import { compose, DEFAULT_TOOLS, type ComposeOptions } from "../compose.js";
 import { ScriptedModelPort, banner, fact, runVerify, section, tempWorkspace, verdict } from "./harness.js";
 
 /**
@@ -540,12 +541,97 @@ async function main(): Promise<void> {
       "   「所有出口都经过 finalize()」这条手写纪律 —— 所以它需要被反复审视。\n",
   );
 
+  await sectionAttribution();
 }
 
 function countBlocks(messages: ContextMessage[], type: "tool_call" | "tool_result"): number {
   let n = 0;
   for (const m of messages) for (const c of m.content) if (c.type === type) n += 1;
   return n;
+}
+
+
+/**
+ * 归责必须来自事实：只有 `decidedBy === "HUMAN"` 的否决才算「用户拒绝」。
+ *
+ * ── 二次评审 P1-6，而它是一条**既有账**（HEAD 就是这样）─────────────────
+ *
+ * 此前**任何** `approved:false` 都写 `USER_REJECTED`：非交互环境无人应答、
+ * 等待被 Ctrl+C 打断、审批超时，统统算成"用户拒绝"。而 `UnmetCause` 自己的
+ * 【定】写着「必须来自事实（谁拒的），不得由结算逻辑推断」，
+ * ADR-0001 更写着「判 USER_REJECTED 等于把责任栽给用户」。
+ *
+ * `decidedBy`（ADR-0012 加的）第一次提供了那个事实，这一段是它的判据。
+ * **必须成对**：只验其中一侧的话，一个恒写某个成因的实现照样全绿。
+ */
+async function sectionAttribution(): Promise<void> {
+  section("归责：只有人明确否决才算 USER_REJECTED");
+
+  const run = async (decider: ApprovalDecider): Promise<{ kind?: string; causes: string[] }> => {
+    const ws = tempWorkspace();
+    try {
+      const composed = compose({
+        dbPath: ":memory:",
+        workspaceRoot: ws.root,
+        approvalDecider: decider,
+        trace: new CollectingTraceSink(),
+        modelPortOverride: new ScriptedModelPort([
+          {
+            /**
+             * 【定】必须用一个 `requiredForSuccess: true` 的工具。
+             *
+             * 第一版用了 `append_log`（它声明的是 false）—— 拒绝它根本不产生
+             * 未完成的必需项，于是**两侧都判 SUCCESS**，判据分不出任何东西。
+             * 又一次「夹具让正确值与错误值恰好相等」，跑一次就看见了。
+             */
+            text: "写一个文件",
+            toolCalls: [
+              { toolCallId: "r1", name: "write_file", input: { path: "a.txt", content: "x" } },
+            ],
+          },
+          { text: "好了。", toolCalls: [] },
+        ]),
+        tools: DEFAULT_TOOLS.filter((t: ToolSnapshot) => t.definition.name === "write_file"),
+      });
+      const gen = composed.runtime.start(composed.makeRunSpec("归责夹具"));
+      let r = await gen.next();
+      while (!r.done) r = await gen.next();
+      composed.db.close();
+      return {
+        ...(r.value.outcome?.kind ? { kind: r.value.outcome.kind } : {}),
+        causes: (r.value.outcome?.incompleteItems ?? []).map((it) => String(it.why)),
+      };
+    } finally {
+      ws.cleanup();
+    }
+  };
+
+  // ① 人明确按了「否」
+  const byHuman = await run(async () => ({
+    approved: false,
+    reason: "我不想让它写",
+    decidedBy: "HUMAN",
+  }));
+  fact("人明确否决 → outcome", byHuman.kind ?? "未结算");
+  verdict(
+    byHuman.kind === "USER_REJECTED",
+    "人明确否决（decidedBy=HUMAN）→ 结算 USER_REJECTED —— 这是决 2 唯一想表达的那件事",
+  );
+
+  // ② 没有人应答（非交互降级 / 超时 / 等待被中断都走这一支）
+  const noAnswer = await run(async () => ({
+    approved: false,
+    reason: "非交互环境下无人应答，按拒绝处置",
+    decidedBy: "UNDECLARED",
+  }));
+  fact("无人应答 → outcome", noAnswer.kind ?? "未结算");
+  fact("未完成项的理由", noAnswer.causes.join(" | ").slice(0, 120) || "（无）");
+  verdict(
+    noAnswer.kind === "COMPLETED_WITH_LIMITS" &&
+      noAnswer.causes.some((w) => w.includes("没有拿到任何人的应答")),
+    "没有人应答时**不**归责给用户：结算 COMPLETED_WITH_LIMITS，理由如实写「没有拿到任何人的应答」——" +
+      "E-3 那句「结算 USER_REJECTED，而全程没有任何人拒绝过任何东西」说的就是这个形状",
+  );
 }
 
 void runVerify(main);

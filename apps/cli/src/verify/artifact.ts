@@ -35,8 +35,9 @@
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { createServer, type Server } from "node:http";
-import { readFileSync, statSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { tmpdir } from "node:os";
 import {
   CollectingTraceSink,
   findOrphanResults,
@@ -192,6 +193,16 @@ async function runScript(
    * 同一个库里才谈得上。默认仍是 `:memory:`（每次 compose 一份干净的）。
    */
   dbPath = ":memory:",
+  /**
+   * E3 段用它跑 UNRESTRICTED 档。
+   *
+   * 【定】走 `compose()` 而不是手工构造 `ToolExecutionContext` —— 那正是
+   * 二次评审 5.3 指出的判据盲区：B9–B12 直接调 handler，跨不过
+   * `compose → RunSpec → run-loop → settle-batch → ctx` 这几跳。
+   * 把 `settle-batch` 里那个 `executionPrivilege: deps.executionPrivilege`
+   * 改成写死 `"SANDBOXED"`，此前 **212 条判据一条都不会红**。
+   */
+  executionPrivilege?: "SANDBOXED" | "UNRESTRICTED",
 ): Promise<RunResult> {
   const trace = new CollectingTraceSink();
   const composed = compose({
@@ -199,6 +210,7 @@ async function runScript(
     workspaceRoot,
     approvalDecider: async () => ({ approved: true }),
     trace,
+    ...(executionPrivilege ? { executionPrivilege } : {}),
     modelPortOverride:
       modelOverride ?? new ScriptedModelPort([...turns, { text: "做完了。", toolCalls: [] }]),
     ...(toolsOverride ? { portOverrides: { tools: toolsOverride } } : {}),
@@ -1291,6 +1303,96 @@ async function sectionArtifacts(): Promise<void> {
   }
 
   // ══════════════ E2. 同一 logicalId 的版本链，只有最终版本算交付
+  // ═════════════ E3：交付物 containment（ADR-0012 二次评审 P1-1 ＋ 5.3）
+  section("E3. UNRESTRICTED 可以写到 workspace 外，但那**不算**本 Run 的交付物");
+  console.log(
+    "   这一段是**跨层**判据，二次评审 5.3 点名要的那种：它走的是完整生产链\n" +
+      "   `compose(executionPrivilege) → makeRunSpec 冻结 → run-loop → settle-batch → ctx`，\n" +
+      "   而不是手工构造一个 ToolExecutionContext 去调 handler。\n" +
+      "   **把 settle-batch 里那句 `executionPrivilege: deps.executionPrivilege` 改成\n" +
+      "   写死 `\"SANDBOXED\"`，B9–B12 一条都不会红** —— 因为它们都在那一跳的下游。\n" +
+      "\n" +
+      "   它同时钉住 P1-1：ADR-0012 的代价③写着「UNRESTRICTED 下交付物登记仍限\n" +
+      "   workspace 内」，而实现一度没兑现 —— 外部文件被登记、通过 hash 检查\n" +
+      "   （检查器算 `resolve(workspaceRoot, path)`，绝对路径会原样返回自己）、\n" +
+      "   进 deliveredArtifactIds，被冒认成本 Run 的交付物。\n",
+  );
+  {
+    const wsE3 = tempWorkspace();
+    const outsideDir = mkdtempSync(join(tmpdir(), "wa-verify-artifact-outside-"));
+    const outsideFile = resolve(outsideDir, "outside-deliverable.json");
+    try {
+      const r = await runScript(
+        wsE3.root,
+        [
+          {
+            text: "产出两份东西：一份在 workspace 内，一份在外面",
+            toolCalls: [
+              {
+                toolCallId: "x1",
+                name: "write_file",
+                input: { path: "inside.json", content: '{"ok":true}', artifact_role: "DELIVERABLE" },
+              },
+              {
+                toolCallId: "x2",
+                name: "write_file",
+                input: { path: outsideFile, content: '{"ok":true}', artifact_role: "DELIVERABLE" },
+              },
+            ],
+          },
+        ],
+        undefined,
+        undefined,
+        ":memory:",
+        "UNRESTRICTED",
+      );
+
+      const started = r.trace.byType("RunStarted").map((e) => e.payload)[0] as
+        | { executionPrivilege?: string }
+        | undefined;
+      const registered = r.trace.byType("ArtifactRegistered").map((e) => e.payload);
+      const delivered = r.outcome?.deliveredArtifactIds ?? [];
+      const wroteOutside = existsSync(outsideFile);
+
+      fact("RunStarted.executionPrivilege", started?.executionPrivilege ?? "（缺 —— 事件没带）");
+      fact("workspace 外的文件真的写出来了吗", wroteOutside ? "是（档位穿透了整条链）" : "否 ← 链路某一跳丢了档位");
+      fact("登记的产物", registered.map((a) => a.logicalId).join(", ") || "（无）");
+      fact("deliveredArtifactIds", `${delivered.length} 个`);
+      fact("outcome.kind", r.outcome?.kind ?? "未结算");
+
+      /**
+       * 【定】这一条**必须**验「外部写成功了」。它是跨层判据的判别力所在：
+       * 少了它，一个「档位根本没传到 ctx」的实现会因为写失败而**顺带**
+       * 让下一条（外部产物没进交付集合）变绿 —— 那正是空数组恒真的同族。
+       */
+      verdict(
+        wroteOutside && started?.executionPrivilege === "UNRESTRICTED",
+        "UNRESTRICTED 经 compose → RunSpec 冻结 → ctx 一路传到底：workspace 外的写**真的成功了**，" +
+          "且 RunStarted 事件带着冻结的那一档（trace 独立可审计，P2-5）",
+      );
+      verdict(
+        registered.some((a) => String(a.logicalId).endsWith("inside.json")) &&
+          !registered.some((a) => String(a.logicalId) === outsideFile) &&
+          delivered.length === 1,
+        "而那份 workspace 外的文件**没有**被登记、没有进交付集合 —— " +
+          "执行特权放开的是「命令能写到哪」，不是「什么算交付物」（ADR-0012 代价③）",
+      );
+      /**
+       * 【定】拒绝必须**留下一条失败的检查事实**，不能静默跳过。
+       * 静默跳过的话，「声明了交付物但没交付成」与「压根没声明」在结算上
+       * 不可区分 —— 而前者应当让 DELIVERABLE 判 FAILED。
+       */
+      verdict(
+        r.outcome?.kind === "FAILED",
+        "声明成 DELIVERABLE 却落在 workspace 外 → 留下一条失败的检查事实 → 按既有 role 分流判 FAILED；" +
+          "**不是静默跳过**（静默跳过会让「没交付成」与「压根没声明」不可区分）",
+      );
+    } finally {
+      rmSync(outsideDir, { recursive: true, force: true });
+      wsE3.cleanup();
+    }
+  }
+
   section("E2. 同一 logicalId 登记两次 → 交付集合里只有**最终**那一版");
   console.log(
     "   实测逼出来的（Run `run_18c20267c1a1`，2026-09-01）。上一个 Run 在 workspace\n" +

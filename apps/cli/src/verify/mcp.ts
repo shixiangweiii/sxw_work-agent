@@ -84,6 +84,7 @@ function ctxFor(root: string): ToolExecutionContext {
     workspaceRoot: root,
     onProgress: () => {},
     timezone: "Asia/Shanghai",
+    executionPrivilege: "SANDBOXED",
   };
 }
 
@@ -253,10 +254,12 @@ async function main(): Promise<void> {
   const readVerdict = evaluatePolicy({
     action: { resolvedEffect: readEffect } as unknown as PreparedAction,
     approvalPolicy: TRUSTED_PERSONAL,
+    executionPrivilege: "SANDBOXED",
   });
   const execVerdict = evaluatePolicy({
     action: { resolvedEffect: execEffect } as unknown as PreparedAction,
     approvalPolicy: TRUSTED_PERSONAL,
+    executionPrivilege: "SANDBOXED",
   });
   fact("read 档 Policy 判定", readVerdict.decision);
   fact("execute 档 Policy 判定", execVerdict.decision);

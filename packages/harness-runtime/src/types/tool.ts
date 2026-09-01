@@ -404,9 +404,41 @@ export interface ActionBatch {
 
 // ───────────────────────────────────────────────────────── Approval
 
+/**
+ * 谁做的这个决定。
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ * 【定】它由**决策者自己声明**，Runtime 不推断。
+ *
+ * 加它的直接理由：在此之前 `--yes-all` 的无条件批准与一个人亲手敲 y，
+ * 在 `ApprovalDecided` 事件上**一个字都不差**（两者都是不带 reason 的
+ * `{approved:true}`）。于是一条自动跑完的 Run 与一条被逐步审视过的 Run，
+ * 在 Trace、事件流、界面上事后完全不可区分 —— 这正是本仓反复在修的形态
+ * （`dataMovement` 那次、`replacedBytes` 那次都是同一条）。
+ *
+ * 【定】Runtime 不给它兜底成 `HUMAN`。没声明就记 `UNDECLARED`，
+ * 那是一句真话；记 `HUMAN` 是一句假话，而假话在事实表里比空白贵得多。
+ * ══════════════════════════════════════════════════════════════════════
+ */
+export type ApprovalDecidedBy =
+  /** 人当场做的决定（终端敲 y/n、界面上点了按钮）。 */
+  | "HUMAN"
+  /** 档位性的无条件放行（AUTO 档、或人对本次 Run 说过「不再问」）。 */
+  | "AUTO"
+  /** 有限自动放行：满足既定条件才放行（`autoGrantVerdict`）。 */
+  | "AUTO_GRANT"
+  /** 决策者没有声明来源（脚本化 decider 多半如此）。**不猜**。 */
+  | "UNDECLARED";
+
 export interface ApprovalDecision {
   approved: boolean;
   reason?: string;
+  /**
+   * 【定】新写的 decider **必须**填它。类型上是可选的，只是为了不逼着
+   * 十几条验收脚本里的脚本化 decider 全部改签名 —— 它们如实落
+   * `UNDECLARED`，而那正是它们的真实情况。
+   */
+  decidedBy?: ApprovalDecidedBy;
 }
 
 /**
@@ -448,8 +480,31 @@ export interface VerificationResult {
  * 那一类继续走 SUCCESS ＋ summary，取舍写在 ADR 里（决 2）。
  */
 export type UnmetCause =
-  /** 用户在审批环节明确拒绝。 */
+  /**
+   * 用户在审批环节**明确拒绝**。
+   *
+   * 【定】只有 `ApprovalDecision.decidedBy === "HUMAN"` 的否决才算
+   * （ADR-0012 二次评审 P1-6）。此前**任何** `approved:false` 都写这个值 ——
+   * 包括非交互环境无人应答、等待被 Ctrl+C 打断、以及审批超时。
+   * 于是「没有人在场」在事实表上长得和「有人按了否」一模一样，
+   * 而上面那条【定】写着「必须来自事实（谁拒的）」。
+   * E-3 那句「结算 USER_REJECTED，而全程没有任何人拒绝过任何东西」
+   * 说的就是这个形状，只是当时修的是另一半。
+   */
   | "USER_REJECTED"
+  /**
+   * 审批**没有拿到应答**：无人值守、等待被中断、或审批超时。
+   *
+   * 【定】它与 `USER_REJECTED` 必须分开，理由与 ADR-0001 论证
+   * `COMPLETED_WITH_LIMITS` 的那句一致：**不声称自己知道该怪谁**。
+   * 它的事实来源同样明确（`decidedBy` 不是 `HUMAN` 而决定是否决），
+   * 所以它满足这个值域「只放有明确事实来源的成因」那条【定】。
+   *
+   * 【定】它**不会**让 outcome 判成 `USER_REJECTED` —— `settle-outcome`
+   * 要求所有未达成项都是 `USER_REJECTED` 才那么判，混进这个值就落
+   * `COMPLETED_WITH_LIMITS`，那正是诚实的结果。
+   */
+  | "NO_APPROVAL"
   /** Policy 判定越界。 */
   | "POLICY_DENIED"
   /** 工具执行失败或抛异常。 */

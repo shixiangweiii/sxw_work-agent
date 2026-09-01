@@ -298,12 +298,17 @@ export function projectTimeline(input: ProjectionInput): UiTranscriptEntry[] {
             requested: a.approval?.requested ?? false,
             approved: ev.payload.approved,
             ...(ev.payload.reason ? { reason: ev.payload.reason } : {}),
+            // 【定】原样转述，不推算（决 5）。事件里是什么就是什么 ——
+            // 包括 `UNDECLARED`：把它在界面上美化成「已批准」会重新造出
+            // ADR-0012 要消灭的那个不可区分。
+            decidedBy: ev.payload.decidedBy,
           };
         }
         const prior = out.get(`approval:${ev.payload.actionId}`) as UiApproval | undefined;
         if (prior) {
           prior.approved = ev.payload.approved;
           if (ev.payload.reason) prior.decisionReason = ev.payload.reason;
+          prior.decidedBy = ev.payload.decidedBy;
         }
         break;
       }

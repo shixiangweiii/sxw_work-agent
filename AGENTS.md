@@ -14,7 +14,7 @@ Stage 3 added the `tools/` layer, so the dependency direction is now `apps → p
 
 - `npm ci`: install locked workspace dependencies.
 - `npm run typecheck`: run strict TypeScript checks; no build step emits files.
-- `npm run dev -- --task "list files and write summary.txt"`: run the headless CLI; add `--workspace <path>`, `--endpoint bailian|deepseek`, or `--confirm` to be asked before every write. While a Run is going, typing a line and pressing Return injects it into the next turn.
+- `npm run dev -- --task "list files and write summary.txt"`: run the headless CLI; add `--workspace <path>`, `--endpoint bailian|deepseek`, `--approval confirm|default|auto`, or `--sandbox on|off` (ADR-0012: two orthogonal axes — approval asks a human, sandbox bounds what a command can touch). While a Run is going, typing a line and pressing Return injects it into the next turn.
 - `npm run verify:all`: run all acceptance scripts; use an individual `verify:*` command for evidence.
 
 ## Coding Style & Naming Conventions

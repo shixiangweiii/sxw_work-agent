@@ -27,6 +27,7 @@ import {
   type AgentSpecId,
   type ApprovalDecider,
   type EndpointCapabilityProfile,
+  type ExecutionPrivilege,
   type PreparedAction,
   type RedactionOutcome,
   type RedactionPort,
@@ -254,6 +255,142 @@ export function readEndpointConfig(
 
 export type AutoGrantVerdict = { ok: true } | { ok: false; why: string };
 
+// ══════════════════════════════════════════ 两条档位轴（ADR-0012）
+
+/**
+ * 审批档位。**两条轴里的第一条**，与 `ExecutionPrivilege` 正交。
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ * 【定】它住在 Composition Root，Runtime 一个字都不认识它。
+ *
+ * Runtime 只看得见 `ApprovalDecider` 的返回值 —— 「档位」是"人在哪、
+ * 人愿意被问多少次"的产品概念，与 §14.3 把审批做成注入点是同一条理由。
+ *
+ * ── 【定】为什么它可以运行中改，而 `ExecutionPrivilege` 不行 ──────────────
+ *
+ * 审批档位不进 RunSpec，也不参与任何**恢复语义**：`ApprovalDecided` 事件
+ * 逐条记下了当时那一次的真实决定（`decidedBy`），于是"跑到一半切了档"
+ * 在事实表上是完整可读的，不需要一个 Run 级字段去概括它。
+ * 而 `ExecutionPrivilege` 决定的是"那些副作用当时有没有边界"——
+ * 它必须冻结，见那个类型的说明。
+ *
+ * ── 【定】三档，不设第四档，也不留同义开关 ────────────────────────────────
+ *
+ * `--yes` 那件事的教训是"一个被静默吞掉的参数与一个生效的参数不可区分"，
+ * `STAGE1_ACTIVE_*` 那批的教训是别名会让两处定义悄悄分叉。所以这里只有
+ * 三个值、一个参数名，`--yes-all` 已删除并在 `assertKnownArgs` 里留了迁移提示。
+ * ══════════════════════════════════════════════════════════════════════
+ */
+export type ApprovalMode =
+  /**
+   * 每一个**需要审批的**操作都问 —— 不做有限自动放行。
+   *
+   * ── 【定】不是「每一步都问」（二次评审 P1-5）────────────────────────────
+   *
+   * 这句话此前写的是「每一步都问」，README / UI / CLI 帮助里也都是这么说的。
+   * 回源：审批 decider **只在 Policy 返回 `REQUIRE_APPROVAL` 时才被调用**，
+   * 而 `TRUSTED_PERSONAL` 只对 WRITE / DELETE / EXECUTE 返回它 ——
+   * `read_file`、`list_dir`、`search`、`fetch_url` 在任何档位下都不会问。
+   *
+   * 那是决 3 拍板的设计（读放开 ＋ 三条护栏），**行为不改**；
+   * 不准的是这句话。而它不准的方向最糟：用户选了最保守的档位，
+   * 以为连 `fetch_url` 都会问一句，实际不会。
+   */
+  | "CONFIRM"
+  /** 决 3 的有限自动放行：workspace 内、非 IRREVERSIBLE 的写事先同意。 */
+  | "DEFAULT"
+  /** ADR-0012：一律自动放行。原 `--yes-all` 的语义，现在两个入口都有。 */
+  | "AUTO";
+
+/**
+ * `--approval confirm|default|auto` → `ApprovalMode`。
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ * 【定】受枚举约束，拼错**立刻失败**；且它住在 compose.ts，两个入口共用。
+ *
+ * 两条纪律各有一次前车之鉴：
+ *   · 枚举约束 —— `--endpoint deepsek` 会静默回落到主力端点（M-5 的形状）。
+ *     这里错得更贵：`--approval ato` 静默落回 DEFAULT，意味着用户以为
+ *     自己开了免打扰、实际跑到一半停下来等人，而他已经走开了。
+ *   · 共用一份 —— `parseEndpointArg` 被抄一份的后果是 eval 的端点枚举
+ *     一直没跟上。审批档位抄一份的后果是两个入口的闸门语义分叉。
+ * ══════════════════════════════════════════════════════════════════════
+ */
+export function parseApprovalMode(raw: string | undefined): ApprovalMode {
+  if (raw === undefined) return "DEFAULT";
+  const v = raw.toUpperCase();
+  if (v === "CONFIRM" || v === "DEFAULT" || v === "AUTO") return v;
+  throw new Error(
+    `--approval 只能是 confirm / default / auto，收到：${raw}\n` +
+      `  confirm  每个需要审批的操作都问（读操作与 fetch_url 不问）\n` +
+      `  default  workspace 内的写自动放行；IRREVERSIBLE 与 EXECUTE 逐次问（默认）\n` +
+      `  auto     一律自动批准，不会停下来问`,
+  );
+}
+
+/**
+ * `--sandbox on|off` → `ExecutionPrivilege`。
+ *
+ * 【定】参数名是 `on|off` 而返回值是 `SANDBOXED|UNRESTRICTED`，这不是随意的：
+ * 命令行上用户想的是「沙箱开不开」，而代码里传递的是「这次运行有什么特权」。
+ * 后者才是 Runtime 该认识的词（边界 7：Runtime 不认识"沙箱"这个实现概念）。
+ */
+export function parseSandboxArg(raw: string | undefined): ExecutionPrivilege {
+  if (raw === undefined) return "SANDBOXED";
+  const v = raw.toLowerCase();
+  if (v === "on") return "SANDBOXED";
+  if (v === "off") return "UNRESTRICTED";
+  throw new Error(
+    `--sandbox 只能是 on / off，收到：${raw}\n` +
+      `  on   run_shell 只能写 workspace 与本次调用的 $TMPDIR；越界写直接拒绝（默认）\n` +
+      `  off  无沙箱：可写任意路径、可联网、越界写不再被拒。见 ADR-0012`,
+  );
+}
+
+/**
+ * 一句话说清当前两条轴分别在哪一档。
+ *
+ * 【定】**唯一一份**，CLI 的启动横幅、Web 的 `info().approvalMode`、
+ * 界面徽章的 tooltip 全都读它。
+ *
+ * 它关掉的是 S4-6：`info().approvalMode` 此前是一句硬编码描述串 ——
+ * `autoGrantVerdict` 的第二事实来源，档位改了它会悄悄漂移，
+ * 而漂移的形态是"界面上写着一句关于闸门的、听起来很确定的假话"。
+ */
+export function describeModes(approval: ApprovalMode, privilege: ExecutionPrivilege): string {
+  const a =
+    approval === "AUTO"
+      ? "AUTO：一律自动批准，不会停下来问"
+      : approval === "CONFIRM"
+        ? "CONFIRM：每个需要审批的操作都问（读操作不问）"
+        : "DEFAULT：workspace 内的写自动放行；IRREVERSIBLE（追加/删除）与 EXECUTE 逐次问";
+  const s =
+    privilege === "UNRESTRICTED"
+      ? "UNRESTRICTED：**无沙箱**，run_shell 可写任意路径、可联网；越界写不再被直接拒绝"
+      : "SANDBOXED：run_shell 只能写 workspace 与本次调用的 $TMPDIR；越界写直接拒绝";
+  return `审批 ${a}｜执行 ${s}`;
+}
+
+/**
+ * 【定】这两档同时到位时必须响一声，且措辞里要有"没有闸门"这四个字。
+ *
+ * 理由是本仓自己的实测记录：故障注入期间摘掉 `deny file-write*` 那一次，
+ * **真的在 `$HOME` 建出了探针文件**。AUTO ＋ UNRESTRICTED 不是一个理论组合，
+ * 它就是那次注入的常态化版本 —— 区别只在于这次是人自己选的。
+ *
+ * 返回 undefined 表示没什么要警告的。调用方把它打进启动横幅 / notices。
+ */
+export function fullAccessWarning(
+  approval: ApprovalMode,
+  privilege: ExecutionPrivilege,
+): string | undefined {
+  if (privilege !== "UNRESTRICTED") return undefined;
+  return approval === "AUTO"
+    ? "完全权限：AUTO ＋ UNRESTRICTED。模型发起的命令会直接作用在这台机器上，" +
+        "既没有沙箱、也没有人会被问一句 —— 此时没有任何闸门。"
+    : "UNRESTRICTED：沙箱不生效，run_shell 可写任意路径。唯一还在的闸门是审批和你本人。";
+}
+
 /**
  * 「这一步我事先同意了吗」—— 阶段 3 决 3 的默认档位。
  *
@@ -421,6 +558,19 @@ export interface ComposeOptions {
   systemPrompt?: string;
   /** IANA 时区名。不传则取宿主时区。验收脚本可固定它，让帧内容可复现。 */
   timezone?: string;
+  /**
+   * 执行特权档位（ADR-0012）。**不传 = `SANDBOXED`**。
+   *
+   * 【定】默认值必须是保守的那一档，而且必须写在这里、不写在调用方。
+   * 让每个入口各自决定默认值，会出现"CLI 默认有沙箱、某个 verify 脚本
+   * 默认没有"这种不一致 —— 而它在绿灯下看不出来（脚本照样跑过）。
+   *
+   * 它有两个消费者，**必须是同一个值**：
+   *   ① `makeRunSpec` 冻结进 `agentSpec.executionPrivilege`（权威副本）；
+   *   ② `ShellEffectResolver` 的构造参数（它拿不到 RunSpec）。
+   * resume 时两者的一致性由 `assertResumeExecutionPrivilegeMatches` 保证。
+   */
+  executionPrivilege?: ExecutionPrivilege;
   /**
    * 覆盖上下文预算策略。verify:compact 用它把阈值调到几百 token ——
    * 默认的 60k/100k 在脚本化模型下永远撞不到，Compact 就永远测不着
@@ -609,6 +759,9 @@ export function compose(opts: ComposeOptions): Composed {
    * 而那种不一致在绿灯下看不出来。这与 Composition Root 只有一份是同一条理由。
    */
   const tools = [...(opts.tools ?? DEFAULT_TOOLS), ...(opts.mcp?.snapshots ?? [])];
+  // 【定】保守档是默认值，且**只在这里**取一次 —— 下面三个消费者
+  // （RunSpec 冻结、ShellEffectResolver、启动横幅）读的必须是同一个变量。
+  const executionPrivilege: ExecutionPrivilege = opts.executionPrivilege ?? "SANDBOXED";
   const systemPrompt = opts.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
   const contextPolicy = opts.contextPolicy ?? DEFAULT_CONTEXT_POLICY;
 
@@ -689,7 +842,7 @@ export function compose(opts: ComposeOptions): Composed {
       opts.portOverrides?.effects ??
       new DeclarativeEffectResolver(
         new Map([
-          [SHELL_RESOLVER_KEY, new ShellEffectResolver()],
+          [SHELL_RESOLVER_KEY, new ShellEffectResolver(executionPrivilege)],
           /**
            * MCP 是**逐工具**一条注册项，不是一条共用的。
            *
@@ -735,6 +888,9 @@ export function compose(opts: ComposeOptions): Composed {
     // 同上，第二维：resume 时用来判断冻结快照里的**外部工具**有没有漂移。
     // 【定】只比对，不顶替 —— §18.2 的分支判定读的永远是冻结的那份。
     currentToolSnapshots: tools,
+    // 同上，第三维（ADR-0012）。它同时是 `ShellEffectResolver` 那个
+    // 构造期档位的正确性前提：闸门保证 resolver 与冻结值必然相等。
+    currentExecutionPrivilege: executionPrivilege,
   });
 
   const makeRunSpec = (task: string, entry: RunEntry = "CLI"): RunSpec => ({
@@ -766,6 +922,10 @@ export function compose(opts: ComposeOptions): Composed {
       systemPrompt,
       // 【定】随 RunSpec 冻结。Replay 要在原时区下重放，不能取重放机器的当前时区。
       timezone: opts.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone,
+      // 【定】同上，ADR-0012。冻结的理由比时区更硬：它决定的是
+      // 「那些副作用当时有没有边界」，而 resume 一旦用今天的档位去接昨天的
+      // transcript，事后没有任何东西能说出真相。
+      executionPrivilege,
       toolSnapshots: tools,
       contextPolicy,
       // 【定】只放循环自己的重试上限。turns 与连续失败是**预算轴**，

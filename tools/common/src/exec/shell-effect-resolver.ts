@@ -15,6 +15,7 @@
 
 import { createHash } from "node:crypto";
 import type {
+  ExecutionPrivilege,
   JsonValue,
   ResolvedEffect,
   TrustedEffectResolver,
@@ -25,10 +26,37 @@ export const SHELL_RESOLVER_REF = { id: "shell-command", version: "1.0.0" } as c
 export const SHELL_RESOLVER_KEY = `${SHELL_RESOLVER_REF.id}@${SHELL_RESOLVER_REF.version}`;
 
 export class ShellEffectResolver implements TrustedEffectResolver {
+  /**
+   * 【定】档位在**构造期**注入，与 RunSpec 里冻结的那一份必然相等 ——
+   * 保证它的是 `assertResumeExecutionPrivilegeMatches`（§18.3 第三维）：
+   * 换一档 resume 会在做任何事之前被挡下。
+   *
+   * 没有那道闸门的话，这里会出现本仓最讨厌的那种漂移：resolver 用今天的档位、
+   * policy 与工具用冻结的那一档，两者对同一个 Action 说不同的话。
+   */
+  constructor(private readonly executionPrivilege: ExecutionPrivilege = "SANDBOXED") {}
+
   resolve(normalizedInput: JsonValue, _workspaceRoot: string): ResolvedEffect {
     const input = (normalizedInput ?? {}) as Record<string, JsonValue>;
     const command = typeof input.command === "string" ? input.command : "";
-    const allowNetwork = input.allow_network === true;
+    const declaredNetwork = input.allow_network === true;
+    /**
+     * ── ADR-0012：UNRESTRICTED 档下「这条命令没联网」是一句说不出口的话 ──
+     *
+     * `allow_network` 在 SANDBOXED 档下是一个**被内核强制**的开关：没传，
+     * seatbelt 的 `(deny network*)` 就在那儿，所以「没传 ＝ 没联网」是事实。
+     *
+     * UNRESTRICTED 档下没有那条 deny —— 进程无条件有网。此时若照旧只按
+     * `allow_network` 记 `DATA_LEAVES_HOST`，一条没传这个参数、却
+     * `curl` 了半个互联网的命令，在 `riskFacts` 上会与一条纯本地命令
+     * **完全一样**。那正是本仓反复在修的形态：Atlas 说了一句
+     * 「需要理解它才能成立」的话（`dataMovement` 那次一字不差）。
+     *
+     * 【定】处置是**如实记「无法排除」**，不是不记，也不是假装没联网。
+     * 代价是这一档下 `run_shell` 全部带 `DATA_LEAVES_HOST` —— 那正是实情。
+     */
+    const unrestricted = this.executionPrivilege === "UNRESTRICTED";
+    const allowNetwork = declaredNetwork || unrestricted;
 
     const a = analyzeCommand(command);
 
@@ -82,7 +110,13 @@ export class ShellEffectResolver implements TrustedEffectResolver {
               // 命令行里可能就装着被外发的内容，抄进 Trace 等于让审计记录
               // 自己变成第二个泄漏点。
               destination: "(命令自定，未解析)",
-              scope: `shell.exec 显式开启了网络；程序：${a.programs.join(",") || "(未解析)"}`,
+              // 【定】两句话必须能被事后区分：一句是模型声明了要联网，
+              // 另一句是**没人知道它联没联网**。合并成一句的话，UNRESTRICTED 档
+              // 跑出来的每一条命令都会看起来像"模型主动声明过"。
+              scope: declaredNetwork
+                ? `shell.exec 显式开启了网络；程序：${a.programs.join(",") || "(未解析)"}`
+                : `UNRESTRICTED 档无沙箱、网络无条件可用，**无法排除**外发；` +
+                  `程序：${a.programs.join(",") || "(未解析)"}`,
             },
           }
         : {}),
@@ -96,8 +130,15 @@ export class ShellEffectResolver implements TrustedEffectResolver {
      *
      * 原文写的是「审批授权是按 digest 认的 —— 只哈希程序名等于
      * 『批准过一次 git，之后所有 git 都算批过』」。回源核对后：
-     * **`main.ts` 的审批没有任何记忆**，每次 EXECUTE 都是新鲜问
-     * （`--yes-all` 则无条件批）。那个反例描述的复用从来不存在。
+     * **审批不按 digest 认**，每次 EXECUTE 都是新鲜问。
+     * 那个反例描述的复用从来不存在。
+     *
+     * ⚠️ 2026-09-01（ADR-0012）：「审批没有任何记忆」这半句已经**不再准确** ——
+     * `--approval auto` 与「本次 Run 不再问」都会让后续放行不再询问。
+     * 但结论不变，因为那两者是**按 Run** 记的，仍然与 digest 无关：
+     * 没有任何一条路径会因为「这个 digest 批过」而放行下一次。
+     * 改这段时注意区分这两件事 —— 上一次就是把「没有记忆」当成了
+     * 「按 digest 复用」的否证，而它们不是同一个命题。
      *
      * 行为是对的，理由是错的 —— 而这个仓库自己的教训恰恰是
      * 「一处结论被抄进第二个地方之后就不再有人回源」，

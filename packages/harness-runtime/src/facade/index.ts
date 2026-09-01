@@ -7,8 +7,10 @@
 
 import type { RunEvent } from "../types/event.js";
 import type { Terminal } from "../types/loop.js";
+import { executionPrivilegeOf } from "../types/run.js";
 import type {
   ArtifactCheckFact,
+  ExecutionPrivilege,
   RecoveryItem,
   ResumableRunFacts,
   RunOutcome,
@@ -20,7 +22,10 @@ import type { ActionBatchId, ActionId, ModelInvocationId, RunId } from "../types
 import { asId, digest } from "../types/ids.js";
 import type { RunListItem, RuntimePorts, ToolExecutionContext } from "../ports/index.js";
 import { assertResumeEndpointMatches, freezeRunSpec } from "../model/capability/profile-loader.js";
-import { assertResumeWorkspaceMatches } from "../workspace/index.js";
+import {
+  assertResumeExecutionPrivilegeMatches,
+  assertResumeWorkspaceMatches,
+} from "../workspace/index.js";
 import type {
   ApprovalDecider,
   PreparedAction,
@@ -68,6 +73,17 @@ export interface HarnessRuntimeDeps {
    * 报不出「其中哪些漂移了」—— 少一半信息，但不会假装验过。
    */
   currentToolSnapshots?: ToolSnapshot[];
+  /**
+   * 当前进程装配出来的执行特权档位（ADR-0012）。
+   *
+   * 【定】与 `currentEndpointProfile` / `currentToolSnapshots` 同一条纪律：
+   * **只用来比对冻结的那一份，绝不用来顶替它**。执行期读的永远是
+   * `executionPrivilegeOf(spec.agentSpec)`。
+   *
+   * 不传按 `SANDBOXED` 处置 —— 那是 `compose()` 的默认值，两处必须同向。
+   * 反向（不传按 UNRESTRICTED）会让一个忘了传的调用方悄悄拿到无沙箱执行。
+   */
+  currentExecutionPrivilege?: ExecutionPrivilege;
 }
 
 export interface StartResult {
@@ -126,6 +142,23 @@ export class HarnessRuntime {
      * 跨进程之后这条不能再含糊：盘上那份是快照，内存那份若还能改，
      * §18.3 的「声明是否仍与冻结版一致」就变成了自己跟自己比。
      */
+    /**
+     * ── 【定】start 也要过 privilege 闸门（二次评审 P2-1）─────────────────
+     *
+     * `resume` 有这道闸门而 `start` 没有，于是 Facade 的公开不变量
+     * 「RunSpec 冻结的那一档 == 本进程装配的那一档」**只在恢复路径上成立**。
+     * 而 `ShellEffectResolver` 拿的是**装配期**的档位、Policy 与工具拿的是
+     * **冻结**的那一份 —— 两者分叉时，同一个 Action 会被两处用不同档位判定。
+     *
+     * 当前 CLI / Web 的 `makeRunSpec()` 恰好保持一致，所以这条今天不会触发。
+     * 但「今天恰好一致」不是不变量：任何一个自己拼 RunSpec 的调用方
+     * （验收脚本、将来的 Layer 2 批处理）都能悄悄把它破坏掉。
+     * 【定】排在 `createRun` **之前** —— 不合格的 Run 不该在库里留下任何痕迹。
+     */
+    assertResumeExecutionPrivilegeMatches(
+      executionPrivilegeOf(spec.agentSpec),
+      this.deps.currentExecutionPrivilege ?? "SANDBOXED",
+    );
     const frozen = freezeRunSpec(spec);
     await this.deps.ports.runs.createRun({
       runId,
@@ -246,6 +279,22 @@ export class HarnessRuntime {
      * 连「这个 Run 现在是什么状态」都该被怀疑。不一致就抛，没有第三档。
      */
     assertResumeWorkspaceMatches(spec.workspace, this.deps.workspaceRoot);
+
+    /**
+     * §18.3 的第三维：**执行特权档位**（ADR-0012）。
+     *
+     * 与前两道并排、同样排在生命周期闸门之前。它守的是「那些副作用当时
+     * 有没有边界」—— 两个方向的后果见 `assertResumeExecutionPrivilegeMatches`。
+     *
+     * 【定】它同时是 `ShellEffectResolver` 那个构造期档位的正确性前提：
+     * resolver 拿的是**当前进程**装配的档位，policy 与工具拿的是**冻结**的
+     * 那一档。这道闸门保证两者必然相等 —— 少了它，同一个 Action
+     * 会被两处用不同的档位判定，而那种分叉在绿灯下看不出来。
+     */
+    assertResumeExecutionPrivilegeMatches(
+      executionPrivilegeOf(spec.agentSpec),
+      this.deps.currentExecutionPrivilege ?? "SANDBOXED",
+    );
 
     /**
      * 【定】生命周期闸门。
@@ -535,6 +584,7 @@ export class HarnessRuntime {
             approvalDecider: this.deps.approvalDecider,
             approvalPolicy: spec.agentSpec.approvalPolicy,
             timezone: spec.agentSpec.timezone,
+            executionPrivilege: executionPrivilegeOf(spec.agentSpec),
             recordActionFact: async (fact) => {
               lastSequence = await ports.transcript.append(makeActionFactEntry(runId, fact));
             },
@@ -572,7 +622,15 @@ export class HarnessRuntime {
 
         // ── 分支二：有 Observation → 先观察外部世界，据结果决定
         if (branch === "OBSERVE_FIRST" && def) {
-          const observed = await this.observe(runId, def, u, interrupts.signal, spec.agentSpec.timezone, pre?.fingerprint);
+          const observed = await this.observe(
+            runId,
+            def,
+            u,
+            interrupts.signal,
+            spec.agentSpec.timezone,
+            executionPrivilegeOf(spec.agentSpec),
+            pre?.fingerprint,
+          );
           if (observed) {
             verifications.push(observed.verification);
             if (observed.verification.status === "SKIPPED") {
@@ -709,6 +767,8 @@ export class HarnessRuntime {
     u: UnpairedToolUse,
     signal: AbortSignal,
     timezone: string,
+    /** 冻结的执行特权档位（ADR-0012）。观察路径也必须用**当时那一档**。 */
+    executionPrivilege: ExecutionPrivilege,
     /** 执行前的指纹（决 6）。相对操作（如 append）没有它就判不出发生没发生。 */
     preFingerprint?: unknown,
   ): Promise<{ verification: VerificationResult } | undefined> {
@@ -743,6 +803,7 @@ export class HarnessRuntime {
         workspaceRoot: this.deps.workspaceRoot,
         onProgress: () => {},
         timezone,
+        executionPrivilege,
       };
       /**
        * 决 6：优先走 `observePost` —— 它和执行前那次 `observePre` 是**同一个

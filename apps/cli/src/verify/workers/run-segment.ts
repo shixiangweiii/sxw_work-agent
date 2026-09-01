@@ -136,6 +136,8 @@ async function main(): Promise<void> {
           modelId: "scripted",
           task: "verify:persistence",
           workspaceRoot: workspace,
+          // 这两个夹具都跑默认档（没有换档的入口）。
+          executionPrivilege: "SANDBOXED",
           timezone: "Asia/Shanghai",
           startedAt: new Date().toISOString(),
         }),

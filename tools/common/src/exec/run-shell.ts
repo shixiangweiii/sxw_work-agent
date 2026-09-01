@@ -171,7 +171,22 @@ export const runShellDefinition: ToolDefinition = {
   description:
     "在受限沙箱里执行一条 shell 命令（bash -c）。用它来打包/解包（zip、tar）、" +
     "创建或删除文件与目录、跑构建与测试、以及任何没有专用工具的操作。" +
-    "沙箱规则（都由内核强制，绕不过去，请照着规划命令）：" +
+    /**
+     * ── 【定】这一句是 ADR-0012 的必需品，不是客套（M1 / R2 的同族）─────────
+     *
+     * 下面四条沙箱规则在 UNRESTRICTED 档下**全部不成立**。而 description 是
+     * 模块级常量、档位是随 Run 冻结的值 —— 静态文本没有办法只在某一档出现。
+     *
+     * 两条路：让工具面按档位产两份 snapshot（要动 `commonTools` 那个常量数组，
+     * 且工具 version 得跟着档位变，牵动 §18.2 的分支判定前提），
+     * 或者**在这里留一个指针**、由受信事实去更正它（`compile.ts` 的
+     * `UNRESTRICTED_FACT`）。选后者，代价如实记：这句话从"我保证"降级成
+     * "默认如此，以系统事实为准"。
+     *
+     * 不留这个指针的后果是 M1 原样重演：模型照着一句已经不成立的承诺规划命令。
+     */
+    "沙箱规则（默认档位下由内核强制、绕不过去，请照着规划命令；" +
+    "若上下文里有系统事实声明本次为 UNRESTRICTED 档，则以那条事实为准）：" +
     "① 只能写两个地方：workspace 目录，以及本次调用私有的临时目录 —— " +
     "要用临时目录就写 $TMPDIR（它已指向那个目录），**不要写 /tmp 或 /var/tmp**，" +
     "那里写不进去，而 curl -o、tee 这类程序失败时往往不出声；" +
@@ -314,6 +329,26 @@ export async function executeRunShell(
    * 授权是在决定的那一刻给的，而环境可以在那之后变。
    * 一条闸门排在另一条后面等于没有闸门，两道都要能单独触发。
    */
+  /**
+   * ── ADR-0012：UNRESTRICTED 是**唯一**允许不进沙箱的路径 ─────────────────
+   *
+   * 【定】它与「沙箱不可用就降级」有本质区别，这个区别就是这一段存在的理由：
+   *
+   *   降级   ＝ 环境决定的、无声的、调用方看不出来的边界消失；
+   *   本档位 ＝ 人在启动参数里显式选择的、冻结进 RunSpec 的、
+   *            出现在受信事实 / 审批面 / Trace / 界面徽章上的边界让渡。
+   *
+   * 所以上面那条【定】（不降级为无沙箱执行）**一个字没改**：SANDBOXED 档
+   * 拿不到沙箱仍然是硬失败。改的只是"有没有第二种被允许的情形"。
+   */
+  /**
+   * ── 【定】两档**都**要走 seatbelt，这条闸门一个字没改（ADR-0012）───────
+   *
+   * UNRESTRICTED 不是"不套沙箱"，是一份只剩凭证读禁的窄 profile
+   * （见 `SandboxProfileOptions.executionPrivilege` 那段被判据 B10 逼出来的
+   * 记录）。所以「没有沙箱就拒绝执行」在两档下同样成立 ——
+   * 少了它，UNRESTRICTED 会在非 darwin 上悄悄退化成"连凭证读禁也没有"。
+   */
   if (!isSandboxAvailable()) {
     return {
       ok: false,
@@ -327,7 +362,8 @@ export async function executeRunShell(
         sideEffectState: "NOT_STARTED",
         safeMessage:
           `这台机器上没有可用的 seatbelt 沙箱（${SANDBOX_EXEC}），run_shell 拒绝执行。` +
-          `【定】不降级为无沙箱执行 —— 那会让边界在某些环境下悄悄消失。`,
+          `【定】不降级为无沙箱执行 —— 那会让边界在某些环境下悄悄消失。` +
+          `UNRESTRICTED 档也一样：那一档仍然要靠 seatbelt 挡住凭证文件的读取。`,
       }),
     };
   }
@@ -357,11 +393,17 @@ export async function executeRunShell(
   const preSnapshot = await snapshotForArtifact(input.artifact_path, ctx.workspaceRoot);
 
   // per-run 临时目录：zip / tar / git 这类工具不能写 tmp 就直接失败。
+  //
+  // 【定】UNRESTRICTED 档也照建、`$TMPDIR` 也照指过去。它此时不再是一道边界
+  // （哪儿都能写），但它仍然是一条**约定**：模型按同一套规则规划命令，
+  // 两个档位下 `$TMPDIR` 的含义不变。少了它，同一句任务在两档下要写两种命令，
+  // 而那个差别没有任何地方会讲给模型听。
   const tmpDir = mkdtempSync(join(tmpdir(), "wa-shell-"));
   const profile = buildSandboxProfile({
     workspaceRoot: ctx.workspaceRoot,
     tmpDir,
     allowNetwork,
+    executionPrivilege: ctx.executionPrivilege,
   });
 
   /**

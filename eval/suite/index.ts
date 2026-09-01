@@ -219,6 +219,8 @@ async function runTrial(
       modelId: live ? "live" : "scripted",
       task: ARCHIVE_TASK,
       workspaceRoot: ws,
+      // 这两个夹具都跑默认档（没有换档的入口）。
+      executionPrivilege: "SANDBOXED",
       timezone: "Asia/Shanghai",
       startedAt: new Date().toISOString(),
     }),

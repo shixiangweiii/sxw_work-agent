@@ -19,6 +19,7 @@
 import type { RunEvent } from "../types/event.js";
 import type { Continue, LoopState, Terminal } from "../types/loop.js";
 import { nextState } from "../types/loop.js";
+import { executionPrivilegeOf } from "../types/run.js";
 import type { RunSpec } from "../types/run.js";
 import type { ContextMessage, TranscriptEntry } from "../types/transcript.js";
 import type { ModelContent } from "../types/context.js";
@@ -270,6 +271,9 @@ export async function* runLoop(
       task: spec.input.task,
       endpointId: String(spec.agentSpec.model.endpointId),
       modelId: spec.agentSpec.model.modelId,
+      // 【定】读**冻结的那一份**（ADR-0012 二次评审 P2-5）。事件流是 trace 的
+      // 唯一内容，少了它，拿到一份 JSONL 的人答不出「这个 Run 当时有没有沙箱」。
+      executionPrivilege: executionPrivilegeOf(spec.agentSpec),
     });
     state = {
       ...state,
@@ -452,6 +456,8 @@ export async function* runLoop(
       policy: spec.agentSpec.contextPolicy,
       systemPrompt: spec.agentSpec.systemPrompt,
       timezone: spec.agentSpec.timezone,
+      // ADR-0012：UNRESTRICTED 档要在受信事实里如实告诉模型（见 compile.ts）。
+      executionPrivilege: executionPrivilegeOf(spec.agentSpec),
       fixedOverheadTokens: registry.fixedOverheadTokens(),
       // 输出预算恢复的落点：抬高的上限必须真的进到这一次请求里，
       // 否则「抬高上限重试」就是拿同样的 max_tokens 再撞一次同一堵墙。
@@ -901,6 +907,8 @@ export async function* runLoop(
         approvalDecider: deps.approvalDecider,
         approvalPolicy: spec.agentSpec.approvalPolicy,
         timezone: spec.agentSpec.timezone,
+        // 【定】读冻结的那一份，不读「当前设置」。见 ExecutionPrivilege。
+        executionPrivilege: executionPrivilegeOf(spec.agentSpec),
         // 决 6：逐 Action 的执行前指纹落 transcript。它是 §18.2 分支二的真正判据。
         recordActionFact: async (fact) => {
           lastSequence = await ports.transcript.append(makeActionFactEntry(runId, fact));

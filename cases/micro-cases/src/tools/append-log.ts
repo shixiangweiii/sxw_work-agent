@@ -49,7 +49,7 @@ import type {
 import { asId, makeError } from "@workagent/harness-runtime";
 // 边界判定只有一份实现，住在 tools/common（见那个文件的头注释）。
 // 方向是 cases → tools，不违反边界 6b（那条禁的是 tools → cases）。
-import { isInsideWorkspace, outsideWorkspaceError } from "@workagent/tools-common";
+import { writeBoundaryRefusal } from "@workagent/tools-common";
 
 export const appendLogDefinition: ToolDefinition = {
   id: asId("tool_append_log"),
@@ -113,13 +113,12 @@ export async function executeAppendLog(
 ): Promise<ToolExecutionOutcome> {
   const target = resolve(ctx.workspaceRoot, input.path);
 
-  if (!isInsideWorkspace(ctx.workspaceRoot, target)) {
-    return {
-      ok: false,
-      output: "",
-      sideEffectState: "NO_EFFECT",
-      error: outsideWorkspaceError(input.path, "追加"),
-    };
+  // 【定】与 tools/common 的三个写工具共用**同一份**边界判定
+  // （`writeBoundaryRefusal`）。ADR-0012 加了 executionPrivilege 这一维，
+  // 四处里漏改任何一处就会出现「同一个越界写，这个工具放行那个工具拒绝」。
+  const refusal = writeBoundaryRefusal(ctx, target, "追加", input.path);
+  if (refusal) {
+    return { ok: false, output: "", sideEffectState: "NO_EFFECT", error: refusal };
   }
 
   if (ctx.signal.aborted) {

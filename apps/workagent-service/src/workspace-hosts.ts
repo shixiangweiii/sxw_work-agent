@@ -31,6 +31,21 @@ export interface WorkspaceHostsOptions {
   /** 注册表文件（Layer 2 产品状态，不进 Layer 3 的库）。 */
   registryFile: string;
   endpoint: RunHostOptions["endpoint"];
+  /**
+   * 两条档位轴（ADR-0012）。
+   *
+   * 【定】切 workspace 会**重建 RunHost**，所以这两个必须从这里透传下去。
+   * 漏掉的后果不是报错，是「切一次目录，沙箱悄悄又装回来了」——
+   * 用户完全不会把这两件事联系起来（与 MCP 连接跨 workspace 复用
+   * 是同一类考量，那一条的注释里已经记过一次）。
+   *
+   * ⚠️ 已知代价：`approvalMode` 是**启动值**，用户在界面上拨过的档位
+   * 存在 `RunHost` 里，切 workspace 时会回到这个启动值。这是刻意的 ——
+   * 新 workspace 是一个新的执行环境，把上一个目录里的免打扰承接过来
+   * 等于替用户做了一个他没做过的决定。
+   */
+  approvalMode?: RunHostOptions["approvalMode"];
+  executionPrivilege?: RunHostOptions["executionPrivilege"];
   composeOverrides?: RunHostOptions["composeOverrides"];
   /**
    * 首次启动时用命令行参数登记的那一个 workspace。
@@ -179,6 +194,8 @@ export class WorkspaceHosts {
       dbPath: storage.dbPath,
       traceDir: storage.traceDir,
       endpoint: this.opts.endpoint,
+      ...(this.opts.approvalMode ? { approvalMode: this.opts.approvalMode } : {}),
+      ...(this.opts.executionPrivilege ? { executionPrivilege: this.opts.executionPrivilege } : {}),
       ...(this.opts.composeOverrides ? { composeOverrides: this.opts.composeOverrides } : {}),
     });
   }

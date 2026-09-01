@@ -34,6 +34,15 @@ export interface TraceHeader {
   modelId: string;
   task: string;
   workspaceRoot: string;
+  /**
+   * 本段的执行特权档位（ADR-0012，二次评审 P2-5）。
+   *
+   * 【定】必填，两个入口都要写。少了它，一份 JSONL 独立拿出来时
+   * 回答不了「这一段当时有没有沙箱」—— 而这份文件的全部意义就是
+   * 「可审计的唯一 artifact」。见 `RunStarted.executionPrivilege` 那段：
+   * 唯一看起来能替代它的东西（界面上的当前服务档位）在重启换档之后就是错的。
+   */
+  executionPrivilege: string;
   timezone: string;
   startedAt: string;
   /**

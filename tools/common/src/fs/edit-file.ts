@@ -41,7 +41,7 @@ import type {
   ToolSnapshot,
 } from "@workagent/harness-runtime";
 import { asId, makeError } from "@workagent/harness-runtime";
-import { classifyFsError, isInsideWorkspace, outsideWorkspaceError, resolveToolPath } from "./fs-common.js";
+import { classifyFsError, resolveToolPath, writeBoundaryRefusal } from "./fs-common.js";
 
 export const editFileDefinition: ToolDefinition = {
   id: asId("tool_edit_file"),
@@ -105,13 +105,10 @@ export async function executeEditFile(
 ): Promise<ToolExecutionOutcome> {
   const target = resolveToolPath(ctx.workspaceRoot, input.path);
 
-  if (!isInsideWorkspace(ctx.workspaceRoot, target)) {
-    return {
-      ok: false,
-      output: "",
-      sideEffectState: "NO_EFFECT",
-      error: outsideWorkspaceError(input.path, "编辑"),
-    };
+  // 【定】与另外三个写工具共用同一份判定（见 `writeBoundaryRefusal`）。
+  const refusal = writeBoundaryRefusal(ctx, target, "编辑", input.path);
+  if (refusal) {
+    return { ok: false, output: "", sideEffectState: "NO_EFFECT", error: refusal };
   }
 
   if (input.old_string === "") {

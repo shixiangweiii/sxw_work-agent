@@ -33,6 +33,7 @@ import type {
 } from "@workagent/harness-runtime";
 import type { HandoffChannel, QuestionChannel } from "@workagent/tools-common";
 import { stripUnsafeDisplayChars } from "../../cli/src/compose.js";
+import type { ApprovalMode } from "../../cli/src/compose.js";
 import type { UiPending } from "./api-types.js";
 
 export type PendingAnswer =
@@ -133,6 +134,22 @@ export class PendingHub {
   approvalDecider(
     autoGrant: (a: PreparedAction) => { ok: true } | { ok: false; why: string },
     /**
+     * 当前审批档位（ADR-0012）。
+     *
+     * 【定】**读函数，不是值** —— 与 CLI 那边一字不差的理由：decider 在
+     * `compose()` 的那一刻建出来、之后整个进程都用同一个闭包，传值进来
+     * 就意味着档位在服务启动的那一刻被钉死，而界面上那个开关是要能中途拨的。
+     */
+    approvalMode: () => ApprovalMode,
+    /**
+     * 这个 Run 是否已被人说过「不再问」。
+     *
+     * 【定】逐 Run，且**由 RunHost 持有**而不是本类 —— `PendingHub` 的
+     * 全部状态都是「谁在等」，而这是一条「谁不用再等了」的产品状态。
+     * 混进来的话，一个 `clear()` 之类的操作会同时清掉两种语义不同的东西。
+     */
+    isElevated: (runId: string) => boolean,
+    /**
      * 【定】Run 归属读的是 `action.runId`，**不是** compose 时绑定的某个变量。
      *
      * `ApprovalDecider` 只收一个 `PreparedAction`，而它自带 runId —— 于是审批
@@ -147,10 +164,25 @@ export class PendingHub {
     signalFor: (runId: string) => AbortSignal,
   ): ApprovalDecider {
     return async (action: PreparedAction): Promise<ApprovalDecision> => {
-      const grant = autoGrant(action);
-      if (grant.ok) return { approved: true };
-
       const runId = String(action.runId);
+      /**
+       * 【定】档位每次调用重新读。少了这一行，界面上那个开关与
+       * 「本次 Run 不再问」按钮全都不生效 —— 而它们会**看起来**生效
+       * （按钮点得动、状态也变了），只是审批照旧弹出来。
+       */
+      const mode = approvalMode();
+      if (mode === "AUTO" || isElevated(runId)) {
+        return {
+          approved: true,
+          reason: mode === "AUTO" ? "AUTO 档" : "本次 Run 已设为不再询问",
+          decidedBy: "AUTO",
+        };
+      }
+
+      // CONFIRM 档跳过有限自动放行，直接问 —— 与 CLI 同一条分派顺序。
+      const grant = mode === "CONFIRM" ? { ok: false as const, why: "CONFIRM 档：每一步都问" } : autoGrant(action);
+      if (grant.ok) return { approved: true, reason: "默认档位自动放行", decidedBy: "AUTO_GRANT" };
+
       const signal = signalFor(runId);
       const e = action.resolvedEffect;
       const input = (action.normalizedInput ?? {}) as Record<string, unknown>;
@@ -230,11 +262,12 @@ export class PendingHub {
 
       const answered = await this.wait(pending, signal);
       if (!answered || answered.kind !== "APPROVAL") {
-        return { approved: false, reason: "等待被中断（Run 被取消）" };
+        // 【定】等待被中断记 UNDECLARED，不是 HUMAN —— 没有人做过这个决定。
+        return { approved: false, reason: "等待被中断（Run 被取消）", decidedBy: "UNDECLARED" };
       }
       return answered.approved
-        ? { approved: true }
-        : { approved: false, reason: answered.reason ?? "用户在界面上拒绝" };
+        ? { approved: true, ...(answered.reason ? { reason: answered.reason } : {}), decidedBy: "HUMAN" }
+        : { approved: false, reason: answered.reason ?? "用户在界面上拒绝", decidedBy: "HUMAN" };
     };
   }
 
@@ -272,9 +305,22 @@ export class PendingHub {
    * 两者的失败语义相反：没人接管是失败（那件事真的没做），
    * 没人回答不是失败（模型自己定）。合并的第一天就会有人把它们写成同一种。
    */
-  questionChannel(currentRunId: () => string): QuestionChannel {
+  questionChannel(currentRunId: () => string, approvalMode: () => ApprovalMode): QuestionChannel {
     return {
       ask: async (request) => {
+        /**
+         * ── ADR-0012：AUTO 档不问，直接 NO_ANSWER（与 CLI 同一条口径）───────
+         *
+         * 【定】这一支**只对 `ask_user` 存在**，`handoffChannel` 里没有对应的
+         * 一支，而那是刻意的：没人回答不是失败（模型自己定），没人接管是失败
+         * （那件事真的没做）。见 ADR-0008 那张对照表 ——
+         * 「两者表面上都是停下来等人」正是当初那次错误合并的成因。
+         *
+         * 【定】它照样进 `UiPending` 之外的可见轨道：工具会落一条
+         * NO_ANSWER 的 tool_result，时间线上读得到。这里不额外造事件 ——
+         * 造一条只有这一档才有的事件，等于让两个档位的事件流不同构。
+         */
+        if (approvalMode() === "AUTO") return undefined;
         const pending: UiPending = {
           pendingId: randomUUID(),
           runId: currentRunId(),

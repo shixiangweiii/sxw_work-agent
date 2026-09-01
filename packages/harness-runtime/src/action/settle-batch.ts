@@ -33,10 +33,12 @@ import type {
 } from "../types/tool.js";
 import { DEFAULT_SETTLEMENT } from "../types/tool.js";
 import type { ModelContent } from "../types/context.js";
-import type { ArtifactCheckFact, RecoveryItem } from "../types/run.js";
+import type { ArtifactCheckFact, ExecutionPrivilege, RecoveryItem } from "../types/run.js";
 import type { RunEvent } from "../types/event.js";
 import { makeError, type RuntimeErrorRecord } from "../types/error.js";
 import { asId, digest, type ActionBatchId, type ActionId, type AttemptId, type RunId } from "../types/ids.js";
+import { isAbsolute } from "node:path";
+import { isPathInsideWorkspace } from "../workspace/index.js";
 import type {
   ArtifactCheckerPort,
   ArtifactStorePort,
@@ -64,6 +66,12 @@ export interface BatchDeps {
   approvalDecider: ApprovalDecider;
   /** 随 AgentSpec 冻结的时区，透传给工具（见 ToolExecutionContext.timezone）。 */
   timezone: string;
+  /**
+   * 随 AgentSpec 冻结的执行特权档位（ADR-0012）。两个消费点：
+   * ① 透传给工具（`ToolExecutionContext.executionPrivilege`）；
+   * ② 交给 `evaluatePolicy` —— UNRESTRICTED 下越界写不再直接拒绝。
+   */
+  executionPrivilege: ExecutionPrivilege;
   /**
    * 落一条逐 Action 事实（决 6）。由调用方接到 transcript 上。
    *
@@ -288,7 +296,11 @@ export async function* executeBatch(
       });
 
       // ── ③ Policy
-      const verdict = evaluatePolicy({ action, approvalPolicy: deps.approvalPolicy });
+      const verdict = evaluatePolicy({
+        action,
+        approvalPolicy: deps.approvalPolicy,
+        executionPrivilege: deps.executionPrivilege,
+      });
 
       if (verdict.decision === "DENY") {
         action.stage = "REJECTED_POLICY";
@@ -339,19 +351,41 @@ export async function* executeBatch(
           actionId,
           approved: decision.approved,
           reason: decision.reason,
+          // 【定】decider 没声明就记 UNDECLARED，**不兜底成 HUMAN**。
+          // 见 `ApprovalDecidedBy`：假话在事实表里比空白贵得多。
+          decidedBy: decision.decidedBy ?? "UNDECLARED",
         });
 
         if (!decision.approved) {
           action.stage = "REJECTED_APPROVAL";
-          // 决 2：用户明确按了「否」—— 这是一个有明确事实来源的成因。
-          causeByCall.set(call.toolCallId, "USER_REJECTED");
+          /**
+           * ── 【定】归责按 `decidedBy` 分流（ADR-0012 二次评审 P1-6）──────────
+           *
+           * 决 2 说「用户明确按了否 —— 这是一个有明确事实来源的成因」，
+           * 而这里此前对**任何** `approved:false` 都写 `USER_REJECTED`：
+           * 非交互环境无人应答、等待被 Ctrl+C 打断、审批超时，全都算成
+           * 「用户拒绝」。那正是 `UnmetCause` 自己的【定】禁止的事
+           * （「必须来自事实（谁拒的），不得由结算逻辑推断」），
+           * 也正是 E-3 那句「结算 USER_REJECTED，而全程没有任何人拒绝过
+           * 任何东西」的形状。
+           *
+           * `decidedBy` 是 ADR-0012 刚加的那条事实，这里是它的第二个消费者。
+           */
+          const byHuman = decision.decidedBy === "HUMAN";
+          causeByCall.set(call.toolCallId, byHuman ? "USER_REJECTED" : "NO_APPROVAL");
           const e = makeError({
-            code: "APPROVAL_REJECTED",
-            source: "USER",
+            code: byHuman ? "APPROVAL_REJECTED" : "APPROVAL_NOT_ANSWERED",
+            // 【定】`source` 也要跟着走：没有人应答时把来源记成 USER，
+            // 等于在错误记录里也说一遍那句假话。
+            source: byHuman ? "USER" : "RUNTIME",
             category: "AUTHORIZATION",
             retryability: "AFTER_USER_ACTION",
             sideEffectState: "NOT_STARTED",
-            safeMessage: `用户拒绝了这个操作${decision.reason ? `：${decision.reason}` : ""}`,
+            safeMessage: byHuman
+              ? `用户拒绝了这个操作${decision.reason ? `：${decision.reason}` : ""}`
+              : `这一步需要审批，但**没有拿到任何人的应答**` +
+                `${decision.reason ? `（${decision.reason}）` : ""}，按拒绝处置。` +
+                `这不是「用户拒绝」—— 没有人做过这个决定。`,
           });
           settle(call.toolCallId, renderError(e), true);
           // 【D-21】默认 CONTINUE_REMAINING —— 与 query.ts 的 runTools() 一致：
@@ -385,6 +419,7 @@ export async function* executeBatch(
             workspaceRoot: deps.workspaceRoot,
             onProgress: () => {},
             timezone: deps.timezone,
+            executionPrivilege: deps.executionPrivilege,
           });
           if (pre && deps.recordActionFact) {
             await deps.recordActionFact({
@@ -440,6 +475,7 @@ export async function* executeBatch(
         workspaceRoot: deps.workspaceRoot,
         onProgress: (n) => progressQueue.push(n),
         timezone: deps.timezone,
+        executionPrivilege: deps.executionPrivilege,
       };
 
       /**
@@ -670,8 +706,63 @@ export async function* executeBatch(
        * 【定】工具**没声明** artifact 时这里一步都不做。
        * 不扫 workspace、不从 output 里猜 —— 见 ProducedArtifact 的说明。
        */
+      /**
+       * 【定】拒绝登记时给模型的一句话。它必须进 **tool_result**，不能只留在
+       * 事实表里 —— 模型是唯一能把产物挪回 workspace 内的人，而它看不到事实表。
+       * 与 `run_shell` 的 `artifactNote` 是同一条理由（那边在工具内部拼）。
+       */
+      let artifactNote = "";
+      /**
+       * ── 【定】交付物 containment 闸门（ADR-0012 二次评审 P1-1）─────────────
+       *
+       * 它守的是一条 Runtime 不变量：**`deliveredArtifactIds` 里不许出现
+       * Atlas 无法证明其归属的东西**（§17）。
+       *
+       * 为什么必须在 Runtime 这一层，而不是「让每个工具自己拒」：
+       * `run_shell` 一直拒着（`声明的交付物 … 不在 workspace 内，未登记`），
+       * 而 ADR-0012 放开写边界之后 `write_file` **没跟着拒** —— 于是
+       * 一个 `$HOME` 下的文件被登记、通过 hash 检查（检查器算的是
+       * `resolve(workspaceRoot, record.path)`，而绝对路径会原样返回自己）、
+       * 进 `deliveredArtifactIds`，被冒认成本 Run 的交付物。
+       * 那条代价我自己写在 ADR 里（「UNRESTRICTED 下交付物登记仍限 workspace
+       * 内」），而实现没有兑现它。**逐工具拒 = 下一个加产物的工具再犯一次。**
+       *
+       * 【定】拒绝的形态是「**不登记 ＋ 留一条失败的检查事实**」，
+       * 不是把工具调用报成失败 —— 文件确实写出去了，副作用已经发生，
+       * 报失败会让模型去重写一份已经存在的东西（与下面 catch 那段同一条理由）。
+       * 留失败事实之后，既有的 role 分流规则接手：DELIVERABLE → FAILED、
+       * INTERMEDIATE → COMPLETED_WITH_LIMITS。这里**不发明新的结算语义**。
+       *
+       * 【定】`logicalId` 也要看。它是版本链的身份，一个绝对路径的
+       * logicalId 会把两个 Run 在 `/etc/foo` 上的写并进同一条 lineage。
+       * 只在它**看起来是绝对路径**时才判 —— MCP 之类的工具可以用非路径 id。
+       */
       if (outcome.artifact && deps.artifacts) {
         const a = outcome.artifact;
+        const outsideClaim =
+          a.path !== undefined && !isPathInsideWorkspace(deps.workspaceRoot, a.path)
+            ? a.path
+            : isAbsolute(a.logicalId) && !isPathInsideWorkspace(deps.workspaceRoot, a.logicalId)
+              ? a.logicalId
+              : undefined;
+        if (outsideClaim !== undefined) {
+          artifactChecks.push({
+            artifactId: `art_outside_workspace_${call.toolCallId}`,
+            logicalId: a.logicalId,
+            role: a.role,
+            ok: false,
+            checksRun: [],
+            detail:
+              `声明的交付物 "${outsideClaim}" 落在 workspace 之外，**未登记**。` +
+              `执行特权档位放开的是「命令能写到哪」，不是「什么算本次交付物」——` +
+              `Atlas 只为 workspace 内的产物背书（它之外的东西无法证明是这个 Run 产出的）。` +
+              `要交付就写到 workspace 内再声明一次。`,
+            at: deps.now(),
+          });
+          artifactNote =
+            `\n\n[交付物未登记] "${outsideClaim}" 在 workspace 之外。文件已经写出去了，` +
+            `但它不会计入本次任务的交付物 —— 要交付请写到 workspace 内。`;
+        } else
         try {
           const record = await deps.artifacts.register({
             runId: deps.runId,
@@ -742,7 +833,7 @@ export async function* executeBatch(
       action.stage = "SETTLED";
       if (outcome.ok) {
         const note =
-          vr.status === "FAILED" ? `\n\n[验证未通过] ${vr.detail}` : "";
+          (vr.status === "FAILED" ? `\n\n[验证未通过] ${vr.detail}` : "") + artifactNote;
         // §11.4：超阈值的结果在这里外置，帧里只留结构合法的 stub。
         const materialized = await materialize(red.text, deps);
         if (materialized.externalized) {

@@ -13,7 +13,9 @@
 import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 import {
+  parseApprovalMode,
   parseEndpointArg,
+  parseSandboxArg,
   REPO_ROOT,
   DEFAULT_STATE_DIR,
   defaultMcpConfigPath,
@@ -26,11 +28,74 @@ function arg(argv: string[], name: string): string | undefined {
   return i >= 0 ? argv[i + 1] : undefined;
 }
 
+/**
+ * 这个入口认识的参数。
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ * 【定】未知参数**必须让命令失败** —— 与 CLI 那条是同一条纪律，
+ * 而这里此前**没有**：`arg()` 就是一个裸 `indexOf`，认不出来的参数
+ * 悄悄什么都不做。
+ *
+ * ADR-0012 之前它的代价还只是「`--protx 7788` 起在随机端口上」（看得见，
+ * URL 就打在屏幕上）。加了 `--sandbox` 之后代价变了性质：
+ * `--sandbx off` 会静默地让服务**带着沙箱**起来，而用户以为自己关掉了；
+ * 或者反过来 —— 一个拼错的 `--sandbox of` 会被下面的枚举挡下，
+ * 但一个拼错的**参数名**在此前会一路绿灯。
+ * 这正是 M-5 那条「静默忽略用户配置比不支持更糟」，而这次被忽略的
+ * 那个开关关的是边界。
+ * ══════════════════════════════════════════════════════════════════════
+ */
+const VALUE_FLAGS = ["workspace", "port", "endpoint", "mcp-config", "approval", "sandbox"];
+
+function assertKnownArgs(argv: string[]): void {
+  for (let i = 0; i < argv.length; i += 1) {
+    const raw = argv[i]!;
+    if (!raw.startsWith("--")) continue;
+    const name = raw.slice(2);
+    if (VALUE_FLAGS.includes(name)) {
+      /**
+       * ── 【定】带值参数**必须真的带一个值**（二次评审 P2-4）────────────────
+       *
+       * 此前是无条件 `i += 1`：参数写在末尾（或后面紧跟另一个 `--flag`）时，
+       * `get()` 拿到 undefined，于是**静默回落到默认档**。
+       *
+       *   npm run … --approval        → 悄悄跑 DEFAULT（用户以为是 auto）
+       *   npm run … --sandbox         → 悄悄**带着沙箱**跑（用户以为关掉了）
+       *
+       * 这正是 M-5 那条「一个被静默吞掉的参数与一个生效的参数不可区分」，
+       * 而这次被吞掉的那个开关关的是边界。旧参数（--endpoint / --workspace）
+       * 一直有同一个洞，一并堵上。
+       */
+      const value = argv[i + 1];
+      if (value === undefined || value.startsWith("--")) {
+        throw new Error(
+          `参数 ${raw} 需要一个值，但${value === undefined ? "它是最后一个参数" : `后面紧跟着 ${value}`}。`,
+        );
+      }
+      i += 1; // 跳过它的值，免得值本身被当成参数
+      continue;
+    }
+    throw new Error(
+      `不认识的参数 ${raw}。\n` +
+        `可用：${VALUE_FLAGS.map((f) => `--${f}`).join(" ")}\n` +
+        `  --approval confirm|default|auto   审批档位（默认 default，界面上可随时改）\n` +
+        `  --sandbox  on|off                 执行特权（默认 on，**运行中不可改**）` +
+        (name === "yes-all"
+          ? `\n\n（\`--yes-all\` 已改成 \`--approval auto\`，ADR-0012。它现在两个入口都有。）`
+          : ""),
+    );
+  }
+}
+
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
+  assertKnownArgs(argv);
   const workspaceRoot = resolve(arg(argv, "workspace") ?? resolve(REPO_ROOT, ".workagent-workspace"));
   const endpoint = parseEndpointArg(argv);
   const portArg = arg(argv, "port");
+  // ADR-0012：两条轴，与 CLI 同一份解析函数（抄一份就会分叉）。
+  const approvalMode = parseApprovalMode(arg(argv, "approval"));
+  const executionPrivilege = parseSandboxArg(arg(argv, "sandbox"));
 
   // 【定】没有 `--db` / `--trace-dir`：存储位置由 workspace 唯一推出
   // （`workspaceStorage()`），CLI 与界面同一条规则。
@@ -57,6 +122,8 @@ async function main(): Promise<void> {
   const svc = await startService({
     workspaceRoot,
     endpoint,
+    approvalMode,
+    executionPrivilege,
     composeOverrides: { mcp },
     /**
      * 【定】注册表放在 `.workagent-state/` 而不是某个 workspace 里面。
@@ -81,6 +148,15 @@ async function main(): Promise<void> {
   console.log(`profile   : ${info.profileId}`);
   console.log(`model     : ${info.modelId}`);
   console.log(`工具      : ${info.toolNames.length} 个，固定开销起步价 ≈ ${info.fixedOverheadTokens} token`);
+  // 【定】档位与 CLI 一样要打出来，且用同一个 `describeModes()`。
+  // 一次对用户可见的边界让渡而不打印，等于没通知。
+  console.log(`modes     : ${info.approvalMode}`);
+  if (info.fullAccessWarning) console.log(`\x1b[31m⚠️  ${info.fullAccessWarning}\x1b[0m`);
+  if (executionPrivilege === "UNRESTRICTED") {
+    // 【定】把「这一档不能在界面上改」说出来。界面上审批那个开关是活的，
+    // 用户很容易以为旁边那条也是 —— 而它不是（随 RunSpec 冻结）。
+    console.log(`            执行特权随 Run 冻结，界面上改不了；要换请重启并调整 --sandbox。`);
+  }
   for (const n of info.notices) console.log(`⚠️  ${n}`);
   console.log(`\n白盒界面已启动，用浏览器打开（**这个 URL 带着会话 Token，别贴出去**）：\n`);
   console.log(`  \x1b[36m${svc.url}\x1b[0m\n`);
