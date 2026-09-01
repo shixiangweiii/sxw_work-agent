@@ -74,6 +74,25 @@
             <option value="CONFIRM">逐次确认：每个需要审批的操作都问</option>
             <option value="AUTO">AUTO：一律自动批准，不打扰我</option>
           </select>
+          <!--
+            逐 Run 的预算覆盖。默认折叠、留空 = 用默认值。
+
+            为什么它存在：实测 Run run_6c3fec671ceb（抓网页 → 下图 → 打 zip）
+            八条轴里**只有 turns 撞了墙**（18/20），其余七条全部宽裕，
+            而 maxTurns 在那之前是全仓唯一调不动的东西。
+
+            【定】它与上面那个审批档位选择器**不是一类控件**，别合并：
+            档位拨的是进程级的那一个开关（拨完留在那一档，顶栏徽章跟着变），
+            预算随 RunSpec 冻结 —— 每个 Run 一份，互不影响。
+            合并会让人以为「改完预算它就一直是这个值了」。
+
+            【定】改这里也**救不了**一个已经撞了 MAX_TURNS 的旧 Run：
+            resume 读的是冻结在 RunSpec 里的那一份。
+          -->
+          <details id="budgetbox">
+            <summary>预算（可选，留空用默认）</summary>
+            <div id="budgetfields"></div>
+          </details>
           <button type="submit" id="startbtn">开始</button>
           <p class="hint" id="startstate"></p>
         </form>

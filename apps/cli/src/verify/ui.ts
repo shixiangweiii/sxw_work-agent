@@ -26,7 +26,13 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, w
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { asId, type RunId, type ToolSnapshot, type TranscriptEntry } from "@workagent/harness-runtime";
+import {
+  DEFAULT_BUDGETS,
+  asId,
+  type RunId,
+  type ToolSnapshot,
+  type TranscriptEntry,
+} from "@workagent/harness-runtime";
 import { compose, DEFAULT_TOOLS, REPO_ROOT, loadEnv } from "../compose.js";
 import {
   projectTimeline,
@@ -316,6 +322,19 @@ async function main(): Promise<void> {
   verdict(
     inj11.hit !== undefined,
     "往界面注入一句内联 style 写法，第 11 条当场翻红 —— 它挡的是「被自己的 CSP 静默丢弃」那类改动",
+  );
+
+  const inj13 = injectionTest(
+    "13",
+    "apps/workagent-ui/public/__boundary_canary4.css",
+    "/* 判别力实测的临时文件，写完立刻删。 */\nmain { height: calc(100vh - 45px); }\n",
+  );
+  fact("注入后第 13 条命中", inj13.hit ?? "（没命中 —— 这条 grep 没有判别力）");
+  verdict(
+    inj13.hit !== undefined,
+    "注入一句「视口减写死的顶栏高度」，第 13 条当场翻红 —— " +
+      "那个常数只在顶栏恰好一行时成立，而顶栏一换行（接一个 MCP 服务器就会）" +
+      "整页会多出第二条滚动条，且 CSS 里没有任何东西会报错",
   );
 
   // ════════════════════════════════════════════════════ 起一个真服务
@@ -1481,6 +1500,169 @@ async function main(): Promise<void> {
         );
       } finally {
         await svcW.close();
+      }
+    }
+
+    // ══════════════════════════════════════ L. 逐 Run 的预算覆盖走 HTTP
+    section("L. 界面上填的预算真的进了 spec（且非法值不留下任何痕迹）");
+    console.log(
+      "   起因是实测 Run `run_6c3fec671ceb`：八条轴只有 turns 撞墙（18/20），\n" +
+        "   而在此之前界面的「预算」页是纯只读投影，POST /api/runs 的请求体只有\n" +
+        "   `{ task, approvalMode }` —— 能力在，入口不在。\n" +
+        "\n" +
+        "   ⚠️ 三条判据**成对**才有意义：少了正分支，一个「一律 400」的实现全绿；\n" +
+        "   少了反分支，一个「预算字段根本没接线」的实现也全绿。\n" +
+        "   `sandbox.ts` 与 J 段各记过一次同样的教训。\n",
+    );
+    {
+      const wsB = join(tmp, "ws-budget");
+      const svcB = await startService({
+        workspaceRoot: wsB,
+        storageOverride: {
+          dbPath: join(wsB, ".workagent", "runs.db"),
+          traceDir: join(wsB, ".workagent", "runs"),
+        },
+        endpoint: "bailian",
+        token: TOKEN,
+        composeOverrides: {
+          // 【定】要一个**不会自己停**的脚本 —— 否则「停在第 2 轮」这件事
+          // 分不清是预算拦的还是模型自己收的尾，判据要区分的两个值又相等了。
+          modelPortOverride: new ScriptedModelPort(
+            Array.from({ length: 12 }, (_, i) => ({
+              text: `第 ${i + 1} 轮，继续。`,
+              toolCalls: [{ toolCallId: `b${i}`, name: "now", input: {} }],
+            })),
+          ),
+          tools: toolsFor(["now"]),
+        },
+      });
+      try {
+        // L1 正分支：填了就真的生效，而且真的在拦。
+        const started = await call(svcB, "/api/runs", {
+          method: "POST",
+          body: { task: "预算覆盖验收", budgets: { turns: 2 } },
+        });
+        const bRunId = String(started.body["runId"] ?? "");
+        await waitFor(async () => {
+          const d = await call(svcB, `/api/runs/${bRunId}`);
+          const s = String(d.body["status"]);
+          return s === "COMPLETED" || s === "FAILED" ? true : undefined;
+        });
+        const detail = await call(svcB, `/api/runs/${bRunId}`);
+        const axes = (detail.body["budgetAxes"] as Array<{ axis: string; used: number; limit?: number }>) ?? [];
+        const turnsAxis = axes.find((a) => a.axis === "turns");
+        fact("POST 带 budgets:{turns:2}", `HTTP ${started.status}`);
+        fact("详情页 turns 轴", `${turnsAxis?.used} / ${turnsAxis?.limit}`);
+        const l1 =
+          started.status === 200 && turnsAxis?.limit === 2 && turnsAxis?.used === 2;
+        verdict(
+          l1,
+          l1
+            ? "界面填的 2 走完 HTTP → RunHost → makeRunSpec → spec.budgets，**并且真的停在第 2 轮**。" +
+              "只断言 limit 的话，一个「存下来但不参与判定」的实现也会绿"
+            : `没生效：HTTP ${started.status} · turns ${turnsAxis?.used}/${turnsAxis?.limit}（期望 2/2）`,
+        );
+
+        /**
+         * L2 反分支：非法值 400，**且一个 Run 都没起**。
+         *
+         * 【定】后半句才是重点。`server.ts` 里那条 P1-2 的纪律是
+         * 「失败的请求不得留下任何状态变化」—— 而 `startRun()` 第一件事就是
+         * `claimForeground()`。校验排在它后面的话，一个 400 会留下一个
+         * 被占住的前台槽位，之后所有 start/resume 全挂（G 段记过这个形态）。
+         */
+        const before = ((await call(svcB, "/api/state")).body["runs"] as unknown[]).length;
+        const badCases = [
+          { label: "turns: 0", body: { task: "不该起来", budgets: { turns: 0 } } },
+          { label: "未知轴 foo", body: { task: "不该起来", budgets: { foo: 5 } } },
+          { label: "budgets 是数组", body: { task: "不该起来", budgets: [1, 2] } },
+        ];
+        let allBad400 = true;
+        for (const c of badCases) {
+          const r = await call(svcB, "/api/runs", { method: "POST", body: c.body });
+          if (r.status !== 400) allBad400 = false;
+          fact(`  ${c.label}`, `HTTP ${r.status} · ${String(r.body["error"] ?? "").slice(0, 60)}`);
+        }
+        const after = ((await call(svcB, "/api/state")).body["runs"] as unknown[]).length;
+        // 前台槽位还活着吗？——三次 400 之后必须还能正常起一个 Run。
+        const stillWorks = await call(svcB, "/api/runs", {
+          method: "POST",
+          body: { task: "400 之后服务还活着吗", budgets: { turns: 1 } },
+        });
+        fact("非法请求前后的 Run 条数", `${before} → ${after}`);
+        fact("三次 400 之后再起一个", `HTTP ${stillWorks.status}`);
+        const l2 = allBad400 && after === before && stillWorks.status === 200;
+        verdict(
+          l2,
+          l2
+            ? "非法预算一律 400，**一个 Run 都没起、前台槽位没被占住**（P1-2：失败的请求不得留下状态变化）"
+            : !allBad400
+              ? "有非法值被接受了 —— 校验没接上，或者排在了 startRun 后面"
+              : after !== before
+                ? `一个 400 却起了 Run（${before} → ${after}）—— 校验排在 startRun 之后了`
+                : "400 之后再也起不了 Run —— 前台槽位被一个失败的请求占死了",
+        );
+
+        /**
+         * L3：界面上的「秒」与 `RunBudgets` 的毫秒之间那次换算。
+         *
+         * 【定】直接从 `app.js` 里把 `fmt` / `unfmt` 抠出来跑，不重写一份 ——
+         * 重写一份测的就是这条判据自己，而不是界面上真正在跑的那两个函数。
+         *
+         * 要防的失败没有任何征兆：「预算」页用 `fmt` 把 600000 显示成 "600s"，
+         * 用户照着在表单里填 600，如果 `unfmt` 少了 ×1000 就会得到一个
+         * **600 毫秒**的墙钟预算 —— Run 立刻撞墙，而两边都不报错。
+         */
+        const uiSrc = readFileSync(resolve(REPO_ROOT, "apps/workagent-ui/public/app.js"), "utf8");
+        const grab = (name: string): string => {
+          const m = uiSrc.match(new RegExp(`\\nfunction ${name}\\([^)]*\\) \\{[\\s\\S]*?\\n\\}`));
+          if (!m) throw new Error(`app.js 里找不到 ${name}()`);
+          return m[0];
+        };
+        const pair = new Function(
+          `${grab("fmt")}\n${grab("unfmt")}\nreturn { fmt: fmt, unfmt: unfmt };`,
+        )() as { fmt(n: number, u: string): string; unfmt(n: number, u: string): number };
+        // 页面上看到什么，就往表单里填什么 —— 填回去必须还是原值。
+        const shown = pair.fmt(600_000, "ms");
+        const typedBack = pair.unfmt(Number(shown.replace(/[^0-9.]/g, "")), "ms");
+        const shownCount = pair.fmt(40, "count");
+        const typedBackCount = pair.unfmt(Number(shownCount), "count");
+        fact("ms 轴：页面显示 → 填回去", `600000 → "${shown}" → ${typedBack}`);
+        fact("count 轴：页面显示 → 填回去", `40 → "${shownCount}" → ${typedBackCount}`);
+        const l3 = typedBack === 600_000 && typedBackCount === 40;
+        verdict(
+          l3,
+          l3
+            ? "`unfmt` 是 `fmt` 的逆：照着「预算」页上的数字填表单，拿回来的是同一个值。" +
+              "少了 ×1000 的话，一个 600 秒的墙钟会变成 600 毫秒，而两边都不会报错"
+            : `换算对不上：ms ${typedBack}（期望 600000）、count ${typedBackCount}（期望 40）`,
+        );
+
+        // L4：默认值从哪来 —— 界面的输入框占位值必须与真正会撞的墙同源。
+        const info = (await call(svcB, "/api/state")).body["service"] as {
+          budgetDefaults?: Array<{ axis: string; field: string; limit?: number }>;
+        };
+        const defaults = info.budgetDefaults ?? [];
+        const dTurns = defaults.find((d) => d.axis === "turns");
+        const dTotal = defaults.find((d) => d.axis === "totalWallClockMs");
+        fact("service.budgetDefaults", `${defaults.length} 条 · turns=${dTurns?.limit}`);
+        const l4 =
+          defaults.length === axes.length &&
+          dTurns?.limit === DEFAULT_BUDGETS.maxTurns &&
+          dTurns?.field === "maxTurns" &&
+          dTotal !== undefined &&
+          dTotal.limit === undefined;
+        verdict(
+          l4,
+          l4
+            ? `八条轴的默认值走 Runtime 的 readBudgetLimits（与 budgetAxes 同一张表），` +
+              `且「没设上限」的那条如实缺席 limit —— 不是 0，也不是 Infinity`
+            : `默认值对不上：${defaults.length} 条（轴有 ${axes.length} 条）、` +
+              `turns=${dTurns?.limit}（期望 ${DEFAULT_BUDGETS.maxTurns}）、` +
+              `totalWallClockMs.limit=${dTotal?.limit}（期望 undefined）`,
+        );
+      } finally {
+        await svcB.close();
       }
     }
 

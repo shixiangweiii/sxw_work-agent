@@ -23,8 +23,25 @@
 
 * { box-sizing: border-box; }
 
+/*
+ * ── 【定】整页不滚动，滚动条只长在两个明确的容器上 ──────────────────────
+ *
+ * 这里此前是 `main { height: calc(100vh - 45px) }` —— **45px 是写死的顶栏高度**。
+ * 它只在顶栏恰好一行时成立，而顶栏一换行（接一个 MCP 服务器、列出 24 个工具名
+ * 就会）`main` 就比视口高，整页多出第二条滚动条，界面开始"两层一起滚"。
+ *
+ * 本仓对这类写死数字的处置一律是：**让它由布局自己推出**。
+ * flex 列（顶栏 auto ＋ main 占满剩余）之后顶栏折几行都无所谓，
+ * 而 `#topbar` 的 `position: sticky` 也可以删了 —— 它根本不再滚。
+ *
+ * `verify:ui` 有一条判据钉住 `calc(100vh -` 不许回来。
+ */
 body {
   margin: 0;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   background: var(--bg);
   color: var(--fg);
   font: 13px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
@@ -34,29 +51,75 @@ body {
 /* ── 顶栏 */
 
 #topbar {
+  flex: 0 0 auto;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
   padding: 10px 16px;
   border-bottom: 1px solid var(--line);
   background: var(--bg-2);
-  position: sticky;
-  top: 0;
   z-index: 10;
+  /*
+   * ── 【定】顶栏**不限高**，即使它可能变得很长 ────────────────────────────
+   *
+   * 第一版这里写了 `max-height: 22vh; overflow-y: auto`，理由是「接了一堆 MCP
+   * 服务器时不该把 main 挤没」。实测（1100×480）当场推翻它：
+   * 内容 158px、可见 106px —— **被截掉了 52px**，而截掉的那一截里正是
+   * 「⚠️ 输出目录固定在 …」，也就是 `McpNotice` 那条【定】刚写完
+   * 「必须常驻、不许折进 detail」的那句话。
+   *
+   * 一个限高把它换了种方式藏起来：不是折叠，是**滚出可视区**，
+   * 而滚出去比折叠更糟 —— 折叠至少有一个三角形告诉你下面还有东西。
+   *
+   * 失败方向按「哪种错看得见」定：顶栏太长是**一眼就看见**的（用户会去精简
+   * mcp.json），一条被截掉的安全警告是看不见的。所以宁可让它长。
+   */
 }
 
-.brand { display: flex; align-items: baseline; gap: 8px; }
+/*
+ * 【定】品牌区**不参与收缩、不折行**。
+ *
+ * 它是 flex 里默认可收缩的（`flex-shrink: 1`），而右边的 `.svcinfo` 很长 ——
+ * 于是「白盒界面 · Layer 1」被挤成五行，每个词一行。
+ * 这是个既有毛病，只是顶栏改成 flex 列之后更显眼了。
+ *
+ * 收缩该发生在 `.svcinfo` 那一侧：它本来就是 `flex-wrap: wrap`，
+ * 换行是它的正常形态；而品牌区一共就两个词，折了只是难看。
+ */
+.brand { display: flex; align-items: baseline; gap: 8px; flex: 0 0 auto; }
+.brand > span { white-space: nowrap; }
 .logo { font-weight: 700; letter-spacing: 0.14em; color: var(--accent); }
 .sub { color: var(--fg-faint); font-size: 12px; }
 
 .svcinfo { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: var(--fg-dim); }
 .svcinfo b { color: var(--fg); font-weight: 500; }
 .svcinfo .warn { color: var(--warn); }
+/*
+ * notice 的第二层（MCP 的工具原名清单）。默认折叠。
+ *
+ * 【定】折叠的是**清单**，不是那条 ⚠️ 输出目录警告 —— 后者留在 `text` 里常驻。
+ * 分界线在 `McpNotice` 那条【定】上：清单的用途是"写 tools 段时照着填"
+ * （一次性配置动作），警告的用途是"每个 Run 都可能踩"。
+ */
+.svcinfo details { flex: 1 1 100%; }
+.svcinfo details > summary { font-size: 12px; }
+.svcinfo details .body {
+  margin-top: 4px; padding: 6px 8px;
+  background: var(--bg-3); border: 1px solid var(--line); border-radius: 4px;
+  font-family: var(--mono); font-size: 11px; word-break: break-all;
+}
 
 /* ── 布局 */
 
-main { display: grid; grid-template-columns: 290px 1fr; height: calc(100vh - 45px); }
+main {
+  flex: 1 1 auto;
+  /* 【定】`min-height: 0` 不能省。flex 子项默认 min-height:auto，
+     内容一长它就撑破容器，两个 overflow:auto 都会失效。 */
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 290px 1fr;
+}
 
 #sidebar {
   border-right: 1px solid var(--line);
@@ -65,7 +128,29 @@ main { display: grid; grid-template-columns: 290px 1fr; height: calc(100vh - 45p
   padding: 12px;
 }
 
-#detail { overflow-y: auto; padding: 16px 20px 80px; }
+/*
+ * ── 【定】滚动容器是 `#view`，不是 `#detail` ────────────────────────────
+ *
+ * runbar（在看哪个 Run）与 tab 条因此固定不动，长时间线里切页不用先滚回顶部。
+ *
+ * 选它而不是给 `#tabs` 加 `position: sticky` 的理由是第三条最硬：
+ *   ① 顶栏高度不再参与任何计算（那个 45px 已经删了）；
+ *   ② runbar 一起固定 —— 一直看得见在看哪个 Run；
+ *   ③ **`table th { position: sticky; top: 0 }` 继续正确**。用 sticky tabs 的话
+ *      表头会贴在 tab 条底下，得给它补一个等于 tab 条高度的 `top` 偏移 ——
+ *      又一个会随字号/内边距漂掉的写死数字，正是上面刚删掉的那种。
+ */
+#detail { overflow: hidden; padding: 16px 20px 0; display: flex; flex-direction: column; }
+#runview { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+/*
+ * 【定】`[hidden]` 必须显式写出来 —— 上面那条 `display: flex` 的优先级高于
+ * UA 样式表的 `display: none`，于是 `runview.hidden = true` 在 DOM 上是真的、
+ * 界面上照样显示。`#wsform[hidden]` 那条【定】记的就是这个坑，
+ * 而**这次是给一个原本没有 display 的元素加 flex 时复现的**。
+ */
+#runview[hidden] { display: none; }
+#runbar, #tabs { flex: 0 0 auto; }
+#view { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding-bottom: 80px; }
 
 .empty { color: var(--fg-faint); padding: 60px 0; text-align: center; }
 
@@ -79,6 +164,25 @@ main { display: grid; grid-template-columns: 290px 1fr; height: calc(100vh - 45p
  */
 #approvalmode { width: 100%; background: var(--bg-2); color: var(--fg);
   border: 1px solid var(--line); border-radius: 4px; padding: 5px 6px; font: inherit; }
+
+/*
+ * 逐 Run 的预算覆盖。默认折叠 —— 绝大多数任务用默认值就够，
+ * 而八个输入框常驻会把「新任务」这一栏压得看不见输入框本身。
+ *
+ * 它与审批档位那个选择器是**不同性质**的控件，所以长得也不一样：
+ * 档位拨的是进程级的那一个开关（拨完留在那一档），预算随 RunSpec 冻结、
+ * 每个 Run 一份。合并成一类会让人以为改了预算之后"它就一直是这个值了"。
+ */
+#budgetbox { border: 1px solid var(--line); border-radius: 4px; padding: 6px 8px; }
+#budgetbox > summary { font-size: 12px; color: var(--fg-dim); }
+#budgetfields { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 8px; margin-top: 8px; }
+#budgetfields label { font-size: 11px; color: var(--fg-dim); display: block; }
+#budgetfields input {
+  width: 100%; background: var(--bg-3); color: var(--fg);
+  border: 1px solid var(--line); border-radius: 4px; padding: 4px 6px;
+  font: inherit; font-size: 12px;
+}
+#budgetfields .hint { grid-column: 1 / -1; margin-top: 2px; }
 
 textarea, input[type="text"] {
   width: 100%;
@@ -138,7 +242,15 @@ button.link { background: none; border: none; color: var(--accent); padding: 0; 
 
 #runbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 10px; }
 #runbar .rid { font-family: var(--mono); color: var(--fg-dim); }
-#runbar .task { flex: 1 1 320px; color: var(--fg); }
+/*
+ * 任务原文夹到 2 行。runbar 现在是**固定**的（见 #view 那条【定】），
+ * 一段三行的任务描述会把可视区吃掉一截，而它每屏都在。
+ * 夹法照抄 `#runlist .rtask` —— 同一个问题在这个界面里已经有一份处置了。
+ */
+#runbar .task {
+  flex: 1 1 320px; color: var(--fg);
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
 #runbar .actions { display: flex; gap: 6px; flex-wrap: wrap; }
 
 #tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin-bottom: 14px; }

@@ -28,6 +28,7 @@ import {
   asId,
   executionPrivilegeOf,
   readBudgetAxes,
+  readBudgetLimits,
   readRunFacts,
   ToolRegistry,
   type ExecutionPrivilege,
@@ -87,10 +88,21 @@ export interface RunHostOptions {
    * 服务这一层因此把它当成不可变配置 —— 要换得重启 `npm run ui`。
    */
   executionPrivilege?: ExecutionPrivilege;
-  /** 验收脚本用：注入脚本化 ModelPort、子集工具、固定时区等。 */
+  /**
+   * 验收脚本用：注入脚本化 ModelPort、子集工具、固定时区等。
+   *
+   * `budgetOverrides` 是**生产也在用的**那一条（`--max-turns` 的落点）——
+   * 它每次 `compose()` 都要重新传，因为切 workspace 会重建 RunHost。
+   */
   composeOverrides?: Pick<
     ComposeOptions,
-    "modelPortOverride" | "profileOverride" | "tools" | "timezone" | "contextPolicy" | "mcp"
+    | "modelPortOverride"
+    | "profileOverride"
+    | "tools"
+    | "timezone"
+    | "contextPolicy"
+    | "mcp"
+    | "budgetOverrides"
   >;
 }
 
@@ -355,6 +367,25 @@ export class RunHost {
       // 而界面上那个「起步价」是给人读的过拟合警报。
       fixedOverheadTokens: new ToolRegistry(tools).fixedOverheadTokens(),
       notices: this.composed.notices,
+      /**
+       * 「下一个 Run 的默认预算」—— 界面「新任务」栏那几个输入框的占位值。
+       *
+       * 【定】走 `readBudgetLimits`（它自己跑在 `readBudgetAxes` 上），
+       * **不在这里另拼一张表**。默认值必须与真正会撞的墙来自同一处，
+       * 否则会出现「表单说默认 20，实际在 30 撞墙」这种绿灯下看不出来的不一致。
+       *
+       * 【定】它与详情页的 `budgetAxes` 是**两个事实**，不要合并：
+       * 那边是「这个 Run 冻结的限额与用掉多少」，这边是「下一个 Run 起步用什么」。
+       * 调大 `--max-turns` 之后两者会不一样，而那正是正确的。
+       */
+      budgetDefaults: readBudgetLimits(this.composed.makeRunSpec("(预算探针)").budgets).map(
+        ({ axis, field, limit, unit }) => ({
+          axis: String(axis),
+          field: String(field),
+          ...(limit === undefined ? {} : { limit }),
+          unit,
+        }),
+      ),
       traceDir: this.opts.traceDir,
     };
   }
@@ -678,7 +709,22 @@ export class RunHost {
    * 起一个 Run。返回 runId —— 它由 Facade 生成，第一个事件才带出来，
    * 所以这里必须等到第一个事件（通常是 `RunStarted`）。
    */
-  async startRun(task: string): Promise<{ runId: string }> {
+  async startRun(
+    task: string,
+    /**
+     * 逐 Run 的预算覆盖，按 axis id（界面「新任务」栏那几个输入框）。
+     *
+     * 【定】它**不是**审批档位那种"同一个开关的第二个入口"。
+     * 档位是进程级的（拨了就留在那一档，顶栏徽章跟着变），而预算随
+     * RunSpec 冻结 —— 每个 Run 一份，互不影响。所以这里是一个真正的
+     * 逐 Run 参数，不去动任何进程状态。
+     *
+     * ⚠️ 值的合法性由调用方（`server.ts` 的路由）**在 `startRun` 之前**校验完。
+     * 见那里 P1-2 那条【定】：失败的请求不得留下任何状态变化，
+     * 而 `claimForeground()` 就在下一行 —— 在这里抛会留下一个被占住的槽位。
+     */
+    budgetOverrides?: Readonly<Record<string, unknown>>,
+  ): Promise<{ runId: string }> {
     // 【定】同步占位再 await —— 见 claimForeground 的 TOCTOU 说明。
     this.claimForeground(STARTING);
     /**
@@ -700,7 +746,7 @@ export class RunHost {
     try {
       // 【定】入口身份从这里传进去。此前 makeRunSpec 写死 CLI，
       // 于是 Web 起的 Run 在 RunSpec 里自称 CLI，而 trace header 写着 web。
-      const spec: RunSpec = this.composed.makeRunSpec(task, "WEB");
+      const spec: RunSpec = this.composed.makeRunSpec(task, "WEB", budgetOverrides);
       const gen = this.composed.runtime.start(spec);
       const r = await this.drive(gen);
       this.taskCache.set(r.runId, task);

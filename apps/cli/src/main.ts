@@ -25,18 +25,27 @@ import type {
   TraceSinkPort,
   TranscriptEntry,
 } from "@workagent/harness-runtime";
-import { NullTraceSink, asId, readRunFacts } from "@workagent/harness-runtime";
+import {
+  DEFAULT_BUDGETS,
+  NullTraceSink,
+  asId,
+  readBudgetLimits,
+  readRunFacts,
+} from "@workagent/harness-runtime";
 import type { ExecutionPrivilege } from "@workagent/harness-runtime";
 import { SqliteRunStore, openDb } from "@workagent/store-sqlite";
 import type { HandoffChannel, QuestionChannel } from "@workagent/tools-common";
 import { connectMcpServers } from "@workagent/tools-mcp";
 import {
   autoGrantVerdict,
+  BUDGET_VALUE_FLAGS,
+  budgetFlagHelp,
   compose,
   defaultMcpConfigPath,
   describeModes,
   fullAccessWarning,
   parseApprovalMode,
+  parseBudgetFlags,
   parseSandboxArg,
   gitProvenance,
   hostOf,
@@ -112,6 +121,20 @@ interface Args {
    * （service 常驻，MCP 进程跨 Run 存活）。见 ADR-0011。
    */
   mcpConfig: string;
+  /**
+   * 预算限额覆盖，按 axis id（`{ turns: "40" }`）。
+   *
+   * 起因是实测 Run `run_6c3fec671ceb`：八条轴里**只有 `turns` 撞了墙**
+   * （18/20），其余七条全部宽裕（活跃墙钟 35%、billed token 39%），
+   * 而 `maxTurns` 是全仓唯一调不动的东西 —— `compose.ts` 写死
+   * `budgets: DEFAULT_BUDGETS`，CLI 与界面都没有入口。
+   * 又一次「装配完成 ≠ 可达」（前三次：`interject` / `resume` / `--endpoint`）。
+   *
+   * 【定】这里存的是**原始字符串**，不在 parseArgs 里转数字：
+   * 合法性由 `applyBudgetOverrides` 一处判定，命令行与 HTTP 请求体
+   * 因此走同一条判据，而不是"命令行严一点、接口松一点"。
+   */
+  budgets: Record<string, string>;
 }
 
 /**
@@ -126,7 +149,19 @@ interface Args {
  * 而这正是本仓反复记的「静默忽略用户配置比不支持更糟」（M-5 的形态）。
  * ══════════════════════════════════════════════════════════════════════
  */
-const VALUE_FLAGS = ["task", "workspace", "trace", "db", "resume", "recovery-decision", "recovery-note", "endpoint", "mcp-config", "approval", "sandbox"];
+const VALUE_FLAGS = [
+  "task", "workspace", "trace", "db", "resume", "recovery-decision", "recovery-note",
+  "endpoint", "mcp-config", "approval", "sandbox",
+  /**
+   * 八条预算轴（`--max-turns` …）。
+   *
+   * 【定】名字表**只从 compose 来**，不在这里手打。这个文件与
+   * `workagent-service/src/main.ts` 各有一份 `VALUE_FLAGS`（既有的重复），
+   * 手打的后果是「加了一条参数、只有一个入口认识它」—— 而两个入口都不报错：
+   * 一边正常生效，另一边告诉你"不认识的参数"。
+   */
+  ...BUDGET_VALUE_FLAGS,
+];
 const BOOL_FLAGS = ["no-trace", "list-runs"];
 
 function assertKnownArgs(argv: string[]): void {
@@ -183,6 +218,8 @@ function assertKnownArgs(argv: string[]): void {
         `可用：${[...BOOL_FLAGS, ...VALUE_FLAGS].map((f) => `--${f}`).join(" ")}\n` +
         `  --approval confirm|default|auto   审批档位（默认 default）\n` +
         `  --sandbox  on|off                 执行特权（默认 on）\n` +
+        // 【定】由表推出，不手写 —— 加一条轴时说明不会漏。
+        `${budgetFlagHelp()}\n` +
         (migrated[name] ? `\n（${migrated[name]}）` : ""),
     );
   }
@@ -233,6 +270,7 @@ function parseArgs(argv: string[]): Args {
     recoveryNote: get("recovery-note"),
     endpoint,
     mcpConfig: get("mcp-config") ?? defaultMcpConfigPath(),
+    budgets: parseBudgetFlags(argv),
   };
 }
 
@@ -696,6 +734,9 @@ async function main(): Promise<void> {
     trace,
     dbPath: args.dbPath,
     endpoint: args.endpoint,
+    // `--max-turns` 等八条轴。非法值在 compose 里就抛（服务/命令起不来），
+    // 不留到起 Run 那一刻 —— 见 ComposeOptions.budgetOverrides。
+    budgetOverrides: args.budgets,
     // S10：接管通道是 stdin 三方复用里的第三方（语义在 S1 定死）。
     /**
      * ── 【定】AUTO 档下两条通道的处置**相反**，这是 ADR-0008 的直接后果 ─────
@@ -736,7 +777,32 @@ async function main(): Promise<void> {
     console.log(`stdin    : 运行期直接敲一句话回车 = 插话；审批时回车 = 应答`);
   }
 
-  for (const n of composed.notices) console.log(`⚠️  ${n}\n`);
+  /**
+   * 预算：**只打被覆盖的轴**，没覆盖就一行都不打。
+   *
+   * 【定】它与 `--sandbox` 那种"必须一直看得见"不是一类东西 ——
+   * 预算不是安全边界，而每个 Run 的实际限额在界面「预算」页与
+   * 冻结的 `spec.budgets` 上都查得到。默认值天天打反而会被读者划过去。
+   *
+   * 但**被覆盖了就必须打**：一个静默生效的 `--max-turns 60` 与一个
+   * 被吞掉的 `--max-turns 60`，在用户那里完全不可区分（M-5 的形态）。
+   */
+  const overridden = Object.keys(args.budgets);
+  if (overridden.length > 0) {
+    const spec = composed.makeRunSpec("(预算探针)");
+    const line = readBudgetLimits(spec.budgets)
+      .filter((a) => overridden.includes(String(a.axis)))
+      .map((a) => `${a.field} ${a.limit}（默认 ${DEFAULT_BUDGETS[a.field] ?? "未设"}）`)
+      .join("，");
+    console.log(`budget   : ${line}`);
+  }
+
+  for (const n of composed.notices) {
+    console.log(`⚠️  ${n.text}`);
+    // 终端**照旧全打**。折叠是界面的处置 —— 顶栏只有几行高，而 scrollback 没有上限。
+    if (n.detail) console.log(`  ${n.detail}`);
+    console.log();
+  }
 
   let runId = args.runId;
   currentRunId = runId;
@@ -749,7 +815,25 @@ async function main(): Promise<void> {
       await shutdownMcp();
       process.exit(1);
     }
-    console.log(`resume   : ${runId}（上次状态 ${snapshot.status}，已跑 ${snapshot.turnCount} 轮）\n`);
+    console.log(`resume   : ${runId}（上次状态 ${snapshot.status}，已跑 ${snapshot.turnCount} 轮）`);
+    /**
+     * 【定】resume 用的是**冻结在 RunSpec 里的**预算，不是今天的默认值，
+     * 更不是这次命令行上的 `--max-turns`。必须说出来。
+     *
+     * 不说的后果很具体：一个撞了 MAX_TURNS 的 Run，用户第一反应是
+     * `--max-turns 40 --resume <id>`，然后看着它**立刻又停在同一个数字上**，
+     * 而命令行上明明写着 40。参数没被吞（`assertKnownArgs` 认得它），
+     * 它只是对这条路径无效 —— 这正是"看起来生效、实际什么都没变"的形状，
+     * 而本仓对这个形状的处置一律是：让它开口说话。
+     */
+    const frozen = (await composed.ports.runs.getRunSpec(asId<RunId>(runId)))?.budgets;
+    if (frozen) {
+      console.log(
+        `           预算用的是**启动时冻结的那一份**（maxTurns ${frozen.maxTurns}）——` +
+          `这次命令行上的 --max-* 对它无效。`,
+      );
+    }
+    console.log();
     gen = composed.runtime.resume(asId<RunId>(runId), {
       ...(args.recoveryDecision ? { recoveryDecision: args.recoveryDecision } : {}),
       ...(args.recoveryNote ? { recoveryNote: args.recoveryNote } : {}),

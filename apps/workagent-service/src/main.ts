@@ -13,7 +13,10 @@
 import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 import {
+  BUDGET_VALUE_FLAGS,
+  budgetFlagHelp,
   parseApprovalMode,
+  parseBudgetFlags,
   parseEndpointArg,
   parseSandboxArg,
   REPO_ROOT,
@@ -45,7 +48,12 @@ function arg(argv: string[], name: string): string | undefined {
  * 那个开关关的是边界。
  * ══════════════════════════════════════════════════════════════════════
  */
-const VALUE_FLAGS = ["workspace", "port", "endpoint", "mcp-config", "approval", "sandbox"];
+const VALUE_FLAGS = [
+  "workspace", "port", "endpoint", "mcp-config", "approval", "sandbox",
+  // 【定】名字表只从 compose 来 —— 这个文件与 `apps/cli/src/main.ts` 各有一份
+  // VALUE_FLAGS（既有的重复）。手打的后果是一个入口认得、另一个报"不认识的参数"。
+  ...BUDGET_VALUE_FLAGS,
+];
 
 function assertKnownArgs(argv: string[]): void {
   for (let i = 0; i < argv.length; i += 1) {
@@ -79,7 +87,10 @@ function assertKnownArgs(argv: string[]): void {
       `不认识的参数 ${raw}。\n` +
         `可用：${VALUE_FLAGS.map((f) => `--${f}`).join(" ")}\n` +
         `  --approval confirm|default|auto   审批档位（默认 default，界面上可随时改）\n` +
-        `  --sandbox  on|off                 执行特权（默认 on，**运行中不可改**）` +
+        `  --sandbox  on|off                 执行特权（默认 on，**运行中不可改**）\n` +
+        // 【定】由表推出，不手写 —— 与 CLI 那一处同源。
+        `${budgetFlagHelp()}\n` +
+        `  （预算轴也可以在界面「新任务」栏里逐 Run 覆盖）` +
         (name === "yes-all"
           ? `\n\n（\`--yes-all\` 已改成 \`--approval auto\`，ADR-0012。它现在两个入口都有。）`
           : ""),
@@ -124,7 +135,9 @@ async function main(): Promise<void> {
     endpoint,
     approvalMode,
     executionPrivilege,
-    composeOverrides: { mcp },
+    // `--max-turns` 等八条轴：这是**启动档**（每个新 Run 的默认预算）。
+    // 界面「新任务」栏里的输入框压在它之上，逐 Run 生效。
+    composeOverrides: { mcp, budgetOverrides: parseBudgetFlags(argv) },
     /**
      * 【定】注册表放在 `.workagent-state/` 而不是某个 workspace 里面。
      *
@@ -157,7 +170,20 @@ async function main(): Promise<void> {
     // 用户很容易以为旁边那条也是 —— 而它不是（随 RunSpec 冻结）。
     console.log(`            执行特权随 Run 冻结，界面上改不了；要换请重启并调整 --sandbox。`);
   }
-  for (const n of info.notices) console.log(`⚠️  ${n}`);
+  /**
+   * 预算：只打**被覆盖的**轴，与 CLI 同一条口径。
+   * 默认值不打（界面「预算」页与每个 Run 冻结的 spec 上都查得到）。
+   */
+  const budgetLine = info.budgetDefaults
+    .filter((a) => a.axis in parseBudgetFlags(argv))
+    .map((a) => `${a.field} ${a.limit}`)
+    .join("，");
+  if (budgetLine) console.log(`budget    : ${budgetLine}（启动档，界面上可逐 Run 再改）`);
+  for (const n of info.notices) {
+    console.log(`⚠️  ${n.text}`);
+    // 终端照旧全打。折叠是**界面**的处置 —— 顶栏只有几行高，scrollback 没有上限。
+    if (n.detail) console.log(`  ${n.detail}`);
+  }
   console.log(`\n白盒界面已启动，用浏览器打开（**这个 URL 带着会话 Token，别贴出去**）：\n`);
   console.log(`  \x1b[36m${svc.url}\x1b[0m\n`);
   console.log(`Ctrl+C 停止。停止时正在跑的 Run 会被取消（等人的请求一并中断）。`);

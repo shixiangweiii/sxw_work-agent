@@ -178,12 +178,95 @@ function renderService() {
    * 「此刻这台机器上没有闸门」，那不是一次性通知。
    */
   if (s.fullAccessWarning) box.appendChild(item("⚠️", s.fullAccessWarning, "warn"));
-  for (const n of s.notices || []) box.appendChild(item("⚠️", n, "warn"));
+  /**
+   * ── notice 的两层：`text` 常驻，`detail` 折叠 ──────────────────────────
+   *
+   * 【定】切分由**服务端的字段**决定，界面**不解析** `text` 里的换行。
+   * 这与几行之上那条「读 `approvalModeId` 这个机器字段、不解析
+   * `approvalMode` 那句人话」是同一条纪律，只是换了个方向：
+   * 那边怕的是徽章停在错误档位，这边怕的是**该常驻的那句话被折进去**。
+   *
+   * 具体到 MCP 那条 notice：折进去的会是「⚠️ 输出目录固定在 …」，
+   * 而 Run `run_6c3fec671ceb` 就是踩它翻的 —— `browser_evaluate` 把 32 张图的
+   * base64 写进了 MCP 自己的输出目录，下一轮 `run_shell` 在 Run 的 workspace 里
+   * `cat` 同一个相对路径，`No such file or directory`。
+   */
+  for (const n of s.notices || []) {
+    box.appendChild(item("⚠️", n.text, "warn"));
+    if (!n.detail) continue;
+    box.appendChild(
+      el("details", {}, [
+        el("summary", { text: "工具原名清单（写 mcp.json 的 tools 段时展开）" }),
+        el("div", { class: "body", text: n.detail }),
+      ]),
+    );
+  }
 
   // 提交栏那个选择器要跟着服务端的真实档位走 —— 它是同一个开关的第二个入口，
   // 显示成别的值就等于界面上有两个互相矛盾的"当前档位"。
   const picker = document.getElementById("approvalmode");
   if (picker && s.approvalModeId) picker.value = s.approvalModeId;
+  renderBudgetFields();
+}
+
+/**
+ * 「新任务」栏里的逐 Run 预算覆盖。
+ *
+ * 【定】输入框由服务端的 `budgetDefaults` 生成，**不在这里硬编码一份轴表**。
+ * 那份默认值一路来自 Runtime 的 `readBudgetAxes`（唯一的表）——
+ * 自己列一份的后果是「表单说默认 20，实际在 30 撞墙」，
+ * 而那种不一致在绿灯下完全看不出来。
+ */
+function renderBudgetFields() {
+  const box = document.getElementById("budgetfields");
+  if (!box) return;
+  clear(box);
+  const axes = (S.service && S.service.budgetDefaults) || [];
+  for (const a of axes) {
+    const label = (AXIS_LABEL[a.axis] || a.axis) + (a.unit === "ms" ? "（秒）" : "");
+    // 【定】占位值走 `fmt` —— 与「预算」那一页显示的是同一个函数，
+    // 于是"表单里写的数"与"页面上看到的数"不可能是两个单位。
+    const dflt = a.limit === undefined ? "默认未设上限" : "默认 " + fmt(a.limit, a.unit);
+    box.appendChild(
+      el("div", {}, [
+        el("label", { for: "bud_" + a.axis, text: label }),
+        el("input", {
+          id: "bud_" + a.axis,
+          type: "number",
+          min: "1",
+          step: "1",
+          "data-axis": a.axis,
+          "data-unit": a.unit,
+          placeholder: dflt,
+        }),
+      ]),
+    );
+  }
+  if (axes.length > 0) {
+    box.appendChild(
+      el("p", {
+        class: "hint",
+        text: "只对这一次提交生效，随 Run 冻结；resume 用的仍是当初冻结的那一份。",
+      }),
+    );
+  }
+}
+
+/**
+ * 读表单里填了值的那几条，转成 `POST /api/runs` 的 `budgets`（按 axis id）。
+ *
+ * 单位换算走 `unfmt()`（`fmt` 的逆，就写在 `fmt` 旁边）。
+ */
+function readBudgetInputs() {
+  const box = document.getElementById("budgetfields");
+  if (!box) return undefined;
+  const out = {};
+  for (const input of box.querySelectorAll("input[data-axis]")) {
+    const raw = input.value.trim();
+    if (raw === "") continue; // 【定】空 = 没说 = 用默认值，不是 0
+    out[input.getAttribute("data-axis")] = unfmt(Number(raw), input.getAttribute("data-unit"));
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 /**
@@ -767,6 +850,25 @@ function fmt(n, unit) {
   return String(n);
 }
 
+/**
+ * `fmt` 的逆 —— 把用户在「新任务」栏里填的数换回 `RunBudgets` 的原始单位。
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ * 【定】它必须紧挨着 `fmt`，两个函数一起改。
+ *
+ * 「预算」那一页用 `fmt` 把 ms 渲染成秒（600000 → "600s"）。表单如果收原始 ms，
+ * 同一条轴在两块屏幕上就差 1000 倍 —— 而**两边都不会报错**：用户照着页面上的
+ * "600s" 在表单里填 600，得到一个 600 毫秒的墙钟预算，然后看着 Run 立刻撞墙，
+ * 完全不知道发生了什么。
+ *
+ * 这是本仓反复记的那类失败：一个没有任何征兆的单位错配。
+ * `verify:ui` 有一条判据把「填 600 → spec.budgets 里是 600000」钉住。
+ * ══════════════════════════════════════════════════════════════════════
+ */
+function unfmt(n, unit) {
+  return unit === "ms" ? n * 1000 : n;
+}
+
 // ── 产物
 
 function renderArtifacts(view, d) {
@@ -1315,7 +1417,13 @@ document.getElementById("newrun").addEventListener("submit", async (ev) => {
   state.textContent = "正在启动……";
   try {
     const mode = document.getElementById("approvalmode").value;
-    const r = await api("/api/runs", { method: "POST", body: { task, approvalMode: mode } });
+    // 预算：只送填了值的那几条。一条都没填就整个字段不送 ——
+    // 送一个空对象与不送在服务端等价，但少一个字段就少一次"它到底改没改"的疑问。
+    const budgets = readBudgetInputs();
+    const r = await api("/api/runs", {
+      method: "POST",
+      body: { task, approvalMode: mode, ...(budgets ? { budgets } : {}) },
+    });
     state.textContent = "";
     document.getElementById("task").value = "";
     await refresh();

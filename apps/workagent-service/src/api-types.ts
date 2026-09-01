@@ -330,8 +330,43 @@ export interface UiServiceInfo {
   toolNames: string[];
   /** 工具数 × 180（§16.1【定·实测】）。过拟合警报，随工具数线性增长。 */
   fixedOverheadTokens: number;
-  notices: string[];
+  notices: UiNotice[];
+  /**
+   * 下一个 Run 的默认预算 —— 界面「新任务」栏里那几个输入框的占位值。
+   *
+   * 【定】它与 `UiRunDetail.budgetAxes` 是**两个事实**：那边是
+   * 「这个 Run 冻结的限额与已经用掉多少」，这边是「下一个 Run 起步用什么」。
+   * `--max-turns` 调过之后两者会不一样，而那正是对的。
+   */
+  budgetDefaults: UiBudgetDefault[];
   traceDir: string;
+}
+
+/**
+ * 一条装配期诊断。**`text` 随时该看见，`detail` 用到时才展开。**
+ *
+ * 【定】三份结构相同的声明之一（另两份：`McpNotice` 在 `tools/mcp/src/index.ts`、
+ * `Notice` 在 `apps/cli/src/compose.ts`）。依赖方向是 `apps → tools`，
+ * 反过来 import 会破坏分层，所以只能靠结构类型对齐 —— 改一处要三处一起改。
+ *
+ * 为什么必须分两个字段而不是让界面按 `\n` 切一条散文串：与
+ * 「读 `approvalModeId` 这个机器字段、不解析 `approvalMode` 那句人话」同源。
+ * 文案会为了读着顺增删换行，而界面上的表现是**该常驻的那句话被折进去了** ——
+ * 具体到 MCP 那条：折进去的会是「输出目录固定在 …」，
+ * 而它是 Run `run_6c3fec671ceb` 真的踩过的坑。
+ */
+export interface UiNotice {
+  text: string;
+  detail?: string;
+}
+
+/** 一条轴的默认限额。`limit` 缺席 = 这条轴没设上限（`maxTotalWallClockMs` 就是）。 */
+export interface UiBudgetDefault {
+  axis: string;
+  /** `RunBudgets` 上的字段名。界面只用来显示，覆盖时送的是 `axis`。 */
+  field: string;
+  limit?: number;
+  unit: "count" | "ms" | "token";
 }
 
 export interface UiRunListItem {

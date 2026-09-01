@@ -17,6 +17,7 @@ import {
   DeclarativeEffectResolver,
   HarnessRuntime,
   TRUSTED_PERSONAL,
+  applyBudgetOverrides,
   asId,
   assertProfileMatchesEndpoint,
   freezeProfile,
@@ -26,6 +27,7 @@ import {
   warnIfAssumed,
   type AgentSpecId,
   type ApprovalDecider,
+  type BudgetAxis,
   type EndpointCapabilityProfile,
   type ExecutionPrivilege,
   type PreparedAction,
@@ -357,6 +359,86 @@ export function parseSandboxArg(raw: string | undefined): ExecutionPrivilege {
   );
 }
 
+// ═══════════════════════════════════════════════════ 预算轴的命令行参数
+
+/**
+ * 八条预算轴各自的命令行参数名。`null` = 这条轴不暴露。
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ * 【定】类型写成 `Record<BudgetAxis, …>` 而不是数组，是为了让 TS 强制穷举。
+ *
+ * 将来 `BudgetAxis` 加一条轴而这里忘了给名字，**编译期当场报错**。
+ * 换成数组的话，那条新轴会安静地没有入口 —— 而"能力在、入口不在"
+ * 正是这一批要关掉的东西本身（前四次：`interject` / `resume` /
+ * `--endpoint` / 以及现在这个预算）。
+ * ══════════════════════════════════════════════════════════════════════
+ *
+ * 【定】`softLimitRatio` 不在这张表里，因为**它不是一条轴** ——
+ * 它是所有轴共用的一个比例，不在 `readBudgetAxes` 的返回值里。
+ * 给它一个 `--max-*` 参数会让"预算"这个词同时指两种东西。
+ */
+const BUDGET_FLAG_BY_AXIS: Record<BudgetAxis, string | null> = {
+  turns: "max-turns",
+  activeWallClockMs: "max-wallclock",
+  /**
+   * ⚠️ 暴露它**不等于**给它默认值。`DEFAULT_BUDGETS` 里那条「故意留空」的
+   * 【定】一个字没动：它算的是 `now - startedAt`，而 `startedAt` 在 resume 时
+   * 刻意继承 —— 给它默认值 = 隔夜 resume 在第一次迭代就撞墙。
+   * 用户显式传是另一回事（那正是那条【定】说的"由调用方按场景显式传"）。
+   */
+  totalWallClockMs: "max-total-wallclock",
+  modelCalls: "max-model-calls",
+  toolCalls: "max-tool-calls",
+  billedInputTokens: "max-billed-input-tokens",
+  outputTokens: "max-output-tokens",
+  consecutiveFailures: "max-consecutive-failures",
+};
+
+/**
+ * 预算参数的名字表，供两个入口的 `VALUE_FLAGS` 展开。
+ *
+ * 【定】**唯一一份**。`apps/cli/src/main.ts` 与 `apps/workagent-service/src/main.ts`
+ * 各自维护着一份 `VALUE_FLAGS`（既有的重复，本批不重构它），
+ * 而预算参数只从这里来 —— 否则就是「加了一条参数、只有一个入口认识它」，
+ * 且两个入口都不会报错：一边正常生效，另一边报"不认识的参数"。
+ */
+export const BUDGET_VALUE_FLAGS: readonly string[] = Object.values(BUDGET_FLAG_BY_AXIS).filter(
+  (f): f is string => f !== null,
+);
+
+/** 参数名 → axis id。给错误提示与解析用。 */
+const AXIS_BY_BUDGET_FLAG = new Map<string, BudgetAxis>(
+  (Object.entries(BUDGET_FLAG_BY_AXIS) as Array<[BudgetAxis, string | null]>)
+    .filter((e): e is [BudgetAxis, string] => e[1] !== null)
+    .map(([axis, flag]) => [flag, axis]),
+);
+
+/** 帮助文本里那一段。由表推出，不手写 —— 加一条轴时不会漏掉说明。 */
+export function budgetFlagHelp(): string {
+  return [...AXIS_BY_BUDGET_FLAG.entries()]
+    .map(([flag, axis]) => `  --${flag}${" ".repeat(Math.max(1, 28 - flag.length))}预算轴 ${axis}`)
+    .join("\n");
+}
+
+/**
+ * 从 argv 里挑出预算参数，返回 `applyBudgetOverrides` 认得的 `{axis: 值}`。
+ *
+ * 【定】这里**只做提取，不做数值校验** —— 合法性由 `applyBudgetOverrides`
+ * 一处判定。两个入口（CLI 与 service）与 HTTP 请求体因此走的是同一条判据，
+ * 而不是"命令行严一点、接口松一点"。
+ */
+export function parseBudgetFlags(argv: readonly string[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [flag, axis] of AXIS_BY_BUDGET_FLAG) {
+    const i = argv.indexOf(`--${flag}`);
+    if (i < 0) continue;
+    // 值缺席由调用方的 assertKnownArgs 先拦（它对所有 VALUE_FLAGS 一视同仁）。
+    const raw = argv[i + 1];
+    if (raw !== undefined) out[axis] = raw;
+  }
+  return out;
+}
+
 /**
  * 一句话说清当前两条轴分别在哪一档。
  *
@@ -611,6 +693,23 @@ export interface ComposeOptions {
    */
   endpoint?: EndpointChoice;
   /**
+   * 预算限额的**启动档**覆盖，按 axis id 索引（`{ turns: 40 }`）。
+   *
+   * 它是 `--max-turns` 这类命令行参数的落点：合并在 `DEFAULT_BUDGETS` 之上，
+   * 成为这个进程里每个新 Run 的默认预算。逐 Run 的覆盖走
+   * `makeRunSpec()` 的第三个参数（界面新建 Run 时那几个输入框）。
+   *
+   * 【定】它**不需要 resume 闸门**，而这一条要写清楚免得下一个人顺手加一道：
+   * `budgets` 在 Runtime 里只有一个消费者（`run-loop.ts` 的 `spec.budgets`），
+   * `resume()` 读的是冻结在 RunSpec 里的那一份 —— 没有第二处会与它错配。
+   * 这与 `executionPrivilege` 不同：那一条有**两个**消费者
+   * （RunSpec ＋ `ShellEffectResolver` 的构造参数），所以才需要
+   * `assertResumeExecutionPrivilegeMatches`。**不为一个不存在的错配造闸门。**
+   *
+   * ⚠️ 直接后果：调大 `--max-turns` **救不了**一个已经撞了 MAX_TURNS 的旧 Run。
+   */
+  budgetOverrides?: Readonly<Record<string, unknown>>;
+  /**
    * 关掉执行前指纹的拍摄（决 6 的旋钮，故障注入用）。
    *
    * 【定】它在 **Runtime 侧**，不在工具身上 —— 同一个 `append_log`，
@@ -696,9 +795,35 @@ export interface Composed {
    * 因为这个字段有一个生产者、零消费者。
    *
    * 验收脚本一律走默认（它们确实是命令行起的），不为它们加噪声。
+   *
+   * 第三个参数是**逐 Run** 的预算覆盖（按 axis id）。它压在
+   * `ComposeOptions.budgetOverrides`（启动档）之上，而后者压在
+   * `DEFAULT_BUDGETS` 之上 —— 三层，越靠近这次提交的优先级越高。
+   * 界面「新任务」栏里那几个输入框走的就是它。
    */
-  makeRunSpec(task: string, entry?: RunEntry): RunSpec;
-  notices: string[];
+  makeRunSpec(
+    task: string,
+    entry?: RunEntry,
+    budgetOverrides?: Readonly<Record<string, unknown>>,
+  ): RunSpec;
+  notices: Notice[];
+}
+
+/**
+ * 一条装配期诊断。**`text` 随时该看见，`detail` 用到时才展开。**
+ *
+ * 【定】它与 `McpNotice`（`tools/mcp/src/index.ts`）、`UiNotice`
+ * （`workagent-service/src/api-types.ts`）是三份**结构相同**的声明。
+ * 依赖方向是 `apps → tools`，`tools/` 不许 import `apps/`，
+ * 所以这个两字段的形状只能靠结构类型对齐 —— 改一处要三处一起改。
+ * 那三处各自的 doc 都指向这句话。
+ *
+ * 为什么要分两个字段：见 `McpNotice` 上那条【定】。一句话是
+ * **不让 Layer 1 去解析散文** —— 与「读 approvalModeId、不解析 approvalMode」同源。
+ */
+export interface Notice {
+  text: string;
+  detail?: string;
 }
 
 export function compose(opts: ComposeOptions): Composed {
@@ -752,11 +877,13 @@ export function compose(opts: ComposeOptions): Composed {
   if (!opts.modelPortOverride && !opts.profileOverride) {
     assertProfileMatchesEndpoint(profile, cfg.baseUrl);
   }
-  const notices = [
-    ...warnIfAssumed(profile),
-    ...(modelMismatch ? [modelMismatch] : []),
+  const notices: Notice[] = [
+    // 这两条本来就是一句话，没有可折叠的第二层 —— 只填 text。
+    ...warnIfAssumed(profile).map((text) => ({ text })),
+    ...(modelMismatch ? [{ text: modelMismatch }] : []),
     // MCP 装了几个工具、几个自动放行 —— 起步价与闸门档位都在这一行里，
     // 而这两件事恰好是接入外部工具面最该被看见的代价。
+    // 工具原名清单在它的 `detail` 里（顶栏默认折叠，终端照旧全打）。
     ...(opts.mcp?.notices ?? []),
   ];
 
@@ -903,7 +1030,20 @@ export function compose(opts: ComposeOptions): Composed {
     currentExecutionPrivilege: executionPrivilege,
   });
 
-  const makeRunSpec = (task: string, entry: RunEntry = "CLI"): RunSpec => ({
+  /**
+   * 启动档预算 —— 在 compose 这一刻算一次，非法值当场抛。
+   *
+   * 【定】算在这里而不是每次 `makeRunSpec()` 里，是为了让
+   * `--max-turns abc` 在**服务起得来之前**就失败。留到起 Run 那一刻才报，
+   * 用户会看到一个正常启动的服务，然后每次提交任务都 500。
+   */
+  const startupBudgets = applyBudgetOverrides(DEFAULT_BUDGETS, opts.budgetOverrides ?? {});
+
+  const makeRunSpec = (
+    task: string,
+    entry: RunEntry = "CLI",
+    budgetOverrides?: Readonly<Record<string, unknown>>,
+  ): RunSpec => ({
     id: asId<RunSpecId>(ids.next("rs")),
     // 【定】不要写死。见 Composed.makeRunSpec 与 RunOrigin 的说明 ——
     // 写死一个常量的后果不是「值不对」，是**没有任何东西能与它矛盾**。
@@ -958,7 +1098,16 @@ export function compose(opts: ComposeOptions): Composed {
      * 列表里一个按钮 —— 所以「选目录 → 切换 workspace」必须先有这道闸门。
      */
     workspace: freezeWorkspace(opts.workspaceRoot),
-    budgets: DEFAULT_BUDGETS,
+    /**
+     * 【定】随 RunSpec 冻结，和它旁边这几条同理。
+     *
+     * 三层合并：`DEFAULT_BUDGETS` ← 启动档（`--max-turns`）← 这次提交。
+     * 冻结的理由与 `executionPrivilege` 那条不同 —— 这里不涉及"副作用当时
+     * 有没有边界"，只是"这次跑允许花多少"，但同样必须能事后核对：
+     * 一个在 20 轮停下来的 Run，事后要能说出它当时的限额就是 20，
+     * 而不是"今天的默认值是多少"。
+     */
+    budgets: applyBudgetOverrides(startupBudgets, budgetOverrides ?? {}),
     createdAt: clock.now(),
   });
 

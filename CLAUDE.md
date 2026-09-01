@@ -16,6 +16,137 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 当前状态
 
+### 预算轴做成真参数（2026-09-02）：**唯一稀缺的那条轴，此前是唯一调不动的**
+
+起因是一次真实实测（Run `run_6c3fec671ceb`，「抓 ATA 文章 → 下图 → 打 zip」，
+轨迹在 [ata_download2](sxw_aicoding/实际测试案例/ata_download2/)）：结算 `SUCCESS`，
+而图片没下、zip 不存在。
+
+```bash
+npm run dev -- --max-turns 40 --task "..."      # 八条轴各一个参数
+npm run ui  -- --max-turns 40                   # 启动档；界面「新任务」栏可逐 Run 再改
+```
+
+`verify:all` **226 → 235 条**，边界 grep 扩到 **14 条**（编号到 13）。
+
+> ### 【定】八条轴里**只有 turns 撞墙**，而它是全仓唯一没有入口的那条
+>
+> | 轴 | 用量 | 占比 |
+> |---|---|---|
+> | **turns** | **18 / 20** | **90%** |
+> | activeWallClock | 207784 / 600000 | 35% |
+> | billedInputTokens | 580949 / 1500000 | 39% |
+> | toolCalls | 17 / 100 | 17% |
+>
+> 时间和 token 都还剩一大半。而 `compose.ts` 写死 `budgets: DEFAULT_BUDGETS`，
+> CLI 没有任何预算参数，`POST /api/runs` 的请求体只有 `{ task, approvalMode }`，
+> 界面「预算」页是**纯只读投影** —— 管路（`RunSpec.budgets`）一直是通的
+> （`verify:budget` 就靠手工构造 spec 逐轴撞墙），**缺的只是两个入口都没暴露它**。
+> 又一次「装配完成 ≠ 可达」，前三次是 `interject` / `resume` / `--endpoint`。
+
+> ### 【定】覆盖值按 **axis id** 索引，而 axis → field 的映射**留在已有的那张表里**
+>
+> 最自然的写法是在 compose 里补一张 `Record<BudgetAxis, keyof RunBudgets>`。
+> **不能这么写** —— `readBudgetAxes()` 已经是那张表（`checkBudgets` 自己跑在它上面，
+> 界面的 `budgetAxes` 也读它），再写一张就是第二份。
+> 这里尤其毒：轴名与字段名只差一个 `max` 前缀，抄错一条要等到
+> 「我明明调大了这条轴，它还是在原来的数字上撞墙」才会被发现。
+> 处置是给 `BudgetAxisReading` 加一列 `field` —— line 202 那条【定】
+> 「轴名、读数、限额名三者同名」的机器可读形态。
+>
+> 界面输入框的默认值同样由它推出（`readBudgetLimits`），
+> 不许另拼 —— 否则会出现「表单说默认 20，实际在 30 撞墙」。
+
+> ### 【定】三层合并，而**开一个参数不等于给一个默认值**
+>
+> `DEFAULT_BUDGETS` ← 启动档（`--max-turns`）← 这次提交（界面表单）。
+> `maxTotalWallClockMs` 现在有参数 `--max-total-wallclock` 了，
+> 但**没传时仍然是 `undefined`** —— `DEFAULT_BUDGETS` 里那条「故意留空」的【定】
+> 一个字没动（给它默认值 = 隔夜 resume 第一次迭代就撞墙）。
+> `verify:budget` G4 钉住这个区别，注入实测过：把补全写在**合并层**时
+> 既有的 A2 抓不到，只有 G4 会红。
+>
+> **不给 resume 加预算闸门**：`budgets` 只有一个消费者（`run-loop.ts` 的
+> `spec.budgets`），resume 读冻结的那份就是对的。与 `executionPrivilege`
+> 有两个消费者（RunSpec ＋ `ShellEffectResolver`）因此需要
+> `assertResumeExecutionPrivilegeMatches` 不同 —— **不为一个不存在的错配造闸门**。
+> 直接后果要说出口，CLI 的 resume 横幅因此多打一句：
+> **调大 `--max-turns` 救不了一个已经撞了 MAX_TURNS 的旧 Run。**
+
+> ### 【定】A–F 六段撞墙判据**全部跨不过 compose → makeRunSpec 那一跳**
+>
+> 它们一律用 `{...spec, budgets: {...}}` 直接改 spec。注入实测：把
+> `makeRunSpec` 改回写死 `DEFAULT_BUDGETS`（也就是这一批之前的行为），
+> **A–F 全绿**，只有新加的 G2 / G3 红。
+> 与 `read_blob.line_offset` 那次一字不差：判据打在下游，接线断了照样绿。
+>
+> 四次注入实测各自独立承重：①整个合并层摘掉 → G2 ＋ G3 红；
+> ②只丢逐 Run 那一层 → **只有 G3 红**；③给 `DEFAULT_BUDGETS` 补默认 → A2 ＋ G4；
+> ④在合并层"顺手补全" → **只有 G4**。
+
+> ### 【定】界面上的「秒」与 `RunBudgets` 的毫秒之间那次换算必须有判据
+>
+> 「预算」页用 `fmt` 把 600000 渲染成 `"600s"`。表单如果收原始毫秒，
+> 同一条轴在两块屏幕上差 1000 倍，而**两边都不会报错** ——
+> 用户照着页面填 600，得到一个 600 毫秒的墙钟预算，Run 立刻撞墙。
+> 处置是 `unfmt()` **紧挨着** `fmt()`，`verify:ui` L3 直接从 `app.js` 里
+> 把这两个函数抠出来跑往返（重写一份测的就是判据自己）。
+>
+> `POST /api/runs` 的预算校验**排在 `startRun()` 之前**（P1-2 那条纪律：
+> 失败的请求不得留下状态变化，而 `startRun()` 第一件事就是 `claimForeground()`）。
+> L2 因此同时断言「400 ＋ 一个 Run 都没起 ＋ 之后还能正常起」。
+
+> ⚠️ **根因分析里排第一的那条本批没动**：7 轮花在 `read_blob` 把 103KB 的
+> `browser_snapshot` 分页读回来（`MAX_PAGE_CHARS = 12_000` → 读完要 ~9 页 = ~9 轮），
+> 而**token 一分没省**（上下文从 12602 涨到 46348，还触发了一次 Compact）。
+> **外置机制在这条链路上把 token 问题换成了 turn 问题，而 turn 才是紧的那条轴。**
+> 调大轮数治的是症状。那个兑换率要单独回源，不塞进本批。
+>
+> ⚠️ **第二条也没动**：MCP 的输出目录不是 Run 的 workspace。
+> turn 15 的 `browser_evaluate` 做对了所有事（取 cookie → 页面内 fetch → base64），
+> 但 playwright-mcp 把大结果写进了自己的输出目录，
+> turn 16 的 `cat .playwright-mcp/img_batch1.json` → `No such file or directory`。
+> 这条已经写在 `mcp.example.json` 的 `_读我_4` 与顶栏那句 ⚠️ 里，
+> **但那句话的读者是人，模型从头到尾看不到它**。
+
+### 白盒界面两处布局修复（2026-09-02，同批）
+
+> ### 【定】`main { height: calc(100vh - 45px) }` —— 45px 是写死的顶栏高度
+>
+> 它只在顶栏恰好一行时成立。顶栏一换行（接一个 MCP 服务器、列出 24 个工具名就会）
+> `main` 就比视口高 → 整页多出第二条滚动条 → 「固定住的」tab 条跟着整页一起滚，
+> **而 CSS 里没有任何东西会报错**。
+>
+> 处置是**让布局自己推出高度**（flex 列：顶栏 auto ＋ main 占满剩余），
+> 不是「把 45 改成 130」—— 改数字只是把同一个 bug 挪到下一次文案变更。
+> 滚动容器改成 `#view`，于是 runbar 与 tab 条**真的**不动，
+> 而 `table th { position: sticky }` 继续正确（用 sticky tabs 的话得给表头补一个
+> 等于 tab 条高度的 `top` 偏移 —— 又一个会漂的写死数字）。
+> 边界 grep **第 13 条**钉住 `calc(100vh -` 不许回来，判别力实测过。
+>
+> ⚠️ **「tab 条固定住」本身没有机械判据**（视觉行为）。实测复核过：
+> `#view` 滚动 2612px 时 tab 条与 runbar 的 `getBoundingClientRect().top` 一个像素没动，
+> 整页无滚动条；1100×480 的窄窗口下同样成立。**登记而不是假装它测过。**
+
+> ### 【定】notice 拆成 `text` / `detail` 两个字段，**不让界面按 `\n` 切散文**
+>
+> 24 个 Playwright 工具名把顶栏顶成了 4 行。折叠工具清单是对的，
+> 但切分必须由**服务端的字段**决定 —— `renderService()` 里已有一条同源的【定】：
+> 「读 `approvalModeId` 这个机器字段，不解析 `approvalMode` 那句人话」。
+> 让 Layer 1 去切一条散文串是同一个错误换了个方向：文案会为了读着顺增删换行，
+> 而界面上的表现是**该常驻的那句话被折进去了**。
+>
+> 分界线是「用户什么时候需要它」，不是「重不重要」：
+> 工具清单的用途是写 `tools` 段时照着填（一次性配置动作）→ `detail`；
+> 「⚠️ 输出目录固定在 …」是每个 Run 都可能踩的事实 → `text`，常驻。
+> 终端**照旧全打**（scrollback 没有上限，折叠是界面的处置）。
+>
+> ⚠️ **这条【定】当场抓了我自己一次**：第一版给顶栏加了
+> `max-height: 22vh; overflow-y: auto`（「不该把 main 挤没」）。
+> 1100×480 实测：内容 158px、可见 106px —— **截掉的 52px 里正是那条 ⚠️**。
+> 限高把它换了种方式藏起来，而**滚出去比折叠更糟**（折叠至少有个三角形告诉你还有东西）。
+> 已删掉限高：顶栏太长是一眼就看见的，一条被截掉的警告是看不见的。
+
 ### 全量代码评审的处置（2026-09-02）：29 项，其中**两条断线是判据自己打出来的**
 
 一次覆盖 `packages/ tools/ cases/ adapters/ apps/` 的通读评审，找 ①命名与实现
@@ -1123,6 +1254,8 @@ npm run ui                         # ★阶段 4：白盒界面。打印一个�
 npm run ui -- --port 7788 --endpoint deepseek      # 端口/端点与 CLI 同一套参数
 npm run ui -- --approval auto                      # ★ADR-0012：不再逐次确认（沙箱仍在）
 npm run dev -- --approval auto --sandbox off --task "..."   # ★完全权限：**没有任何闸门**
+npm run ui  -- --max-turns 40                      # ★预算：启动档（界面上可逐 Run 再改）
+npm run dev -- --max-turns 40 --max-wallclock 1200000 --task "..."   # ★八条轴各一个参数
 npm run dev -- --task "看看根目录里有什么，然后写一份 summary.txt"
 npm run dev -- --list-runs         # 库里有哪些 Run
 npm run dev -- --resume <runId>    # 接上一个没跑完的 Run
@@ -1164,6 +1297,33 @@ npm run dev -- --endpoint deepseek --task "..."   # 换对照端点（受枚举�
 不可逆操作与 EXECUTE 逐次问；**越界写由 Policy 直接拒绝**。
 `auto` ＝ 一律自动批准。`--sandbox off` ＝ 无沙箱、可写任意路径、越界写改走审批。
 
+**八条预算轴（2026-09-02）**：每条一个参数，CLI 与界面同一套；界面「新任务」栏里
+还能**逐 Run** 再覆盖一次（三层：`DEFAULT_BUDGETS` ← 启动参数 ← 这次提交）。
+
+```bash
+--max-turns N                 # 轮次（默认 20）★ 实测里唯一撞过墙的那条
+--max-model-calls N           # 模型调用（默认 40）
+--max-tool-calls N            # 工具调用（默认 100）
+--max-wallclock N             # 活跃墙钟 ms（默认 600000，不含等人的时间）
+--max-total-wallclock N       # 总墙钟 ms（**默认没有上限**，见下）
+--max-billed-input-tokens N   # 输入 token 含缓存（默认 1500000）
+--max-output-tokens N         # 输出 token（默认 200000）
+--max-consecutive-failures N  # 连续失败（默认 3）
+```
+
+> ⚠️ **调大 `--max-turns` 救不了一个已经撞了 MAX_TURNS 的旧 Run** ——
+> 预算随 RunSpec 冻结，`resume()` 读的是启动时冻结的那一份。CLI 的 resume
+> 横幅会把冻结值打出来，就是为了让这件事开口说话。
+>
+> ⚠️ **`--max-total-wallclock` 有参数，但不传时仍然没有上限**，这是刻意的：
+> 它算的是 `now - startedAt` 而 `startedAt` 在 resume 时继承 ——
+> 给它默认值 = 隔夜 resume 在第一次迭代就撞墙。**开一个参数不等于给一个默认值。**
+>
+> ⚠️ **非法值一律 fail-fast**（`0` / 负数 / 小数 / 非数字 / 未知轴名），
+> 命令行与 `POST /api/runs` 走同一个 `applyBudgetOverrides`，
+> 不存在"命令行严一点、接口松一点"。界面上填的秒会换算成毫秒
+> （`unfmt` 是「预算」页那个 `fmt` 的逆，两个函数必须一起改）。
+
 > **没有 `--yes` / `--confirm` / `--yes-all` / `--yolo`**，而且**未知参数一律报错**
 > （service 入口这条是 ADR-0012 补的，它此前是裸 `indexOf`）：一个被静默吞掉的参数
 > 与一个生效的参数，在用户那里完全不可区分（M-5 那条教训的形态）。
@@ -1191,6 +1351,10 @@ npm run verify:compact             # Compact 是否真的落地（R-6）＋ ★G
                                    #   （夹具每轮两条消息 —— 每轮一条的话有 bug 与没 bug 给同一个答案）
 npm run verify:persistence         # 跨进程恢复：真 kill -9 之后能不能只凭 SQLite 接上
 npm run verify:budget              # 预算八轴逐条撞墙 ＋ 墙钟拆分 ＋ 时间事实段级冻结
+                                   #   ＋ ★G 段：`--max-turns` 走完 compose → makeRunSpec → spec.budgets
+                                   #     （A–F 六段全用 `{...spec, budgets}` 绕过了那一跳，接线断了照样绿）
+                                   #     ＋ 非法值 fail-fast 与合法值放行**成对** ＋ 三层合并优先级
+                                   #     ＋ maxTotalWallClockMs 没传时仍是 undefined（开参数 ≠ 给默认值）
 npm run verify:crash               # 三个崩溃窗口 × 三条恢复分支（决 6 的判别力在这里）
 npm run verify:drift               # 端点漂移检测 ＋ 对照端点装配 ＋ resume 端点一致性闸门（U-1 / U-6 / P1-1）
 npm run verify:tools               # 批 1：边界 grep（1…7 共 8 条） ＋ 两类声明 ＋ 分页非截断 ＋ 组合器三方法路由 ＋ 读黑名单
@@ -1212,6 +1376,10 @@ npm run verify:ui                  # ★阶段 4：边界判别力 ＋ 投影幂
                                    #   ＋ ★ADR-0012 D4/D5：AUTO 档不弹卡片**且动作真的执行了** ＋
                                    #     decidedBy 的 AUTO / HUMAN **成对** ＋「本次 Run 不再问」的 HUMAN→AUTO
                                    #   ＋ ★J2：换执行特权档 resume 被拒 ＋ **同档放行**（§18.3 第三维）
+                                   #   ＋ ★L 段（预算参数化）：界面填的预算走完 HTTP 且**真的在拦**
+                                   #     ＋ 非法值 400 且**一个 Run 都没起、前台槽位没被占死**（P1-2）
+                                   #     ＋ 秒↔毫秒的往返（直接从 app.js 抠 fmt/unfmt 跑，不重写一份）
+                                   #     ＋ 输入框默认值与 budgetAxes 同源（readBudgetLimits）
 npm run verify:mcp                 # ★ADR-0011：通用 MCP 客户端。边界 12 判别力 ＋ 默认最保守档
                                    #   ＋ read/execute 两侧 ＋ array/嵌套 object 逐字送达 ＋ 分页
                                    #   ＋ isError 分流 ＋ image 块不假装 ＋ list_changed 必须被忽略
@@ -1221,7 +1389,7 @@ npm run verify:mcp                 # ★ADR-0011：通用 MCP 客户端。边界
                                    #   ＋ 未知 content 块不得废掉工具 ＋ 握手卡住不留孤儿进程
                                    #   ＋ resume 说出「外部工具核对不了」＋ 示例配置必须真能解析
                                    #   用**手写的假 MCP 服务器**，不依赖 Playwright、不联网、不弹窗口
-npm run verify:all                 # 15 条脚本 / 226 条判据
+npm run verify:all                 # 15 条脚本 / 235 条判据
 ```
 
 > **【定】`verify:ui` 必须真的起 HTTP 服务**，不能直接调 `PendingHub` 的方法测。
@@ -1384,7 +1552,7 @@ isBlockClosed     形状提供事件          端点提供有无
 
 主力端点是**百炼 Anthropic 形状 `qwen3.7-plus`**（D-16）。选它而不是评分更高的 DeepSeek，因为它**零协议兜底**（缺 tool_result、错 tool_call_id 一律 200 放行）且服务端无状态——用一个什么都不校验的端点开发，能逼出自持逻辑的全部漏洞。`compose.ts` 是全仓唯一写死端点名的地方。
 
-### 边界 grep：编号 1…12、共 13 条规则（有机械判据，改动后复核）
+### 边界 grep：编号 1…13、共 14 条规则（有机械判据，改动后复核）
 
 **【定】表在 `apps/cli/src/verify/boundaries.ts`，不要在别处抄第二份。**
 从阶段 4 起有两个消费者（`verify:tools` 跑全表、`verify:ui` 对新增几条做判别力实测），
@@ -1404,6 +1572,7 @@ grep -rnE "\.setStatus\(|runLoop\(|executeBatch\(|settleOutcome\(" apps/workagen
 grep -rnE "\.(inner|outer)HTML|insertAdjacentHTML" apps/workagent-ui/public  # 10. ★阶段 4：模型产出不得走 innerHTML
 grep -rnE 'style: "|style="' apps/workagent-ui/public       # 11. ★阶段 4 收口：不得用内联 style（被自己的 CSP 丢弃）
 grep -rniE "modelcontextprotocol|StdioClientTransport" packages adapters  # 12. ★ADR-0011：MCP 客户端不得进 Runtime
+grep -rnE "calc\(100vh *-" apps/workagent-ui                 # 13. ★界面高度不得由视口减写死常数算出
 ```
 
 > **第 12 条与第 7 条同源但更隐蔽。** MCP 的诱惑**不需要 import 任何工具包** ——
@@ -1412,7 +1581,7 @@ grep -rniE "modelcontextprotocol|StdioClientTransport" packages adapters  # 12. 
 > JSON-RPC 与子进程管理，而**边界 4 / 6 / 7 一条都不会响**。
 > 判别力实测在 `verify:mcp` A 段（注入一行 SDK import，必须当场翻红）。
 
-阶段 4 三条各自的「违反了会怎样」：
+界面那四条各自的「违反了会怎样」（8/9/10/11 是阶段 4 的，13 是 2026-09-02 加的）：
 
 | 条 | 违反的形态 | 后果 |
 |---|---|---|
@@ -1420,6 +1589,16 @@ grep -rniE "modelcontextprotocol|StdioClientTransport" packages adapters  # 12. 
 | **9** | 服务里补一句 `setStatus` 去「修正」看起来不对的状态 | Layer 2 成为**第二个状态推进者**，§23.1 的裁决规则不成立，而界面看起来更「对」了 |
 | **10** | 审批面板用 `innerHTML` 拼命令原文 | 模型可以在命令注释里塞 HTML 把上面几行盖掉 —— 与 ANSI 伪造是同一件事，换了个渲染器 |
 | **11** | 用 `style="width:…"` 设进度条比例 | **被自己的 CSP（`style-src 'self'`）静默丢弃** —— 属性进了 DOM、声明是空的，八条预算轴全部渲染成满格。一个说假话的白盒，而且**在截图里看不出来** |
+| **13** | `main { height: calc(100vh - 45px) }` 那种「视口减顶栏高度」 | 那个常数只在顶栏恰好一行时成立。顶栏一换行（接一个 MCP 服务器就会）`main` 比视口高 → 整页多出第二条滚动条 → **「固定住的」tab 条跟着整页一起滚**，而 CSS 里没有任何东西会报错 |
+
+> **第 11 条与第 13 条是同一类**：两条挡的都是**看起来能跑、实际静默出错**的布局写法，
+> 而这一类失败在截图里看不出来。第 13 条的处置一律是**让布局自己推出高度**
+> （flex 列），不是「把 45 改成 130」—— 改数字只是把同一个 bug 挪到下一次文案变更。
+>
+> ⚠️ 第 13 条如实写明射程盲区：它只抓 `100vh`。写 `calc(100% - 45px)`
+> 或用 JS 量顶栏高度再设 style，它一个字都不会命中。不去扩模式
+> （`calc(` 在正常样式里到处都是），而是把盲区写下来 ——
+> 一条声称射程比实际更大的规则，比一条老实交代边界的更危险。
 
 > **第 8 条不是恒真式。** 它成立靠的是「UI 没有构建步骤」这个物理事实，
 > 而这个事实随时会被一次改动破坏 —— 那一刻它是唯一会说话的东西。
@@ -1433,7 +1612,7 @@ grep -rniE "modelcontextprotocol|StdioClientTransport" packages adapters  # 12. 
 > 这几个文件的文件头就在讲这条规则。第一次跑时第 8 条就抓到了我自己写在
 > `index.html` 注释里的模式串。
 
-**`verify:tools` A 段机械跑这 13 条**，不要手工 grep 了事 —— 它还会过滤注释行
+**`verify:tools` A 段机械跑这 14 条**，不要手工 grep 了事 —— 它还会过滤注释行
 （这些文件里到处在引用边界规则本身），并在 A2 段做**判别力实测**：
 往 `tools/common` 注入一行对 Case 包的 import，第 6b 条必须当场翻红并指出行号。
 
@@ -1474,6 +1653,9 @@ packages/harness-runtime/    Layer 3 全部
   src/action/                Effect 解析、Policy、批结算
   src/verification/          Verifier 与 outcome 结算
   src/model/capability/      端点能力声明的加载、冻结与漂移检测
+  src/budget/                八条轴。【定】`readBudgetAxes` 是**唯一**一张表 ——
+                             checkBudgets 跑在它上面，界面的 budgetAxes 读它，
+                             `--max-*` 的 axis → field 映射也留在它的 `field` 列里
   src/ports/                 14 个 Port，**全部有实现**（不留空壳接口）
   src/loop/progress-guard.ts ★阶段 3。只回答「在原地打转吗」；「还活着吗」那半边
                              收口批删了（进展是批结算时才排空的，时间戳判不了存活）
@@ -1602,7 +1784,7 @@ V04 及更早的架构设计、`V03_Spike0回填清单.md` **不再作为实现�
 - **规格纪律**：任何 Contract 冻结前必须能指出证据来源；拿不出证据就标【验】或【议】。反向同样成立——「必须存在某个机制」也需要证据，V03 的 15 个决策点里有 3 个被证明**问题本身不该问**。
 - **未接线比不写更糟**：类型、事件、类都在但运行时从不执行，会让人以为问题已经解决了（存量清单 §2 列了 8 项这种）。要么接线，要么删掉。
 - 阶段 1 只实现能被当阶段 Micro Case 覆盖的最小面。新增 Port 时必须同时指出强制它存在的不变量。
-- 提交前跑 `npm run typecheck` ＋ 相关的 `verify:*`，并复核边界 grep（12 条，`verify:tools` A 段机械跑）。
+- 提交前跑 `npm run typecheck` ＋ 相关的 `verify:*`，并复核边界 grep（14 条，`verify:tools` A 段机械跑）。
 - **不留「声明了但没人读」的字段、枚举值、Port 或参数。** 要么接线，要么删 ——
   一个没有消费者的声明会让下一个人以为那件事已经有人管了。2026-08-31 那一批
   拆掉的三十多项，每一项当初都是「先声明着，将来会用」。

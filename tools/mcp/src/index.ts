@@ -46,13 +46,41 @@ export type { McpConnection, McpToolDef } from "./client.js";
  * 代价：CLI（`npm run dev`，单次命令）跑浏览器任务时每次都要重新登录，
  * 而 `npm run ui`（service 常驻）不用。这条要写进用户文档。
  */
+/**
+ * 一条给入口显示的诊断。
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ * 【定】`text` 与 `detail` **分成两个字段**，不许把长清单塞进 `text` 让界面
+ * 自己按 `\n` 切开。
+ *
+ * `renderService()` 里已经有一条同源的【定】：「读 `approvalModeId` 这两个
+ * **机器字段**，不解析 `approvalMode` 那句人话 —— 那句话为了读着顺改一个字，
+ * 徽章就会静默停在错误的位置上」。让 Layer 1 去切一条散文串是同一个错误，
+ * 只是换了个方向：这里的文案会为了读着顺而增删换行，而界面上的表现是
+ * **该常驻的那句话被折进去了**，或者反过来。
+ *
+ * 分界线是「用户什么时候需要它」：
+ *   text   —— 随时该看见的（几个工具、几个自动放行、输出目录在哪）；
+ *   detail —— 用到时才展开的（工具原名清单，写 `tools` 段时照着填）。
+ *
+ * 【定】这个形状在 `apps/cli/src/compose.ts`（`Notice`）与
+ * `apps/workagent-service/src/api-types.ts`（`UiNotice`）各有一份**结构相同**的
+ * 声明。不是疏忽：依赖方向是 `apps → tools`，反过来 import 会破坏分层，
+ * 而三个字段的形状用结构类型对齐已经足够。改任一处要三处一起改。
+ * ══════════════════════════════════════════════════════════════════════
+ */
+export interface McpNotice {
+  text: string;
+  detail?: string;
+}
+
 export interface McpRuntime {
   snapshots: ToolSnapshot[];
   handler: ToolHandlerPort & { handles(name: string): boolean };
   /** 逐工具一条，注入 `DeclarativeEffectResolver` 的受信任 Resolver 表。 */
   resolvers: Map<string, TrustedEffectResolver>;
   /** 给入口打印的一行行诊断。 */
-  notices: string[];
+  notices: McpNotice[];
   close(): Promise<void>;
 }
 
@@ -103,7 +131,7 @@ export async function connectMcpServers(opts: ConnectOptions): Promise<McpRuntim
   const snapshots: ToolSnapshot[] = [];
   const resolvers = new Map<string, TrustedEffectResolver>();
   const routes = new Map<string, McpRoute>();
-  const notices: string[] = [];
+  const notices: McpNotice[] = [];
 
   const closeAll = async () => {
     for (const c of conns) await closeConnection(c);
@@ -118,7 +146,9 @@ export async function connectMcpServers(opts: ConnectOptions): Promise<McpRuntim
       if (serverCfg.required === false) {
         // 【定】即使放行也要**响亮地说**。一条放行了却没连上的服务器如果不说话，
         // 与"连上了但一个工具都没有"在事后完全不可区分。
-        notices.push(`${why}\n  （该服务器标了 required:false，已跳过 —— 它的工具这次不在工具面里）`);
+        notices.push({
+          text: `${why}\n  （该服务器标了 required:false，已跳过 —— 它的工具这次不在工具面里）`,
+        });
         continue;
       }
       // 已经连上的那几个要收掉，否则子进程留在后台。
@@ -183,14 +213,24 @@ export async function connectMcpServers(opts: ConnectOptions): Promise<McpRuntim
      * 不是加了 `mcp__` 前缀的 Atlas 名）。只报数量的话，用户得先去翻
      * MCP 服务器的文档，或者猜 —— 而猜错的表现是**那一行配置静默不生效**
      * （`tierOf` 查不到就落默认档），没有任何东西会说话。
+     *
+     * ── 但它归 `detail`，不归 `text`（2026-09-01 界面收窄）──────────────────
+     *
+     * 24 个 Playwright 工具名把顶栏顶成了 4 行，而顶栏上真正**必须一直看得见**
+     * 的是下面那条输出目录警告 —— 一屏噪声里的一行警告等于没有警告。
+     *
+     * 【定】分界线是「用户什么时候需要它」，不是「重不重要」：
+     * 这张清单的用途是**写 `tools` 段时照着填**，那是一次性的配置动作，
+     * 展开一次即可；输出目录那条是**每个 Run 都可能踩**的事实。
      */
     const listed = bridged
       .map((t) => (t.tier === "read" ? `${t.mcpToolName}(read)` : t.mcpToolName))
       .join(", ");
-    notices.push(
-      `MCP "${name}"：${bridged.length} 个工具已装配` +
+    notices.push({
+      detail: `工具原名（写 mcp.json 的 tools 段时照着填）：${listed}`,
+      text:
+        `MCP "${name}"：${bridged.length} 个工具已装配` +
         `（${readCount} 个 read 档自动放行，${bridged.length - readCount} 个 execute 档逐次审批）\n` +
-        `  工具：${listed}\n` +
         /**
          * 【定】这一行必须打出来，因为它是一条**用户看不见、但会咬人**的事实。
          *
@@ -198,6 +238,13 @@ export async function connectMcpServers(opts: ConnectOptions): Promise<McpRuntim
          * 固化。切到另一个 workspace 之后，MCP 写出的相对路径文件仍落在这里，
          * 而那个 Run 的 `read_file` 按它自己的根解析 —— 两者不再重合。
          * Case B 之所以跑通，只是因为当时活跃 workspace 恰好就是启动根。
+         *
+         * ⚠️ 2026-09-01 实测把它从「会咬人」升级成「咬过了」：Run
+         * `run_6c3fec671ceb` 里 `browser_evaluate` 把 32 张图的 base64 写进了
+         * `.playwright-mcp/img_batch1.json`（MCP 自己的输出目录），
+         * 下一轮 `run_shell` 在 Run 的 workspace 里 `cat` 同一个相对路径 →
+         * `No such file or directory`，一整轮预算白花。
+         * **所以它必须留在 `text` 里，不许跟工具清单一起折进 `detail`。**
          */
         `  ⚠️ 输出目录固定在 ${opts.workspaceRoot}（与之后切换的活跃 workspace 无关）` +
         /**
@@ -222,7 +269,7 @@ export async function connectMcpServers(opts: ConnectOptions): Promise<McpRuntim
             `（UNKNOWN → RecoveryItem → COMPLETED_WITH_LIMITS），` +
             `而浏览器自动化里报错很常见。`
           : ""),
-    );
+    });
   }
 
   return {

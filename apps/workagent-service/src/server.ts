@@ -24,6 +24,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { extname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { RunEvent } from "@workagent/harness-runtime";
+import { DEFAULT_BUDGETS, applyBudgetOverrides } from "@workagent/harness-runtime";
 import { join } from "node:path";
 import {
   parseApprovalMode,
@@ -386,7 +387,34 @@ async function handle(
         return;
       }
     }
-    const r = await host().startRun(task);
+    /**
+     * ── 逐 Run 的预算覆盖（`{ budgets: { turns: 40 } }`，按 axis id）────────
+     *
+     * 【定】校验**必须在 `startRun()` 之前跑完**，与上面档位那条同一条纪律：
+     * `startRun()` 会 `claimForeground()`，在它之后才发现值不合法的话，
+     * 一个失败的请求就留下了一个被占住的前台槽位。
+     *
+     * 【定】这里只**试算**、不使用结果 —— 真正生效的那次合并在
+     * `makeRunSpec()` 里（那是唯一的出处）。试算的目的只有一个：
+     * 让非法值以 400 返回，而不是以一个已经跑起来的 Run ＋ 500 返回。
+     * 用的是同一个 `applyBudgetOverrides`，所以两次判定不可能分叉。
+     */
+    let budgets: Record<string, unknown> | undefined;
+    const rawBudgets = body["budgets"];
+    if (rawBudgets !== undefined) {
+      if (typeof rawBudgets !== "object" || rawBudgets === null || Array.isArray(rawBudgets)) {
+        sendJson(res, 400, { error: "budgets 必须是一个对象，按预算轴名索引（例如 {\"turns\": 40}）" });
+        return;
+      }
+      budgets = rawBudgets as Record<string, unknown>;
+      try {
+        applyBudgetOverrides(DEFAULT_BUDGETS, budgets);
+      } catch (e) {
+        sendJson(res, 400, { error: (e as Error).message });
+        return;
+      }
+    }
+    const r = await host().startRun(task, budgets);
     if (requested !== undefined) host().setApprovalMode(requested);
     sendJson(res, 200, r);
     return;

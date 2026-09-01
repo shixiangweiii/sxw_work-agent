@@ -26,7 +26,14 @@ import type {
   ModelStreamEvent,
   RunEvent,
 } from "@workagent/harness-runtime";
-import { DEFAULT_BUDGETS, NullTraceSink, asId, readRunFacts, type RunId } from "@workagent/harness-runtime";
+import {
+  DEFAULT_BUDGETS,
+  NullTraceSink,
+  applyBudgetOverrides,
+  asId,
+  readRunFacts,
+  type RunId,
+} from "@workagent/harness-runtime";
 import { listDirSnapshot, writeFileSnapshot } from "@workagent/tools-common";
 import { compose, DEFAULT_SYSTEM_PROMPT } from "../compose.js";
 import { ScriptedModelPort, banner, fact, makeUsage, runVerify, section, verdict, type ScriptedTurn } from "./harness.js";
@@ -461,6 +468,154 @@ async function main(): Promise<void> {
             : `Terminal=${slow.terminal} / 轴=${slow.hardAxis}`,
     );
     results.push({ name: "F", ok: fOk });
+
+    // ──────────────────── G. 预算轴做成真参数：命令行 → compose → spec.budgets
+    section("G. `--max-turns` 这条链路：参数真的走到了 spec.budgets（而不是只被解析了）");
+    console.log(
+      "   起因是实测 Run `run_6c3fec671ceb`：八条轴里**只有 turns 撞了墙**（18/20），\n" +
+        "   其余七条全部宽裕（活跃墙钟 35%、billed 39%、toolCalls 17%）——\n" +
+        "   而 maxTurns 在那之前是全仓唯一调不动的东西（compose 写死 DEFAULT_BUDGETS）。\n" +
+        "\n" +
+        "   ⚠️ 上面 A–F 六段**全部用 `{...spec, budgets}` 直接改 spec**，\n" +
+        "   也就是说它们跨过了 compose → makeRunSpec 这一跳。接线断掉时那六段照样全绿\n" +
+        "   —— 与 `read_blob.line_offset` 那次一字不差：判据打在下游。这一段补的就是那一跳。\n",
+    );
+
+    /** 【定】走生产路径：`makeRunSpec()` 的返回值**原样**交给 start，不做任何覆盖。 */
+    const runViaProductionPath = async (o: {
+      workspace: string;
+      startup?: Record<string, unknown>;
+      perRun?: Record<string, unknown>;
+    }): Promise<{ terminal: string; budgets: typeof DEFAULT_BUDGETS; turns: number }> => {
+      mkdirSync(o.workspace, { recursive: true });
+      const composed = compose({
+        dbPath: ":memory:",
+        workspaceRoot: o.workspace,
+        trace: new NullTraceSink(),
+        modelPortOverride: new ScriptedModelPort(endlessScript(), () => 100, 0),
+        timezone: "Asia/Shanghai",
+        tools: [listDirSnapshot, writeFileSnapshot],
+        systemPrompt: DEFAULT_SYSTEM_PROMPT,
+        approvalDecider: async () => ({ approved: true }),
+        ...(o.startup ? { budgetOverrides: o.startup } : {}),
+      });
+      const spec = composed.makeRunSpec("预算参数化验收", "CLI", o.perRun);
+      const gen = composed.runtime.start(spec); // ← 一个字都不覆盖
+      let runId = "";
+      let terminal = "";
+      let r = await gen.next();
+      while (!r.done) {
+        if (!runId) runId = String(r.value.runId);
+        if (r.value.type === "LoopTerminated") {
+          terminal = (r.value.payload as { terminal: { reason: string } }).terminal.reason;
+        }
+        r = await gen.next();
+      }
+      const facts = readRunFacts(await composed.ports.transcript.readAll(asId<RunId>(runId)));
+      return { terminal, budgets: spec.budgets, turns: facts?.budgetUsage.turns ?? -1 };
+    };
+
+    // G1：非法值 fail-fast。缺字段用默认、非法值报错，两者不能互换。
+    const bad: Array<{ label: string; overrides: Record<string, unknown> }> = [
+      { label: "0", overrides: { turns: 0 } },
+      { label: "-1", overrides: { turns: -1 } },
+      { label: '"abc"', overrides: { turns: "abc" } },
+      { label: "3.7（非整数）", overrides: { turns: 3.7 } },
+      { label: "未知轴 foo", overrides: { foo: 5 } },
+    ];
+    let allRejected = true;
+    for (const b of bad) {
+      let threw = "";
+      try {
+        applyBudgetOverrides(DEFAULT_BUDGETS, b.overrides);
+      } catch (e) {
+        threw = (e as Error).message;
+      }
+      if (!threw) allRejected = false;
+      fact(`  ${b.label}`, threw || "**没有报错** —— 静默生效了");
+    }
+    // 反向的一半：合法值必须过。少了它，一个"一律抛"的实现也能让上面全绿。
+    let legalOk = false;
+    try {
+      legalOk = applyBudgetOverrides(DEFAULT_BUDGETS, { turns: 40 }).maxTurns === 40;
+    } catch {
+      legalOk = false;
+    }
+    fact("  合法值 turns=40", legalOk ? "maxTurns 变成 40" : "**被拒了** —— 一律抛不是校验");
+    verdict(
+      allRejected && legalOk,
+      allRejected && legalOk
+        ? "非法值 fail-fast、合法值放行 —— 成对的两半都在。" +
+          "只有反向那一半的话，一个「一律抛」的实现与一个正确的校验器不可区分"
+        : allRejected
+          ? "合法值也被拒了 —— 这不是校验，是拒绝一切"
+          : "有非法值被静默接受 —— M-5 的形态：被吞掉的参数与生效的参数不可区分",
+    );
+    results.push({ name: "G1", ok: allRejected && legalOk });
+
+    // G2：端到端。这一条是本段的重点 —— 它跨的是 A–F 都跨不过去的那一跳。
+    const e2e = await runViaProductionPath({ workspace: join(tmp, "ws-e2e"), startup: { turns: 3 } });
+    fact("spec.budgets.maxTurns", String(e2e.budgets.maxTurns));
+    fact("Terminal / 实际跑了几轮", `${e2e.terminal} / ${e2e.turns}`);
+    const e2eOk = e2e.budgets.maxTurns === 3 && e2e.terminal === "MAX_TURNS" && e2e.turns === 3;
+    verdict(
+      e2eOk,
+      e2eOk
+        ? "`budgetOverrides:{turns:3}` → compose → makeRunSpec → spec.budgets → 真的停在第 3 轮。" +
+          "**整条链路上没有任何一处覆盖 spec**，所以断哪一跳这条都会红"
+        : `链路断了：spec.budgets.maxTurns=${e2e.budgets.maxTurns} / ${e2e.terminal} / ${e2e.turns} 轮` +
+          `（期望 3 / MAX_TURNS / 3）`,
+    );
+    results.push({ name: "G2", ok: e2eOk });
+
+    // G3：三层合并的优先级。逐 Run 压启动档，启动档压 DEFAULT。
+    const layered = await runViaProductionPath({
+      workspace: join(tmp, "ws-layer"),
+      startup: { turns: 9, modelCalls: 7 },
+      perRun: { turns: 2 },
+    });
+    fact(
+      "DEFAULT 20 ← 启动档 9 ← 这次提交 2",
+      `maxTurns=${layered.budgets.maxTurns}、maxModelCalls=${layered.budgets.maxModelCalls}` +
+        `（后者只有启动档说过话）`,
+    );
+    const layerOk =
+      layered.budgets.maxTurns === 2 &&
+      layered.budgets.maxModelCalls === 7 &&
+      layered.budgets.maxToolCalls === DEFAULT_BUDGETS.maxToolCalls &&
+      layered.turns === 2;
+    verdict(
+      layerOk,
+      layerOk
+        ? "三层各就各位：这次提交赢启动档、启动档赢 DEFAULT、没人说过的轴保持 DEFAULT。" +
+          "同一个 Run 里三种来源同时可见 —— 单测一层的话，「后一层整个覆盖前一层」也能过"
+        : `合并顺序不对：turns=${layered.budgets.maxTurns}（期望 2）、` +
+          `modelCalls=${layered.budgets.maxModelCalls}（期望 7）、` +
+          `toolCalls=${layered.budgets.maxToolCalls}（期望 ${DEFAULT_BUDGETS.maxToolCalls}）`,
+    );
+    results.push({ name: "G3", ok: layerOk });
+
+    /**
+     * G4：`maxTotalWallClockMs` 没人传时**仍然是 undefined**。
+     *
+     * 【定】它在 `DEFAULT_BUDGETS` 里"故意留空"（给它默认值 = 隔夜 resume
+     * 第一次迭代就撞墙，因为 `startedAt` 在 resume 时刻意继承）。
+     * 这一批给它开了一个 `--max-total-wallclock` 参数，而**开参数不等于给默认值** ——
+     * 这条判据钉住的正是那个区别：合并逻辑里任何一处"顺手补全"都会让它翻红。
+     */
+    const untouched = await runViaProductionPath({
+      workspace: join(tmp, "ws-untouched"),
+      startup: { turns: 2 },
+    });
+    const emptyOk = untouched.budgets.maxTotalWallClockMs === undefined;
+    fact("没传时的 maxTotalWallClockMs", String(untouched.budgets.maxTotalWallClockMs));
+    verdict(
+      emptyOk,
+      emptyOk
+        ? "开了参数，但没传时仍然是 undefined —— 「可以传」与「有默认值」是两件事"
+        : "被顺手补全了 —— 隔夜 resume 会在第一次迭代就撞墙（R-2 换个字段再犯一次）",
+    );
+    results.push({ name: "G4", ok: emptyOk });
 
     // ────────────────────────────────────────────── 总判定
     section("总判定");

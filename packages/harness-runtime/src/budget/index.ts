@@ -149,6 +149,27 @@ export function checkBudgets(input: CheckBudgetsInput): BudgetVerdict {
 /** 一条轴的读数。`limit` 缺席 = 这条轴未设限（`maxTotalWallClockMs` 默认就是）。 */
 export interface BudgetAxisReading {
   axis: BudgetAxis;
+  /**
+   * 这条轴的限额写在 `RunBudgets` 的哪个字段上。
+   *
+   * ══════════════════════════════════════════════════════════════════════
+   * 【定】它必须住在**这张表里**，不许在别处另建一份 axis → field 的映射。
+   *
+   * 起因是「预算轴做成真参数」那一批：CLI 的 `--max-turns`、
+   * `POST /api/runs` 的请求体、界面的输入框，三处都要按 axis id 索引，
+   * 然后写回 `RunBudgets` 的字段。最自然的写法是在 compose 里补一张
+   * `Record<BudgetAxis, keyof RunBudgets>` —— 而那就是**第二份**。
+   *
+   * 第二份的后果本仓记过不止一次（`artifactKindOf` / 边界表 / Composition
+   * Root）：两处对同一件事给出不同答案，而**两边都是绿的**。
+   * 这里尤其毒：轴名与字段名只差一个 `max` 前缀，抄错一条要等到
+   * 「我明明调大了这条轴，它还是在原来的数字上撞墙」才会被发现。
+   *
+   * 上面 line 202 那条【定】已经拍板「轴名、读数、限额名三者同名」——
+   * 这一列只是把那句话变成机器读得懂的形态。
+   * ══════════════════════════════════════════════════════════════════════
+   */
+  field: keyof RunBudgets;
   used: number;
   limit?: number;
   /** 单位。界面要靠它决定「12000」是毫秒还是 token —— 两者差 4 个数量级。 */
@@ -184,43 +205,147 @@ export interface BudgetAxisReading {
 export function readBudgetAxes(input: CheckBudgetsInput): BudgetAxisReading[] {
   const { usage, budgets, consecutiveFailures, now } = input;
   return [
-    { axis: "turns", used: usage.turns, limit: budgets.maxTurns, unit: "count" },
+    { axis: "turns", field: "maxTurns", used: usage.turns, limit: budgets.maxTurns, unit: "count" },
     {
       axis: "activeWallClockMs",
+      field: "maxActiveWallClockMs",
       used: usage.activeWallClockMs,
       limit: budgets.maxActiveWallClockMs,
       unit: "ms",
     },
     {
       axis: "totalWallClockMs",
+      field: "maxTotalWallClockMs",
       used: now - usage.startedAt,
       limit: budgets.maxTotalWallClockMs,
       unit: "ms",
     },
-    { axis: "modelCalls", used: usage.modelCalls, limit: budgets.maxModelCalls, unit: "count" },
-    { axis: "toolCalls", used: usage.toolCalls, limit: budgets.maxToolCalls, unit: "count" },
+    {
+      axis: "modelCalls",
+      field: "maxModelCalls",
+      used: usage.modelCalls,
+      limit: budgets.maxModelCalls,
+      unit: "count",
+    },
+    {
+      axis: "toolCalls",
+      field: "maxToolCalls",
+      used: usage.toolCalls,
+      limit: budgets.maxToolCalls,
+      unit: "count",
+    },
     // 【定】轴名、读数、限额名**三者同名**（本批统一）。此前轴叫 inputTokens、
     // 读的却是 billed、限额叫 maxInputTokens —— 靠一行注释维持，而注释拦不住
     // 下一个照字面配置的人（缓存命中时两者差 5 倍以上）。
     {
       axis: "billedInputTokens",
+      field: "maxBilledInputTokens",
       used: usage.billedInputTokens,
       limit: budgets.maxBilledInputTokens,
       unit: "token",
     },
     {
       axis: "outputTokens",
+      field: "maxOutputTokens",
       used: usage.outputTokens,
       limit: budgets.maxOutputTokens,
       unit: "token",
     },
     {
       axis: "consecutiveFailures",
+      field: "maxConsecutiveFailures",
       used: consecutiveFailures,
       limit: budgets.maxConsecutiveFailures,
       unit: "count",
     },
   ];
+}
+
+// ═══════════════════════════════════════════════════ 调用方可以覆盖的限额
+
+/**
+ * 只要限额、不要读数 —— 服务端把「下一个 Run 的默认预算」发给界面时用它。
+ *
+ * 【定】它**由 `readBudgetAxes` 推出**，不另写一张表。
+ * 界面上那几个输入框的默认值必须与真正会撞的墙来自同一处，否则会出现
+ * 「表单说默认 20，实际在 30 撞墙」这种在绿灯下完全看不出来的不一致。
+ *
+ * 传零 usage 是安全的：调用方只取 `limit`，而 `used` 那一列在这里没有消费者。
+ */
+export function readBudgetLimits(
+  budgets: RunBudgets,
+): Array<Pick<BudgetAxisReading, "axis" | "field" | "limit" | "unit">> {
+  const zero: BudgetUsage = {
+    turns: 0,
+    modelCalls: 0,
+    toolCalls: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    billedInputTokens: 0,
+    activeWallClockMs: 0,
+    startedAt: 0,
+  };
+  return readBudgetAxes({ usage: zero, budgets, consecutiveFailures: 0, now: 0 }).map(
+    ({ axis, field, limit, unit }) => ({ axis, field, limit, unit }),
+  );
+}
+
+/**
+ * 按 **axis id** 覆盖预算限额。CLI 的 `--max-*`、`POST /api/runs` 的请求体、
+ * 界面输入框三条入口最终都汇到这里。
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ * 【定】非法值 **fail-fast**，缺字段按默认读（ADR-0012 二次评审 P2-2 的口径）。
+ *
+ * 两者不是一回事，也不能互换：
+ *   缺字段  = 「用户没说」→ 用默认值，那是一句真话；
+ *   非法值  = 「用户说了一句听不懂的话」→ 必须报错。
+ *
+ * 静默回落是本仓反复猎杀的那个形态（M-5、`--yes`、带值参数缺值）：
+ * **一个被静默吞掉的参数与一个生效的参数，在用户那里完全不可区分。**
+ * 这里尤其要紧 —— 一个被吞掉的 `--max-turns 60` 的症状是
+ * 「跑到 20 轮就停了」，而用户会去怀疑模型，不会去怀疑参数。
+ *
+ * 【定】未知 axis 也要抛，并把合法值列出来。落回默认的话，
+ * 那一行配置**看起来生效了、实际什么都没变** —— 与 `mcp.json` 里
+ * `tools` 段工具名拼错时 `tierOf()` 静默落默认档是同一条。
+ * ══════════════════════════════════════════════════════════════════════
+ */
+export function applyBudgetOverrides(
+  base: RunBudgets,
+  overrides: Readonly<Record<string, unknown>>,
+): RunBudgets {
+  const legal = new Map(readBudgetLimits(base).map((a) => [String(a.axis), a]));
+  const next: RunBudgets = { ...base };
+  for (const [axis, raw] of Object.entries(overrides)) {
+    const known = legal.get(axis);
+    if (!known) {
+      throw new Error(
+        `不认识的预算轴 "${axis}"。可用：${[...legal.keys()].join(" ")}`,
+      );
+    }
+    const value = typeof raw === "string" ? Number(raw.trim()) : raw;
+    if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+      throw new Error(
+        `预算轴 "${axis}" 需要一个大于 0 的有限数字，收到：${JSON.stringify(raw)}`,
+      );
+    }
+    /**
+     * 【定】计数轴取整，但**只接受整数**，不静默截断。
+     *
+     * `--max-turns 3.7` 落成 3 的话，用户看到的是「我要了 3.7 轮，它给了 3 轮」
+     * 与「我要了 3 轮」不可区分。报错比替他做决定便宜。
+     * 时间轴（ms）同理 —— 半毫秒没有意义。
+     */
+    if (!Number.isInteger(value)) {
+      throw new Error(`预算轴 "${axis}" 必须是整数，收到：${JSON.stringify(raw)}`);
+    }
+    // 【定】走 Object.assign 而不是 `next[field] = value`：后者要把 RunBudgets
+    // 断言成带索引签名的类型，而那个断言会顺带吃掉「字段名写错」的编译期保护 ——
+    // 而 `field` 的唯一来源是 readBudgetAxes，正是那张要被保护的表。
+    Object.assign(next, { [known.field]: value });
+  }
+  return next;
 }
 
 /**

@@ -183,7 +183,15 @@ async function main(): Promise<void> {
    * 后者会让用户为了少按几次回车去标 read，那正是「从偏好推出属性」的
    * 那次不成立的合并（见 config.ts 里 ToolTier 的说明）。
    */
-  const hint = plain.notices.join("\n");
+  /**
+   * 【定】`text` 与 `detail` **一起看**。
+   *
+   * 两个字段是 2026-09-01 界面收窄那批拆出来的（工具原名清单折进 `detail`，
+   * 顶栏只留常驻那几句）。这条判据问的是「用户能不能知道这件事」，
+   * 而展开一次就能看到的东西也算知道 —— 只查 `text` 会让这条判据
+   * 在**折叠边界移动时**给出与它声称在测的东西无关的答案。
+   */
+  const hint = plain.notices.map((n) => `${n.text}\n${n.detail ?? ""}`).join("\n");
   fact("没配 tools 段时的提示", hint.includes("tools 段") ? "有" : "（没有 —— 用户不会知道这件事）");
   verdict(
     hint.includes("tools 段") && hint.includes("SUCCESS"),
@@ -826,7 +834,7 @@ async function main(): Promise<void> {
     config: optionalConfig,
   });
   mcpToClose.push(optional);
-  fact("required:false 时的 notices", optional.notices[0]?.split("\n")[0] ?? "（一句话都没说）");
+  fact("required:false 时的 notices", optional.notices[0]?.text.split("\n")[0] ?? "（一句话都没说）");
   verdict(
     optional.snapshots.length === 0 && optional.notices.length > 0,
     optional.notices.length > 0
