@@ -16,6 +16,94 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 当前状态
 
+### 全量代码评审的处置（2026-09-02）：29 项，其中**两条断线是判据自己打出来的**
+
+一次覆盖 `packages/ tools/ cases/ adapters/ apps/` 的通读评审，找 ①命名与实现
+不一致 ②冗余/死代码 ③逻辑正确性。29 项全部修完，`verify:all` **221 → 226 条**。
+
+> ### 【定】4 条真缺陷里，最值钱的一条是**注释承诺了两轮、实现只给一轮**
+>
+> `compact.ts` 的 `recentTurns` 写的是
+> `messages.map(m => m.turn).sort(desc).slice(0, 2)` —— 取的是**数组的前两项**
+> 而不是前两个**不同**的轮号。而一个典型回合至少两条消息（assistant 的
+> tool_call ＋ user 的 tool_result），于是 `[4,4,3,3,…]` 切出来是 `[4,4]`、
+> `Set` 收成 `{4}`：**§11.6 的「最近两轮完整保留」实际只保护了最近一轮。**
+>
+> 它为什么活到现在：不违反不变量 8（配对组由 `protocolUnits` 另行保护），
+> 也不改变 `freedTokens` 的方向 —— 它是一个**只会让 Compact 更激进**的偏差，
+> 而 Compact 的判据几乎都在验「它真的丢了东西」。判据补在 `verify:compact` G 段，
+> 注入实测过（改回去 → kept 轮号从 `[0,3,4]` 变成 `[0,4]` → 翻红）。
+>
+> 另三条：`makeError` 的 `?? Date.now()` **被紧随其后的 `...init` 抵消**（显式传
+> `occurredAt: undefined` 时那个键直接消失）；`SystemClock.sleep` 对**已经**
+> aborted 的 signal 不早返回、且 abort 时 `reject(AbortError)` ——
+> 那个异常会穿过整个 runLoop，绕过 `finish()` 与具名 Terminal，
+> 一次 Ctrl+C 在这条路径上表现为「启动失败：Aborted」；
+> `settle-batch` 的超时改写**逐字段重建 outcome**，把 `artifact` 静默丢掉。
+
+> ### 【定】写判据的收益不止「守住这次的修复」——它当场暴露了更久的断线
+>
+> 给 `UnmetCause.CANCELLED` 接线（它此前**零生产者**：批被取消时那些没轮到的
+> 必需操作在 `unmetCauseCounts` 里全落 `UNSPECIFIED`）之后，新判据跑出来是
+> `{UNSPECIFIED:1, CANCELLED:1}` —— 还剩一条。
+>
+> 回源发现 **`causeByCall.set(…, "TOOL_FAILED")` 在正常路径上根本没有消费者**：
+> `causeByCall` 唯一的读者是 `recordUnmetRequired()`，而它只处理**不在**
+> `verifiedCallIds` 里的 call；一个工具失败了却仍然走到 Verification（那是常态，
+> `verify()` 就在下一行）就会被加进去，刚记下的成因当场作废。
+>
+> 形态与 `riskFacts` / `dataMovement` / `replacedBytes` 三次一模一样：
+> **一条撑着结论的依据从未离开产生它的那个函数。** 三向注入实测确认两处接线
+> 各自独立承重；全摘掉时是 `{UNSPECIFIED:2}` —— 那就是评审前的真实状态。
+
+> ### 【定】又一次「判据落在守卫重叠区」，仍然只有注入实测发现得了
+>
+> `verify:progress` I 段第一版只验「先 abort 再 sleep」，于是三向注入里
+> **第三向没有翻红** —— `if (signal?.aborted) return` 那道早返回把 `onAbort`
+> 整个挡在后面，「abort 时是 resolve 还是 reject」在那个夹具里不可观察。
+> 处置是**让每道守卫各有一个能单独触发它的时序**（先 abort / 跑到一半才 abort）。
+> 本仓记过同一形态三次（P2-3 / P2-4 / 归责 P1-6），这是第四次。
+
+> ### 【定】12 条「注释与实现不符」里，有三种是同一个来源：**改对了，没回头改说明**
+>
+> | 形态 | 实例 |
+> |---|---|
+> | 字段删了、引用没删 | `progressReporting.intervalMs`（4 处）、`ContextItem.redactionApplied`（2 处）、`FakeClock` / `DeterministicIdGenerator`（4 处） |
+> | 引用了**不存在的函数** | `tool-bridge.ts` 说 `assertMcpToolsUnchanged`（facade 那道闸门）会先说人话 —— 全仓没有这个函数，真实的东西是一条**只报告不拦截**的事件 |
+> | 文档块挂错了位置 | `sbplString` 与 `zipStructureReason` 的 JSDoc 各自被后一个 doc 块顶掉，挂到了隔壁函数头上，而它们自己一行文档都没有 |
+>
+> 连带修掉的还有：`DEFAULT_TOOLS` 的工具账**漏了 `run_shell`**（报 13 个而实际 14 个，
+> 偏差方向是「看起来更省」）、Web 审批卡上的 CONFIRM 措辞仍是 ADR-0012 已经纠正掉的
+> 「每一步都问」、`artifact-store` 说「三条登记语义」而只列了两条、
+> 两处会漂的硬编码行号引用、`facade` 里一个把 `RunStatus` 遮蔽成 `Map` 的同名变量。
+
+> ### 【定】13 条死代码里，`isBlockClosed` 不是「少了个消费者」，是**一份重复实现**
+>
+> `ModelProtocolPort.isBlockClosed` 有认真的实现、**零调用点**。而同一条闭合规则
+> 在 `shape-anthropic-messages/client.ts` 的 `assemble()` 里还有一份，读同一个
+> `hasExplicitBlockCloseEvent` 声明，**那一份是活的**（§8.4「未闭合的 Tool Call
+> 不得转为 ProposedAction」靠它）。删掉之后，`ModelStreamEvent` 那四个只被它读过的
+> 块级变体（`block_start` / `block_stop` / `tool_input_delta` / `reasoning_delta`）
+> 也一并删了 —— 两个零消费者互相引用，链路看起来是通的。
+>
+> 同批清掉：`DriftDetector.seen` ＋ `observations()`（只写不读，`lastProgressAt` 同族）·
+> `observeToolCallCount` 那个**四个调用点全传 `true`** 的参数 ·
+> `StdinChannel` 的 `mode` / `setMode` / `currentMode`（`currentMode()` 零调用点，
+> 而 `line` 回调从不读它 —— 文件头那张「按状态分派」的表因此是一句假话，
+> 实现一直是按「谁在等」分派）· `EXIT_SEMANTICS` 的 `isError`（本工具**刻意**
+> 不按退出码判成败，那个字段没有任何可能的消费者）· `CallResult.droppedBlocks` ·
+> `RunEventType` · `noCountTokensProfile` · 两个空目录。
+>
+> **【定】`cancelledError` 是「接线」不是「删除」**：它零消费者，而四个写工具
+> 各自内联了一份逐字相同的六行 —— 那正是同一个文件里 `writeBoundaryRefusal` 的
+> 【定】刚写完「各写一遍的后果不是重复，是**分叉**」所指的东西。
+> 给它加一个 `detail` 参数（`slow_write` 要多说一句「等了多久」），四处才真的共用。
+
+> ⚠️ **两条改动没有机械判据，登记而不是假装它测过**：
+> ① `SimpleRedaction` 的 `fieldsToRedact` 分支此前**不累加 `bytesRedacted`**
+> （按字段名打掉 4KB 凭证，报 0）—— 判据要伪造一个带 `fieldsToRedact` 的工具，
+> 成本不抵收益；② B 组 12 条全是注释，本来就没有判据形态。
+
 ### auto 模式 / 完全权限（2026-09-01）：审批与执行特权拆成两条正交的轴
 
 依据 [ADR-0012](sxw_aicoding/ADR/0012-审批与执行特权是两条正交的档位轴.md)。
@@ -27,7 +115,7 @@ npm run ui  -- --approval auto                    # 不再问，沙箱仍在
 npm run dev -- --approval auto --sandbox off      # 完全权限：**没有任何闸门**
 ```
 
-`verify:all` **198 → 221 条**。
+`verify:all` **198 → 221 条**（2026-09-02 全量评审后 → **226 条**，见下）。
 
 > ### 【定】逐条回源之后，真正的缺口不是"没有 auto 档"，是**Web 侧一个逃生口都没有**
 >
@@ -1096,17 +1184,24 @@ CLI 与界面同一条规则（`workspaceStorage()`）。`--db` / `--trace` 仍�
 ```bash
 npm run verify:endpoint-profile    # 端点差异能否被挡在主循环之外
 npm run verify:pairing             # 批内配对不变量能否守住（三条中断路径各一条真注入 ＋ R-4 四条 Port 异常 ＋ orphan 反向注入）
+                                   #   ＋ ★归责：没轮到执行的记 CANCELLED、执行中被取消的记 TOOL_FAILED，
+                                   #     且**没有一条落 UNSPECIFIED**（三向注入，两处接线各自独立承重）
 npm run verify:resume              # 消息级恢复够不够用；C 段判据已收紧到「产物与基线逐字一致」
-npm run verify:compact             # Compact 是否真的落地（R-6）
+npm run verify:compact             # Compact 是否真的落地（R-6）＋ ★G 段：「最近两轮」是不是真的两轮
+                                   #   （夹具每轮两条消息 —— 每轮一条的话有 bug 与没 bug 给同一个答案）
 npm run verify:persistence         # 跨进程恢复：真 kill -9 之后能不能只凭 SQLite 接上
 npm run verify:budget              # 预算八轴逐条撞墙 ＋ 墙钟拆分 ＋ 时间事实段级冻结
 npm run verify:crash               # 三个崩溃窗口 × 三条恢复分支（决 6 的判别力在这里）
 npm run verify:drift               # 端点漂移检测 ＋ 对照端点装配 ＋ resume 端点一致性闸门（U-1 / U-6 / P1-1）
 npm run verify:tools               # 批 1：边界 grep（1…7 共 8 条） ＋ 两类声明 ＋ 分页非截断 ＋ 组合器三方法路由 ＋ 读黑名单
 npm run verify:artifact            # 批 2：外置与逐字取回 ＋ URL 护栏 ＋ 产物登记与第二层验证 ＋ role 分流
+                                   #   ＋ ★J 段：步骤超时之后产物仍要进事实表（夹具自造 timeoutMs:30 的工具 ——
+                                   #     14 个内置工具没有一个走得到这条分支）
                                    #   ＋ ★H 段：run_shell 产出的**二进制** zip 走完整条产物链（ADR-0010）
                                    #   ＋ ★H3 文件头魔数（404 页伪装成 .jpg）／H4 旧文件不得冒认／I 段 identity
 npm run verify:progress            # 批 3：进展 ＋ 无进展 ＋ 真实慢工具取消 ＋ 人工接管三条状态闭合
+                                   #   ＋ ★I 段：两条被自己抵消掉的兜底（makeError 的展开顺序、
+                                   #     sleep 的 signal）。sleep 验**两个时序**，否则落进守卫重叠区
 npm run verify:scenarios           # S13：三场景 smoke（决 7 的判据）＋ 三条护栏在场性总校验
 npm run verify:shell               # ★阶段 3.5：两道闸门 ＋ 沙箱实测 ＋ 分支三 ＋ 边界 7
                                    #   ＋ ★$TMPDIR/tmp 双侧 ＋ effect 不得抄进 URL
@@ -1126,7 +1221,7 @@ npm run verify:mcp                 # ★ADR-0011：通用 MCP 客户端。边界
                                    #   ＋ 未知 content 块不得废掉工具 ＋ 握手卡住不留孤儿进程
                                    #   ＋ resume 说出「外部工具核对不了」＋ 示例配置必须真能解析
                                    #   用**手写的假 MCP 服务器**，不依赖 Playwright、不联网、不弹窗口
-npm run verify:all                 # 15 条脚本 / 221 条判据
+npm run verify:all                 # 15 条脚本 / 226 条判据
 ```
 
 > **【定】`verify:ui` 必须真的起 HTTP 服务**，不能直接调 `PendingHub` 的方法测。

@@ -245,15 +245,39 @@ export function outsideWorkspaceError(path: string, op: string): RuntimeErrorRec
   });
 }
 
-/** 取消的统一形态。中断点在副作用之前，所以是 NOT_STARTED 而不是 UNKNOWN。 */
-export function cancelledError(what: string): RuntimeErrorRecord {
+/**
+ * 取消的统一形态 —— **唯一一份**。
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ * 【定】四个写工具（`write_file` / `edit_file` / `append_log` / `slow_write`）
+ * 必须调它，不要各自内联一个 `makeError({ code: "TOOL_CANCELLED", … })`。
+ *
+ * 它此前**零消费者**，而那四处各自抄了一份逐字相同的六行 —— 也就是说
+ * 这个函数存在的全部理由（防分叉）从来没有兑现过。同一个文件里
+ * `writeBoundaryRefusal` 的【定】刚写完「各写一遍的后果不是重复，是分叉」，
+ * 而隔壁就躺着那句话的一个反例。
+ *
+ * ── 三个字段为什么是这几个值，改之前先读 ───────────────────────────────
+ *
+ * · `NOT_STARTED` 而不是 `UNKNOWN`：中断点落在副作用**之前**，我们真的知道
+ *   什么都没发生。`UNKNOWN` 会造出一个 RecoveryItem 并在 resume 时把 Run 停在
+ *   `RECOVERY_REQUIRED` —— 谎报的方向恰好是最贵的那边。
+ * · `SAME_INPUT_IMMEDIATE`：取消不是故障，同样的输入重来一次是对的。
+ * · `source: "RUNTIME"`：取消来自 Runtime 的 signal，不是工具自己的判断。
+ *
+ * `detail` 用来带那些**逐次不同**的补充（`slow_write` 要说自己等了多久）——
+ * 有了它，四处才真的能共用一份，而不是"三处共用、第四处因为要多说一句
+ * 所以又抄了一遍"。
+ * ══════════════════════════════════════════════════════════════════════
+ */
+export function cancelledError(toolName: string, detail?: string): RuntimeErrorRecord {
   return makeError({
     code: "TOOL_CANCELLED",
     source: "RUNTIME",
     category: "CANCELLED",
     retryability: "SAME_INPUT_IMMEDIATE",
     sideEffectState: "NOT_STARTED",
-    safeMessage: `${what} 在产生副作用之前被取消`,
+    safeMessage: `${toolName} 在产生副作用之前被取消${detail ? `（${detail}）` : ""}`,
   });
 }
 

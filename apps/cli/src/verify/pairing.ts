@@ -542,6 +542,7 @@ async function main(): Promise<void> {
   );
 
   await sectionAttribution();
+  await sectionCancelledCause();
 }
 
 function countBlocks(messages: ContextMessage[], type: "tool_call" | "tool_result"): number {
@@ -635,3 +636,118 @@ async function sectionAttribution(): Promise<void> {
 }
 
 void runVerify(main);
+
+/**
+ * 「压根没启动」也必须有名字（2026-09-01 评审 C7）。
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ * `UnmetCause` 的值域里一直有 `CANCELLED`，注释写着「被取消（用户 cancel
+ * 或批内策略跳过）」—— 而它**零生产者**：`causeByCall` 只在 Policy 拒绝、
+ * 审批否决、工具报错这三处被写，「批被中断、后面几个 call 根本没轮到」
+ * 那条路径一个字都不记。
+ *
+ * 于是一次跑到一半被 Ctrl+C 的 Run，那些没做成的必需操作在
+ * `unmetCauseCounts` 里全部落进 `UNSPECIFIED`（`tallyUnmetCauses` 的缺省）。
+ * 「说不出为什么」与「因为被取消了」在归因报告里是两件事 ——
+ * 而后者恰恰是最不需要排查的那一类。
+ *
+ * ── 【定】夹具的第二个 call 必须是 `requiredForSuccess: true` 的工具 ──────
+ *
+ * 这是隔壁 `sectionAttribution` 已经栽过一次的坑（它第一版用了 `append_log`，
+ * 那个声明的是 false，于是拒不拒绝两侧都判 SUCCESS，判据分不出任何东西）。
+ * 非必需的工具被跳过**根本不产生未完成项**，`recordUnmetRequired` 会直接
+ * `continue`，这条判据就永远是绿的 —— 无论接没接线。
+ *
+ * 所以这里用 `write_file`（required: true），并且它必须**排在慢工具后面**：
+ * 取消要落在「前一个还在跑、它还没轮到」的那一刻。
+ * ══════════════════════════════════════════════════════════════════════
+ */
+async function sectionCancelledCause(): Promise<void> {
+  section("归责：没轮到执行的必需操作要记 CANCELLED，不是 UNSPECIFIED");
+
+  const ws = tempWorkspace();
+  try {
+    const composed = compose({
+      dbPath: ":memory:",
+      workspaceRoot: ws.root,
+      // 【定】自动批准 —— 这一段要测的是「取消」，不是审批。
+      // 留着审批会让 write_file 先被拒，成因变成 NO_APPROVAL，靶子就换了。
+      approvalDecider: async () => ({ approved: true, decidedBy: "AUTO" }),
+      trace: new CollectingTraceSink(),
+      modelPortOverride: new ScriptedModelPort([
+        {
+          text: "先慢慢写一个，再写第二个",
+          toolCalls: [
+            // 可控慢：取消要落在它执行到一半的时候。
+            { toolCallId: "cx_1", name: "slow_write", input: { path: "slow.txt", content: "S", delay_ms: 800 } },
+            // 【定】required: true，且排在后面 —— 它才是这条判据的观察对象。
+            { toolCallId: "cx_2", name: "write_file", input: { path: "never.txt", content: "N" } },
+          ],
+        },
+        { text: "收尾", toolCalls: [] },
+      ]),
+      tools: DEFAULT_TOOLS.filter((t: ToolSnapshot) =>
+        ["slow_write", "write_file"].includes(t.definition.name),
+      ),
+    });
+
+    const gen = composed.runtime.start(composed.makeRunSpec("取消归责夹具"));
+    let runId = "";
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let r = await gen.next();
+    while (!r.done) {
+      if (!runId) {
+        runId = String(r.value.runId);
+        // 定时取消。250ms 落在 slow_write 的 800ms 中间，此时 cx_2 还没轮到。
+        timer = setTimeout(() => composed.runtime.cancel(runId as never, "注入：执行中取消"), 250);
+      }
+      r = await gen.next();
+    }
+    if (timer) clearTimeout(timer);
+
+    const snap = await composed.runtime.inspect(runId as never);
+    const counts = snap?.unmetCauseCounts ?? {};
+    composed.db.close();
+
+    fact("Terminal", r.value.terminal.reason);
+    fact("Outcome", r.value.outcome?.kind ?? "未结算");
+    fact("unmetCauseCounts", JSON.stringify(counts));
+
+    /**
+     * ══════════════════════════════════════════════════════════════════════
+     * 【定】**三条一起断言**，缺一条就有一种坏实现不可区分：
+     *
+     *   CANCELLED ≥ 1    cx_2 压根没轮到执行 —— 少了它，「没启动」会落 UNSPECIFIED
+     *   TOOL_FAILED ≥ 1  cx_1 执行到一半被取消 —— 少了它，一个「成因全写
+     *                    CANCELLED」的实现照样全绿
+     *   UNSPECIFIED = 0  少了它，一个「记了成因但没接到事实表」的实现照样全绿
+     *
+     * ── 第二条是这条判据自己打出来的（值得记）──────────────────────────
+     *
+     * 第一版只断言前两句里的头一句，跑出来是 `{UNSPECIFIED:1, CANCELLED:1}`：
+     * `CANCELLED` 接线是对的，而 cx_1 落进了 UNSPECIFIED。回源发现
+     * `causeByCall.set(…, "TOOL_FAILED")` 在**正常路径上根本没有消费者** ——
+     * 详见 `settle-batch.ts` 里 `recordedCause` 那段。
+     *
+     * 也就是说：写这条判据的收益不止「守住 CANCELLED」，
+     * 它当场暴露了一条**存在了更久**的断线。
+     * ══════════════════════════════════════════════════════════════════════
+     */
+    const hasCancelled = (counts["CANCELLED"] ?? 0) >= 1;
+    const hasToolFailed = (counts["TOOL_FAILED"] ?? 0) >= 1;
+    const noUnspecified = (counts["UNSPECIFIED"] ?? 0) === 0;
+    const causeOk = hasCancelled && hasToolFailed && noUnspecified;
+    verdict(
+      causeOk,
+      causeOk
+        ? "两种未达成项各归各的成因：没轮到的记 CANCELLED、执行中被取消的记 TOOL_FAILED，" +
+          "没有一条落进 UNSPECIFIED —— 「是谁没做成」这个聚合终于答得出来"
+        : `期望 CANCELLED ≥ 1、TOOL_FAILED ≥ 1、UNSPECIFIED = 0，实际 ${JSON.stringify(counts)}` +
+          (hasCancelled ? "" : "｜缺 CANCELLED：没启动的那条没记成因") +
+          (hasToolFailed ? "" : "｜缺 TOOL_FAILED：成因记了但没接到验证事实上") +
+          (noUnspecified ? "" : "｜有 UNSPECIFIED：某条未达成项说不出为什么"),
+    );
+  } finally {
+    ws.cleanup();
+  }
+}

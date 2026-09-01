@@ -33,9 +33,9 @@ import type {
   ToolExecutionOutcome,
   ToolSnapshot,
 } from "@workagent/harness-runtime";
-import { asId, makeError } from "@workagent/harness-runtime";
+import { asId } from "@workagent/harness-runtime";
 import { artifactKindOf } from "../artifact-checks/index.js";
-import { classifyFsError, resolveToolPath, writeBoundaryRefusal } from "./fs-common.js";
+import { cancelledError, classifyFsError, resolveToolPath, writeBoundaryRefusal } from "./fs-common.js";
 
 export const writeFileDefinition: ToolDefinition = {
   id: asId("tool_write_file"),
@@ -143,20 +143,10 @@ export async function executeWriteFile(
     return { ok: false, output: "", sideEffectState: "NO_EFFECT", error: refusal };
   }
 
+  // 【定】走 `cancelledError`（唯一一份），不要内联 —— 与 `writeBoundaryRefusal`
+  // 同一条理由：四个写工具各抄一遍，改其中一个时另外三个不会有任何征兆。
   if (ctx.signal.aborted) {
-    return {
-      ok: false,
-      output: "",
-      sideEffectState: "NOT_STARTED",
-      error: makeError({
-        code: "TOOL_CANCELLED",
-        source: "RUNTIME",
-        category: "CANCELLED",
-        retryability: "SAME_INPUT_IMMEDIATE",
-        sideEffectState: "NOT_STARTED",
-        safeMessage: "write_file 在写入前被取消",
-      }),
-    };
+    return { ok: false, output: "", sideEffectState: "NOT_STARTED", error: cancelledError("write_file") };
   }
 
   try {

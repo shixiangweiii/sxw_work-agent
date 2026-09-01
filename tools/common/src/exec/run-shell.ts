@@ -86,23 +86,43 @@ const MAX_TIMEOUT_MS = 600_000;
  */
 const STEP_TIMEOUT_MS = MAX_TIMEOUT_MS + 30_000;
 
-/** 心跳间隔。必须与 `progressReporting.intervalMs` 一致。 */
+/**
+ * 心跳间隔。
+ *
+ * 【定】它**不对应任何声明字段** —— `ProgressReportingDescriptor` 只有 `mode`，
+ * 那个 `intervalMs` 在 2026-08-31 那批因为零读取点被删了。这里此前写着
+ * 「必须与 `progressReporting.intervalMs` 一致」，指向一个已经不存在的字段。
+ *
+ * 声明面承诺的是「HEARTBEAT ＝ 执行期间周期性回报」，节奏由本工具自己定，
+ * 判据只查「源码里存在 `ctx.onProgress(` 调用点」（`verify:tools` B 段）。
+ */
 const HEARTBEAT_MS = 5_000;
 
 /**
- * 退出码语义表。形态借自 Claude Code 的 `commandSemantics.ts`。
+ * 退出码语义表 —— **只产出一句给模型看的说明**。形态借自 Claude Code 的
+ * `commandSemantics.ts`。
  *
- * 【定】没有这张表的后果是具体的：`grep` 没匹配时退出 1，被当成失败上报，
- * 模型会认为是自己的调用出了问题并**原样重试同一条命令** —— 而它真正
- * 需要知道的是「没找到，换个词」。与 fetch_url 把 404 当成功取回的事实
- * 上报是同一条理由：工具故障与「世界就是这样」必须分得开。
+ * 它要防的是：`grep` 没匹配时退出 1，模型看到非零就认为是自己的调用出了问题
+ * 并**原样重试同一条命令** —— 而它真正需要知道的是「没找到，换个词」。
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ * 【定】这里**没有 `isError`**，因为本工具根本不按退出码判成败。
+ *
+ * 表项此前返回 `{ isError, note }`，而 `isError` **全仓零读取点** ——
+ * 调用点只取 `note`。它不是"忘了接"：下面 `finish()` 那条【定】写着
+ * 「非零退出码**不报 ok:false**」，也就是说这个工具**刻意**不做那个判定，
+ * 一个 `isError` 字段在这里没有任何可能的消费者。
+ *
+ * 留着它的代价是具体的：读代码的人会以为「工具会按这张表决定成败」，
+ * 然后可能去表里加一行来"修正某个命令的判定"—— 而那一行不会有任何效果。
+ * ══════════════════════════════════════════════════════════════════════
  */
-const EXIT_SEMANTICS: Record<string, (code: number) => { isError: boolean; note?: string }> = {
-  grep: (c) => ({ isError: c >= 2, note: c === 1 ? "没有匹配到任何内容（不是错误）" : undefined }),
-  rg: (c) => ({ isError: c >= 2, note: c === 1 ? "没有匹配到任何内容（不是错误）" : undefined }),
-  diff: (c) => ({ isError: c >= 2, note: c === 1 ? "两边有差异（不是错误）" : undefined }),
-  find: (c) => ({ isError: c >= 2, note: c === 1 ? "部分目录不可访问（不是错误）" : undefined }),
-  test: (c) => ({ isError: c >= 2, note: c === 1 ? "条件为假（不是错误）" : undefined }),
+const EXIT_SEMANTICS: Record<string, (code: number) => string | undefined> = {
+  grep: (c) => (c === 1 ? "没有匹配到任何内容（不是错误）" : undefined),
+  rg: (c) => (c === 1 ? "没有匹配到任何内容（不是错误）" : undefined),
+  diff: (c) => (c === 1 ? "两边有差异（不是错误）" : undefined),
+  find: (c) => (c === 1 ? "部分目录不可访问（不是错误）" : undefined),
+  test: (c) => (c === 1 ? "条件为假（不是错误）" : undefined),
 };
 
 export const runShellDefinition: ToolDefinition = {
@@ -603,7 +623,7 @@ export async function executeRunShell(
       }
 
       const exitCode = code ?? -1;
-      const semantics = semanticsFor(input.command, exitCode);
+      const exitNote = semanticsFor(input.command, exitCode);
 
       /**
        * ── 声明的交付物：读回字节交给 Runtime 登记（ADR-0010）────────────
@@ -625,7 +645,7 @@ export async function executeRunShell(
         truncated,
         ...(truncated ? { truncatedNote: `单流输出超过 ${MAX_STREAM_CHARS} 字符，已截断。` } : {}),
         durationMs,
-        ...(semantics.note ? { note: semantics.note } : {}),
+        ...(exitNote ? { note: exitNote } : {}),
         ...(declared.note ? { artifactNote: declared.note } : {}),
       };
 
@@ -838,18 +858,19 @@ function clampTimeout(v: number | undefined): number {
 }
 
 /**
- * 按命令名查退出码语义。
+ * 按命令名查退出码语义，返回一句给模型看的说明（没有就是 undefined）。
  *
  * 取**最后一段**的程序名 —— 管道与 `&&` 串联时决定退出码的是最后一条。
- * 这是启发式，只用来生成一句给模型看的说明，不参与任何判定。
+ * 【定】这是启发式，**只用来生成说明，不参与任何判定** —— 与
+ * `command-analysis.ts` 的 `extractPrograms` 是同一条纪律（「一个『差不多能
+ * 切对』的切分器很容易被后人误当成安全组件」）。成败一律看 `exitCode` 字段。
  */
-function semanticsFor(command: string, exitCode: number): { isError: boolean; note?: string } {
-  if (exitCode === 0) return { isError: false };
+function semanticsFor(command: string, exitCode: number): string | undefined {
+  if (exitCode === 0) return undefined;
   const segments = command.split(/\|\||&&|[|;\n]/);
   const last = segments[segments.length - 1] ?? command;
   const prog = last.trim().split(/\s+/).find((t) => !t.includes("=")) ?? "";
-  const fn = EXIT_SEMANTICS[prog.replace(/^.*\//, "")];
-  return fn ? fn(exitCode) : { isError: true };
+  return EXIT_SEMANTICS[prog.replace(/^.*\//, "")]?.(exitCode);
 }
 
 function truncate(s: string, n: number): string {

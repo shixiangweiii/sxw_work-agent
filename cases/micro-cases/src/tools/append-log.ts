@@ -49,7 +49,7 @@ import type {
 import { asId, makeError } from "@workagent/harness-runtime";
 // 边界判定只有一份实现，住在 tools/common（见那个文件的头注释）。
 // 方向是 cases → tools，不违反边界 6b（那条禁的是 tools → cases）。
-import { writeBoundaryRefusal } from "@workagent/tools-common";
+import { cancelledError, writeBoundaryRefusal } from "@workagent/tools-common";
 
 export const appendLogDefinition: ToolDefinition = {
   id: asId("tool_append_log"),
@@ -121,20 +121,10 @@ export async function executeAppendLog(
     return { ok: false, output: "", sideEffectState: "NO_EFFECT", error: refusal };
   }
 
+  // 【定】走 `tools-common` 的 `cancelledError`（唯一一份），不要内联 ——
+  // 与上面那条 `writeBoundaryRefusal` 完全同源：四处各抄一遍就会分叉。
   if (ctx.signal.aborted) {
-    return {
-      ok: false,
-      output: "",
-      sideEffectState: "NOT_STARTED",
-      error: makeError({
-        code: "TOOL_CANCELLED",
-        source: "RUNTIME",
-        category: "CANCELLED",
-        retryability: "SAME_INPUT_IMMEDIATE",
-        sideEffectState: "NOT_STARTED",
-        safeMessage: "append_log 在写入前被取消",
-      }),
-    };
+    return { ok: false, output: "", sideEffectState: "NOT_STARTED", error: cancelledError("append_log") };
   }
 
   try {

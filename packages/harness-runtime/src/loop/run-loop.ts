@@ -157,8 +157,20 @@ export async function* runLoop(
   let waitedMs = 0;
   let waitingSince: number | undefined;
 
+  /**
+   * 【定】末项判的是 `waitingSince !== undefined`，**不是真值**。
+   *
+   * 它此前写的是 `waitingSince ? …… : 0` —— 与十几行外那两处
+   * `waitingSince !== undefined` 的判定不同构。时间戳恒为正数所以今天等价，
+   * 但「等价」靠的是 `Date.now()` 不会返回 0 这个外部事实，
+   * 而这个表达式的语义是「现在有没有一段没闭合的等待」——
+   * 那是一个 `undefined` 检查，不是一个真值检查。
+   */
   const activeNow = (): number =>
-    inheritedActiveMs + (now() - segmentStartedAt) - waitedMs - (waitingSince ? now() - waitingSince : 0);
+    inheritedActiveMs +
+    (now() - segmentStartedAt) -
+    waitedMs -
+    (waitingSince !== undefined ? now() - waitingSince : 0);
 
   /** U-5：软限每条轴只报一次，见下面消费点的说明。 */
   const softLimitAnnounced = new Set<string>();
@@ -731,7 +743,7 @@ export async function* runLoop(
      * `verify:drift` 的新段，那里的 usage 让两者显式不等。
      */
     for (const o of [
-      drift.observeToolCallCount(invocation.toolCalls.length, true),
+      drift.observeToolCallCount(invocation.toolCalls.length),
       drift.observeTokenAccuracy(frame.totalTokens, usage.billedInputTokens),
     ]) {
       if (!o) continue;
@@ -1037,7 +1049,27 @@ export async function* runLoop(
     }
 
     const anyFailed = batchOutcome.attempts.some((a) => a.status === "FAILED");
-    const anyVerified = batchOutcome.verifications.some((v) => v.status === "PASSED");
+    /**
+     * 【定】判据是「**必需**验证通过」，名字也要这么叫。
+     *
+     * 它此前叫 `anyVerified`、判的是 `v.status === "PASSED"`，而紧挨着的注释
+     * 写的是「任一 Action 成功**且其 required Verification 通过**」——
+     * 声明比实现严一档。
+     *
+     * ⚠️ 两者**今天给出同一个答案**，这正是它能活到现在的原因：批执行路径上
+     * 唯一产出 `PASSED` 的是 `CommonVerifier` / `MicroCaseVerifier`，
+     * 而它们对 OBSERVED_TOOLS 一律 `required: true`，其余工具落 `SKIPPED`。
+     * 也就是说这两个写法在当前夹具与当前工具面下**不可区分** ——
+     * 摸底考试那条教训的形状（「这条判据要区分的两个值，在夹具里相等吗」）。
+     *
+     * 按声明收紧而不是按实现放宽：`maxConsecutiveFailures` 是一条**保护性**
+     * 预算轴，归零条件宽一格意味着连续失败更难撞墙。失败方向定在保守侧。
+     * （`required: false` 的 PASSED 确实存在，但只出现在 facade 的崩溃后
+     * 观察路径上 —— 那不是「这一轮干成了一件事」，见 `observe()` 里那段【定】。）
+     */
+    const anyRequiredPassed = batchOutcome.verifications.some(
+      (v) => v.required && v.status === "PASSED",
+    );
 
     // ── ⑤ 构造下一轮完整状态，显式写明原因（循环纪律第 1、2 条）
     state = nextState(
@@ -1051,7 +1083,7 @@ export async function* runLoop(
           toolCalls: usageAfter.toolCalls + invocation.toolCalls.length,
         },
         // consecutiveFailures 归零条件：任一 Action 成功且其 required Verification 通过
-        consecutiveFailures: anyVerified
+        consecutiveFailures: anyRequiredPassed
           ? 0
           : anyFailed
             ? state.consecutiveFailures + 1

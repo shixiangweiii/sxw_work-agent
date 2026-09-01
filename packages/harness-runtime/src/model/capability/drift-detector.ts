@@ -21,9 +21,22 @@ export interface DriftObservation {
   note: string;
 }
 
+/**
+ * ── 这里**故意没有** `observations()` ────────────────────────────────────
+ *
+ * 曾经有：一个 `private seen: DriftObservation[]`，每次 `record()` 往里 push，
+ * 外加一个 `observations()` 读它。**两者全仓零消费者** —— 所有调用点
+ * （`run-loop` 与 `verify:drift`）读的都是 `observeXxx()` 的返回值。
+ *
+ * 也就是说它是一个只写不读的累加器，与 `ProgressGuard` 里那个被删掉的
+ * `lastProgressAt` 是同一形态：一个只写不读的字段会让下一个人以为
+ * 「漂移历史是被留存的」，而事实上漂移的唯一去处是 `EndpointBehaviorDrift`
+ * 事件（进 Trace，那条有读者）。
+ *
+ * 【定】真要「这个 Run 一共漂了几次」，去数 trace 里那个事件，
+ * 不要在这里再攒一份内存副本 —— 第二份副本就是第二个可以与另一个矛盾的事实。
+ */
 export class DriftDetector {
-  private readonly seen: DriftObservation[] = [];
-
   constructor(private readonly profile: EndpointCapabilityProfile) {}
 
   /**
@@ -42,10 +55,18 @@ export class DriftDetector {
    *
    * 现在只报能证伪的那一侧：**我们真的发了开关（声明有效才发，见形状适配器
    * 的 buildRequest），却仍然收到多条**。这条观察是硬的：它只有一种解释。
+   *
+   * ── 【定】没有 `disabledParallelRequested` 参数 ────────────────────────
+   *
+   * 它曾经有：调用方要传「这次发没发那个开关」。而**全部四个调用点传的都是
+   * `true`** —— 因为「发没发」压根不是调用方的自由度：
+   * `buildRequest` 只在 `honorsDisableParallelToolCalls` 为真时才发它，
+   * 也就是下面那一行判的同一个声明。一个恒为 true 的参数，读起来像是
+   * 这里有两个独立条件，实际只有一个。
    */
-  observeToolCallCount(count: number, disabledParallelRequested: boolean): DriftObservation | null {
-    if (!disabledParallelRequested) return null;
-    // 声明无效时形状适配器根本不发这个参数，没发出去的开关谈不上生效没生效。
+  observeToolCallCount(count: number): DriftObservation | null {
+    // 【定】声明无效时形状适配器根本不发这个参数（见 `buildRequest`），
+    // 没发出去的开关谈不上生效没生效 —— 这一条同时代替了原来那个入参。
     if (!this.profile.protocol.honorsDisableParallelToolCalls) return null;
     if (count <= 1) return null;
     return this.record({
@@ -143,13 +164,15 @@ export class DriftDetector {
     });
   }
 
+  /**
+   * 观察结果的统一出口。
+   *
+   * 它现在只是把参数原样返回 —— 保留这一跳而不是让三条规则各自 `return {...}`，
+   * 是因为它是**加字段时唯一要改的地方**（比如将来给每条观察打时间戳）。
+   * 曾经它还往一个 `seen[]` 里 push，见类头那段说明。
+   */
   private record(o: DriftObservation): DriftObservation {
-    this.seen.push(o);
     return o;
-  }
-
-  observations(): readonly DriftObservation[] {
-    return this.seen;
   }
 }
 

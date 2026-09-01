@@ -238,8 +238,16 @@ export interface CallResult {
   /** 拼好的文本。image / resource 块会在这里留下一句说明，见 `renderContent`。 */
   text: string;
   isError: boolean;
-  /** 有没有 Atlas 送不进上下文的块（image / resource）。 */
-  droppedBlocks: string[];
+  /**
+   * 【定】这里**没有** `droppedBlocks`。
+   *
+   * 它曾经在：`renderContent` 认真收集了被丢弃的块类型并返回出来，
+   * 而 `handler.ts` 只读 `text` 与 `isError` —— **零消费者**。
+   * 它不是"还没接"：那份信息已经以模型看得懂的形式拼进 `text` 了
+   * （「这次返回里还有 N 个非文本块（image×2），它们没有进入上下文」），
+   * 再单独交出一份结构化副本没有第二个读者，只会让人以为
+   * 「被丢弃的块是被单独记账的」。
+   */
 }
 
 export async function callTool(
@@ -304,8 +312,7 @@ export async function callTool(
 
   // `ResultSchema` 是 passthrough，字段原样保留 —— 按开放对象读。
   const open = result as Record<string, unknown>;
-  const rendered = renderContent(open);
-  return { ...rendered, isError: open["isError"] === true };
+  return { text: renderContent(open), isError: open["isError"] === true };
 }
 
 /**
@@ -321,10 +328,7 @@ export async function callTool(
  *
  * 这是 ADR-0010 那个洞的同族（二进制在类型层进不去），登记待办，v1 不补。
  */
-function renderContent(result: Record<string, unknown>): {
-  text: string;
-  droppedBlocks: string[];
-} {
+function renderContent(result: Record<string, unknown>): string {
   const blocks = Array.isArray(result["content"]) ? (result["content"] as unknown[]) : [];
   const texts: string[] = [];
   const dropped: string[] = [];
@@ -364,7 +368,9 @@ function renderContent(result: Record<string, unknown>): {
     texts.push("[Atlas] 这次调用成功了，但服务器没有返回任何内容块。");
   }
 
-  return { text: texts.join("\n"), droppedBlocks: dropped };
+  // 【定】只返回文本。被丢弃的块**已经以模型看得懂的形式**拼在上面那段说明里，
+  // 再单独交一份结构化副本没有读者 —— 见 `CallResult` 里那段。
+  return texts.join("\n");
 }
 
 export async function closeConnection(conn: McpConnection): Promise<void> {

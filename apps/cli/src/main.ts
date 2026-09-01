@@ -423,66 +423,61 @@ function interactiveApproval(
       );
     }
 
-    stdin.setMode("WAITING_FOR_APPROVAL");
-    try {
+    /**
+     * 【定】`scope.value` 也要剥（二次评审 codex P2-5）。
+     *
+     * 上面的命令原文与描述早就走了 `forTerminal()`，而**真正等输入的这一行**
+     * 一直在直接插原始 `e.scope.value` —— 而它同样含模型给的内容：
+     * PROCESS scope 是切出来的程序名、FILE / DIRECTORY scope 是模型给的路径。
+     * 一个 ANSI 清屏或双向覆盖序列可以把上面刚打印的、剥过的命令整段盖掉，
+     * 于是「剥了三处、漏了最后一处」等于没剥 —— 人最后看到的就是这一行。
+     *
+     * Web 侧 `scopeValue` 从阶段 4 收口起就是剥过的；两个入口的安全语义
+     * 必须一致，否则「CLI 更不安全」这件事没有任何地方会说出来。
+     */
+    const line = await stdin.askLine(
+      `${prefix}  是否允许 ${a.toolName} 执行 ${e.effectType} → ${forTerminal(e.scope.value)} ？` +
+        `[y/N/a=本次 Run 不再问] `,
+      signal,
+    );
+    if (line === undefined) {
       /**
-       * 【定】`scope.value` 也要剥（二次评审 codex P2-5）。
+       * 【定】这一支记 `UNDECLARED`，**不是** `HUMAN`。
        *
-       * 上面的命令原文与描述早就走了 `forTerminal()`，而**真正等输入的这一行**
-       * 一直在直接插原始 `e.scope.value` —— 而它同样含模型给的内容：
-       * PROCESS scope 是切出来的程序名、FILE / DIRECTORY scope 是模型给的路径。
-       * 一个 ANSI 清屏或双向覆盖序列可以把上面刚打印的、剥过的命令整段盖掉，
-       * 于是「剥了三处、漏了最后一处」等于没剥 —— 人最后看到的就是这一行。
+       * 它有两种成因（等待被 Ctrl+C 打断、非交互环境无人应答），
+       * 而两种的共同点恰恰是**没有任何人做过这个决定**。
+       * 记 `HUMAN` 会让「没人在场」在事实表上长得像「有人按了否」——
+       * 那正是 E-3 那条教训的形状（结算 USER_REJECTED，
+       * 而全程没有任何人拒绝过任何东西），只是换到了 `decidedBy` 这一列。
        *
-       * Web 侧 `scopeValue` 从阶段 4 收口起就是剥过的；两个入口的安全语义
-       * 必须一致，否则「CLI 更不安全」这件事没有任何地方会说出来。
+       * ⚠️ 我第一版就把它写成了 `HUMAN`，而同一批里 Web 那一侧写对了。
+       * 二次复核抓到的 —— 一个新字段最容易错的地方是它的**缺省分支**。
        */
-      const line = await stdin.askLine(
-        `${prefix}  是否允许 ${a.toolName} 执行 ${e.effectType} → ${forTerminal(e.scope.value)} ？` +
-          `[y/N/a=本次 Run 不再问] `,
-        signal,
-      );
-      if (line === undefined) {
-        /**
-         * 【定】这一支记 `UNDECLARED`，**不是** `HUMAN`。
-         *
-         * 它有两种成因（等待被 Ctrl+C 打断、非交互环境无人应答），
-         * 而两种的共同点恰恰是**没有任何人做过这个决定**。
-         * 记 `HUMAN` 会让「没人在场」在事实表上长得像「有人按了否」——
-         * 那正是 E-3 那条教训的形状（结算 USER_REJECTED，
-         * 而全程没有任何人拒绝过任何东西），只是换到了 `decidedBy` 这一列。
-         *
-         * ⚠️ 我第一版就把它写成了 `HUMAN`，而同一批里 Web 那一侧写对了。
-         * 二次复核抓到的 —— 一个新字段最容易错的地方是它的**缺省分支**。
-         */
-        return {
-          approved: false,
-          reason: stdin.isInteractive ? "等待被中断" : "非交互环境下无人应答，按拒绝处置",
-          decidedBy: "UNDECLARED",
-        };
-      }
-      const ans = line.toLowerCase();
-      /**
-       * 【定】`a` 与 `y` 必须是**两个**决定，不能把 `a` 实现成「批准 ＋ 顺手记一下」。
-       *
-       * 它们的 `decidedBy` 不同（这一次仍然是 HUMAN，之后那些是 AUTO），
-       * 而这正是 ADR-0012 那条「事后可区分」的落点：人只看过这一条命令，
-       * 后面那些他没看过。把两者记成同一种，等于宣称他逐条批准过全部。
-       */
-      if (ans === "a" || ans === "all") {
-        elevated.add(String(a.runId));
-        console.log(
-          `  \x1b[33m本次 Run 之后不再询问\x1b[0m（仅这个 Run，不落盘；` +
-            `后续放行会记为 decidedBy=AUTO）`,
-        );
-        return { approved: true, reason: "用户批准并要求本次 Run 不再询问", decidedBy: "HUMAN" };
-      }
-      return ans === "y" || ans === "yes"
-        ? { approved: true, decidedBy: "HUMAN" }
-        : { approved: false, reason: "用户在终端拒绝", decidedBy: "HUMAN" };
-    } finally {
-      stdin.setMode("RUNNING");
+      return {
+        approved: false,
+        reason: stdin.isInteractive ? "等待被中断" : "非交互环境下无人应答，按拒绝处置",
+        decidedBy: "UNDECLARED",
+      };
     }
+    const ans = line.toLowerCase();
+    /**
+     * 【定】`a` 与 `y` 必须是**两个**决定，不能把 `a` 实现成「批准 ＋ 顺手记一下」。
+     *
+     * 它们的 `decidedBy` 不同（这一次仍然是 HUMAN，之后那些是 AUTO），
+     * 而这正是 ADR-0012 那条「事后可区分」的落点：人只看过这一条命令，
+     * 后面那些他没看过。把两者记成同一种，等于宣称他逐条批准过全部。
+     */
+    if (ans === "a" || ans === "all") {
+      elevated.add(String(a.runId));
+      console.log(
+        `  \x1b[33m本次 Run 之后不再询问\x1b[0m（仅这个 Run，不落盘；` +
+          `后续放行会记为 decidedBy=AUTO）`,
+      );
+      return { approved: true, reason: "用户批准并要求本次 Run 不再询问", decidedBy: "HUMAN" };
+    }
+    return ans === "y" || ans === "yes"
+      ? { approved: true, decidedBy: "HUMAN" }
+      : { approved: false, reason: "用户在终端拒绝", decidedBy: "HUMAN" };
   };
 
   return async (a: PreparedAction): Promise<ApprovalDecision> => {
@@ -885,21 +880,16 @@ function terminalHandoff(stdin: StdinChannel, signal: AbortSignal): HandoffChann
       );
       console.log("─".repeat(60));
 
-      stdin.setMode("WAITING_FOR_INTERACTION");
-      try {
-        const line = await stdin.askLine("  完成后回车 > ", signal);
-        if (line === undefined) {
-          console.log(
-            stdin.isInteractive
-              ? "  \x1b[33m等待被中断\x1b[0m"
-              : "  \x1b[33m非交互环境，没有人能接管这一步\x1b[0m",
-          );
-          return undefined;
-        }
-        return line.length > 0 ? { note: line } : {};
-      } finally {
-        stdin.setMode("RUNNING");
+      const line = await stdin.askLine("  完成后回车 > ", signal);
+      if (line === undefined) {
+        console.log(
+          stdin.isInteractive
+            ? "  \x1b[33m等待被中断\x1b[0m"
+            : "  \x1b[33m非交互环境，没有人能接管这一步\x1b[0m",
+        );
+        return undefined;
       }
+      return line.length > 0 ? { note: line } : {};
     },
   };
 }
@@ -956,35 +946,30 @@ function terminalQuestion(
       );
       console.log("─".repeat(60));
 
-      stdin.setMode("WAITING_FOR_INTERACTION");
-      try {
-        const line = await stdin.askLine(`  选哪个（1-${request.options.length}）> `, signal);
-        if (line === undefined || line.length === 0) {
-          console.log(
-            stdin.isInteractive
-              ? "  \x1b[2m没有选择，交给它自己定\x1b[0m"
-              : "  \x1b[2m非交互环境，交给它自己定\x1b[0m",
-          );
-          return undefined;
-        }
-        /**
-         * 序号 → 选项原文。**越界或非数字一律当自由文本**，不报错。
-         *
-         * 【定】不因为「输入不合法」再问一遍：用户想写一个不在列表里的
-         * 答案是完全正当的（选项是模型给的，它未必想全了）。
-         * 把自由输入当错误，等于让工具的选项列表变成一道封闭题。
-         */
-        const n = Number(line);
-        const byIndex =
-          Number.isInteger(n) && n >= 1 && n <= request.options.length
-            ? request.options[n - 1]
-            : undefined;
-        return byIndex !== undefined
-          ? { choice: byIndex }
-          : { choice: line, note: "用户没有选列表里的选项，而是自己写了一个答案" };
-      } finally {
-        stdin.setMode("RUNNING");
+      const line = await stdin.askLine(`  选哪个（1-${request.options.length}）> `, signal);
+      if (line === undefined || line.length === 0) {
+        console.log(
+          stdin.isInteractive
+            ? "  \x1b[2m没有选择，交给它自己定\x1b[0m"
+            : "  \x1b[2m非交互环境，交给它自己定\x1b[0m",
+        );
+        return undefined;
       }
+      /**
+       * 序号 → 选项原文。**越界或非数字一律当自由文本**，不报错。
+       *
+       * 【定】不因为「输入不合法」再问一遍：用户想写一个不在列表里的
+       * 答案是完全正当的（选项是模型给的，它未必想全了）。
+       * 把自由输入当错误，等于让工具的选项列表变成一道封闭题。
+       */
+      const n = Number(line);
+      const byIndex =
+        Number.isInteger(n) && n >= 1 && n <= request.options.length
+          ? request.options[n - 1]
+          : undefined;
+      return byIndex !== undefined
+        ? { choice: byIndex }
+        : { choice: line, note: "用户没有选列表里的选项，而是自己写了一个答案" };
     },
   };
 }

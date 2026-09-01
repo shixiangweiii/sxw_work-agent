@@ -8,7 +8,9 @@
  *   protocolRoleOf    形状提供载体          端点提供约束档位
  *   countTokens       形状提供端点路径      端点提供精度
  *   classifyError     —                    端点提供判别式
- *   isBlockClosed     形状提供事件          端点提供有无
+ *
+ * （这张表此前还有一行 `isBlockClosed`。它删了 —— 那条规则的活实现在
+ *  `client.ts` 的 `assemble()` 里，见本文件末尾那段说明。）
  *
  * 【定】本文件不得出现任何具体端点的名字或行为常量。
  * 「百炼会不会校验配对」不是这里的知识，是 profile 的数据。
@@ -21,7 +23,6 @@ import type {
   FrameValidation,
   ModelProtocolPort,
   ModelRequest,
-  ModelStreamEvent,
   RuntimeErrorRecord,
   TokenCount,
   ToolSnapshot,
@@ -412,22 +413,22 @@ class AnthropicMessagesProtocol implements ModelProtocolPort {
     });
   }
 
-  // ─────────────────────────────────────────────────── isBlockClosed
-
   /**
-   * 闭合判据。形状提供事件，端点提供有无。
+   * ── 这里**故意没有** `isBlockClosed` ──────────────────────────────────
    *
-   * 有 content_block_stop 时直接判定；没有时退回「后继 index 出现 ⟹ 前一 index 已闭合」
-   * —— 这是 Spike P3 从 OpenAI 形状里逼出来的判据，比「参数 JSON 能否解析」更强。
+   * 它曾经在这个类上，实现得也对（有 `content_block_stop` 就用事件，没有就用
+   * 「后继 index 出现 ⟹ 前一 index 已闭合」，那是 Spike P3 从 OpenAI 形状里
+   * 逼出来的判据）。删掉的理由不是它写错了，是**同一条规则在 `client.ts` 的
+   * `assemble()` 里还有一份，而那一份才是活的** —— §8.4「未闭合的 Tool Call
+   * 不得转为 ProposedAction」走的是它，读的是同一个
+   * `profile.context.hasExplicitBlockCloseEvent`。
+   *
+   * 这一份零调用点：它唯一的输入 `ModelStreamEvent[]` 里那几个块级事件，
+   * 也只有它一个读者。两个零消费者互相引用，链路看起来是通的。
+   *
+   * 【定】要恢复它，先回答「谁调它」—— 如果答案还是 `assemble()`，
+   * 那就该把 `assemble()` 改成调它，而不是再摆一份。
    */
-  isBlockClosed(index: number, seen: ModelStreamEvent[]): boolean {
-    if (this.profile.context.hasExplicitBlockCloseEvent) {
-      return seen.some((e) => e.type === "block_stop" && e.index === index);
-    }
-    return seen.some(
-      (e) => (e.type === "block_start" || e.type === "tool_input_delta") && e.index > index,
-    );
-  }
 }
 
 // ══════════════════════════════════════════════════════════ 翻译层

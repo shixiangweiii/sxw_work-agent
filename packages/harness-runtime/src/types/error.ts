@@ -185,5 +185,18 @@ export function makeError(
 ): RuntimeErrorRecord {
   // M-7：值域声明在这里才第一次有了消费点。
   assertActiveErrorDomain(init.source, init.category);
-  return { occurredAt: init.occurredAt ?? Date.now(), ...init };
+  /**
+   * 【定】兜底放在展开**之后**。
+   *
+   * 原来是 `{ occurredAt: init.occurredAt ?? Date.now(), ...init }` —— 后面的
+   * `...init` 会把前面算好的值盖回去。而 `occurredAt` 在签名里是
+   * `Partial<Pick<…>>`，所以显式传一个 `occurredAt: undefined` 是合法调用：
+   * 那时展开会把这个键**带着 undefined 一起写进去**，结果对象连
+   * `occurredAt` 都没有（实测输出里这个键直接消失）。
+   *
+   * 当前没有调用点这么传，所以它是潜伏的；但那一行 `?? Date.now()` 在原写法下
+   * 是装饰 —— 一个看起来在兜底、实际被下一句抵消掉的表达式，正是本仓
+   * 反复清理的形态。
+   */
+  return { ...init, occurredAt: init.occurredAt ?? Date.now() };
 }

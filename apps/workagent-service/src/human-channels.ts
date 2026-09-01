@@ -179,8 +179,22 @@ export class PendingHub {
         };
       }
 
-      // CONFIRM 档跳过有限自动放行，直接问 —— 与 CLI 同一条分派顺序。
-      const grant = mode === "CONFIRM" ? { ok: false as const, why: "CONFIRM 档：每一步都问" } : autoGrant(action);
+      /**
+       * CONFIRM 档跳过有限自动放行，直接问 —— 与 CLI 同一条分派顺序。
+       *
+       * 【定】`why` 里**不许写「每一步都问」**（ADR-0012 二次评审 P1-5）。
+       * 审批 decider 只在 Policy 返回 `REQUIRE_APPROVAL` 时才被调用，而
+       * `TRUSTED_PERSONAL` 只对 WRITE / DELETE / EXECUTE 返回它 ——
+       * `read_file` / `list_dir` / `search` / `fetch_url` 在任何档位下都不问。
+       *
+       * 那次纠正改了 `ApprovalMode` 的类型注释与 `describeModes()`，
+       * **漏了这一处**；而这一处的字最终会原样出现在浏览器的审批卡上，
+       * 也就是唯一一个用户真的会读到它的地方。
+       */
+      const grant =
+        mode === "CONFIRM"
+          ? { ok: false as const, why: "CONFIRM 档：每个需要审批的操作都问" }
+          : autoGrant(action);
       if (grant.ok) return { approved: true, reason: "默认档位自动放行", decidedBy: "AUTO_GRANT" };
 
       const signal = signalFor(runId);

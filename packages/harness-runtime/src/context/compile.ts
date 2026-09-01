@@ -37,8 +37,13 @@ export interface CompileDeps {
   /**
    * IANA 时区名，来自 AgentSpec。与 `now` 一起构成注入给模型的受信时间事实。
    *
-   * 【定】时间必须经 ClockPort（即这里的 `now`）取得，不得在本模块调 Date.now()。
-   * 验收脚本用 FakeClock，硬编码当前时间会让帧内容不可复现。
+   * 【定】时间必须经 ClockPort（即这里的 `now` / `timeFactAt`）取得，
+   * 不得在本模块调 `Date.now()` —— 帧内容要能从入参完整推出来，
+   * 而一个直接读挂钟的表达式让同一份输入产出两种帧。
+   *
+   * （此前这条的理由写的是「验收脚本用 FakeClock」，而 `FakeClock` 因为
+   * 零使用者已于 2026-08-31 删除 —— 理由没了，规则仍然成立，
+   * 所以换成它真正站得住的那个理由。见 `ClockPort` 的注释。）
    */
   timezone: string;
   /**
@@ -354,7 +359,8 @@ const UNRESTRICTED_FACT =
  * 写明星期与时区是刻意的：办公类产物里「本周」「下周一」这类相对表述很常见，
  * 只给一个 ISO 串，模型还是得自己推算星期，那又是一次可能出错的推断。
  *
- * 【定】只用 deps.now，不碰 Date.now() —— FakeClock 下这一行必须可复现。
+ * 【定】只用传进来的 `now`，不碰 `Date.now()` —— 这一行的输出是帧内容的一部分，
+ * 必须由入参唯一决定（同一份 CompileDeps 编两次要逐字一致）。
  */
 function renderTimeFact(now: number, timezone: string): string {
   const fmt = new Intl.DateTimeFormat("zh-CN", {
@@ -374,7 +380,15 @@ function renderTimeFact(now: number, timezone: string): string {
   );
 }
 
-type PartialItem = Omit<ContextItem, "id" | "contentHash" | "estimatedTokens" | "createdAt" | "redactionApplied">;
+/**
+ * 【定】`Omit` 的键必须是 `ContextItem` 上**真的存在**的字段。
+ *
+ * 这里此前还 Omit 着一个 `redactionApplied`，而那个字段（恒 `true`、
+ * 不变量 13 的名义载体）已经在 2026-08-31 那批删掉了。
+ * `Omit<T, K>` 对不存在的 K **不报错**，于是它作为一句失效的声明留了下来 ——
+ * 读的人会以为 `ContextItem` 上还有一个跟脱敏有关的字段。
+ */
+type PartialItem = Omit<ContextItem, "id" | "contentHash" | "estimatedTokens" | "createdAt">;
 
 function finishItem(p: PartialItem, deps: CompileDeps): ContextItem {
   const text = renderText(p.content);

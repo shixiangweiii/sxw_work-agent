@@ -14,17 +14,27 @@
  *
  * 【定】所以只有这里创建 readline，其余人向它注册意图。
  *
- * ── 回车的含义按 Run 当前状态分派（S1 定死，S10 用第三条）──────────────
+ * ── 回车的含义按「谁在等」分派（S1 定死，S10 用第三条）──────────────────
  *
- * | 状态                    | 回车的含义     |
- * |-------------------------|----------------|
- * | RUNNING                 | 提交插话       |
- * | WAITING_FOR_APPROVAL    | 审批应答       |
- * | WAITING_FOR_INTERACTION | 接管完成信号   |
+ * | 有人在 `askLine()` 上等吗 | 回车的含义                        |
+ * |---------------------------|-----------------------------------|
+ * | 没有                      | 提交插话                          |
+ * | 有                        | 交给那个等待者（审批 / 接管 / 提问）|
  *
- * 优先级由「谁在等」决定，不由 mode 字段决定 —— 一个正在 await 的等待者
- * 永远优先于插话。反过来（先看 mode）会在状态还没来得及更新时把
- * 审批应答当成插话吞掉。
+ * 一个正在 await 的等待者永远优先于插话。反过来（先看一个「当前状态」字段）
+ * 会在状态还没来得及更新时把审批应答当成插话吞掉。
+ *
+ * ── 【定】这里**没有** `mode` / `setMode()` / `currentMode()` ──────────────
+ *
+ * 曾经有：一个 `StdinMode` 字段 ＋ 一个 setter ＋ 一个 getter，
+ * `main.ts` 在三处 try/finally 里认真地拨它。而 `currentMode()` **零调用点**，
+ * `line` 回调也从不读它 —— 也就是说那个字段是**纯写入**的。
+ *
+ * 更要紧的是它与上面这张表构成了一句假话：表原本按「状态」分派，
+ * 而实现按「谁在等」分派，两者只是恰好总能得出同一个答案。
+ * 一个只写不读的状态机会让下一个人以为「分派靠 mode」，
+ * 然后在某处 `if (mode === …)` 上建一条逻辑 —— 那时它才第一次真的错。
+ * 与 `ProgressGuard.lastProgressAt`、`DriftDetector.seen` 是同一形态。
  *
  * ── 非交互环境（无 TTY）必须优雅降级 ──────────────────────────────────
  *
@@ -35,8 +45,6 @@
  */
 
 import { createInterface, type Interface } from "node:readline";
-
-export type StdinMode = "RUNNING" | "WAITING_FOR_APPROVAL" | "WAITING_FOR_INTERACTION";
 
 export interface StdinChannelDeps {
   /** RUNNING 状态下敲入的一行去哪儿。 */
@@ -59,8 +67,7 @@ export interface StdinChannelDeps {
 export class StdinChannel {
   private readonly rl: Interface | undefined;
   private readonly out: NodeJS.WritableStream;
-  private mode: StdinMode = "RUNNING";
-  /** 正在等一行输入的人。先到先得，最多一个。 */
+  /** 正在等一行输入的人。先到先得，最多一个。**分派只看它**，见文件头。 */
   private waiter: ((line: string) => void) | undefined;
 
   constructor(private readonly deps: StdinChannelDeps) {
@@ -89,14 +96,6 @@ export class StdinChannel {
 
   get isInteractive(): boolean {
     return this.rl !== undefined;
-  }
-
-  setMode(mode: StdinMode): void {
-    this.mode = mode;
-  }
-
-  currentMode(): StdinMode {
-    return this.mode;
   }
 
   /**

@@ -108,9 +108,14 @@ export interface TimeoutPolicy {
  *
  *   NONE               不回报。**允许**实现里偶尔报一两次（少做多不算错），
  *                      但不承诺任何节奏。
- *   HEARTBEAT          执行期间**周期性**回报「我还活着」，
- *                      `intervalMs` 是两次之间的间隔上界。
+ *   HEARTBEAT          执行期间**周期性**回报「我还活着」。
  *   MONOTONIC_PROGRESS 回报**单调递增**的进度量（已处理 N / 共 M）。
+ *
+ * 【定】这个描述符里**只有 `mode`，没有 `intervalMs`** ——「间隔上界是多少」
+ * 曾经是一个字段，2026-08-31 那批因为零读取点删掉了。这段注释此前还写着
+ * 「`intervalMs` 是两次之间的间隔上界」，而实现里已经没有那个东西：
+ * 又一处「声明与实现不符」，只是这次声明是一句描述另一个字段的话。
+ * 节奏由工具自己定（`run_shell` 是 5s），Runtime 不校验它。
  *
  * ── 为什么这三行值得写下来 ────────────────────────────────────────────
  *
@@ -509,7 +514,28 @@ export type UnmetCause =
   | "POLICY_DENIED"
   /** 工具执行失败或抛异常。 */
   | "TOOL_FAILED"
-  /** 被取消（用户 cancel 或批内策略跳过）。 */
-  | "CANCELLED"
-  /** 走到了验证但没能得出结论。 */
-  | "NOT_OBSERVED";
+  /**
+   * 压根没启动：Run 被 cancel，或批内策略把后续都跳过了。
+   *
+   * 【定】它此前**零生产者** —— 值域里挂着，而一次跑到一半被 Ctrl+C 的 Run，
+   * 那些没轮到的必需操作在 `unmetCauseCounts` 里全部记成 `UNSPECIFIED`。
+   * 2026-09-01 接线在 `settle-batch` 的 `finally` 里（`aborted` / `skipRemaining`
+   * 这两个局部事实），排在 `finalize()` 之前 —— 之后 ledger 就满了，
+   * 「谁没启动」这个事实读不出来。
+   */
+  | "CANCELLED";
+
+/**
+ * ── 这里**故意没有** `NOT_OBSERVED` ──────────────────────────────────────
+ *
+ * 它曾经在值域里，注释是「走到了验证但没能得出结论」，而**零生产者**：
+ * 两个内置 Verifier 对「走到了验证」的 call 只会返回 PASSED / FAILED，
+ * 而它们产出 SKIPPED 的那些一律 `required: false`（不进 `unmetRequired`）。
+ *
+ * 删而不是接线，理由是**接了也不会触发**：唯一能产生 `required && SKIPPED`
+ * 的是一个第三方 Verifier，而那种情况已经被 `tallyUnmetCauses` 的
+ * `?? "UNSPECIFIED"` 如实兜住了（「没写 unmetCause 的记成 UNSPECIFIED，
+ * 不悄悄丢掉」）。一个永远不触发的分支比一个诚实的缺省更贵。
+ *
+ * 对比 `CANCELLED`：那一个有**今天就走得到**的路径，所以它是接线，不是删除。
+ */

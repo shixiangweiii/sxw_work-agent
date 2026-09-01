@@ -42,12 +42,13 @@ import {
   NO_PROGRESS_THRESHOLD,
   findOrphanResults,
   findUnpairedToolUses,
+  makeError,
   type ContextMessage,
   type RunId,
   type RunStatus,
 } from "@workagent/harness-runtime";
 import { SqliteRunStore, openDb } from "@workagent/store-sqlite";
-import { runSegment } from "@workagent/testkit";
+import { SystemClock, runSegment } from "@workagent/testkit";
 import type { HandoffChannel, QuestionChannel } from "@workagent/tools-common";
 import { compose } from "../compose.js";
 import { StdinChannel } from "../stdin-channel.js";
@@ -76,6 +77,7 @@ async function main(): Promise<void> {
   await sectionInterject();
   await sectionStdinArbitration();
   await sectionAskUser();
+  await sectionDefeatedFallbacks();
 }
 
 /** A 段：进展真的发出并落进 Trace；长任务不被步骤级超时误杀。 */
@@ -799,12 +801,20 @@ async function sectionStdinArbitration(): Promise<void> {
   };
 
   try {
-    // ① RUNNING：这一行是插话
-    chan.setMode("RUNNING");
+    /**
+     * ⚠️ 【定】这三步**不再调 `chan.setMode()`**，而这不是"顺手删掉"。
+     *
+     * 那个字段是纯写入的（`currentMode()` 零调用点、`line` 回调从不读它），
+     * 于是这里的 `setMode` 是**装饰判据**的一种形态：它让这一段读起来像是
+     * 「按三种状态各验一次」，而三次走的其实是同一条 `waiter` 分派路径。
+     * 判据本身仍然成立（它验的一直是「谁在等」），只是别再让它假装
+     * 自己在切状态 —— 与本仓拆掉的那几条装饰判据是同一条纪律。
+     */
+
+    // ① 没有人在等：这一行是插话
     await type("第一句插话");
 
     // ② 有人在等：这一行归等待者，**不能**同时变成插话
-    chan.setMode("WAITING_FOR_APPROVAL");
     const approval = chan.askLine("批准吗？");
     await type("y");
     const approvalGot = await approval;
@@ -818,15 +828,13 @@ async function sectionStdinArbitration(): Promise<void> {
     const interjectedAfterApproval = interjected.length;
 
     // ③ 等待被 abort（Ctrl+C）之后：waiter 必须被清干净，下一行回到插话
-    chan.setMode("WAITING_FOR_INTERACTION");
     const ac = new AbortController();
     const handoff = chan.askLine("做完了敲回车：", ac.signal);
     ac.abort();
     const handoffGot = await handoff;
-    chan.setMode("RUNNING");
     await type("abort 之后的插话");
 
-    fact("① RUNNING 敲一行", interjected[0] ?? "（没收到）");
+    fact("① 无人在等时敲一行", interjected[0] ?? "（没收到）");
     fact("② 等审批时敲的那一行", `waiter 收到 "${approvalGot ?? "（无）"}"`);
     fact(
       "   同一行有没有同时变成插话",
@@ -1097,4 +1105,121 @@ function countBlocks(messages: ContextMessage[], type: "tool_call" | "tool_resul
   return n;
 }
 
+
 void runVerify(main);
+
+/**
+ * I. 两条**被自己抵消掉**的兜底（2026-09-01 评审 A2 / A3）。
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ * 这两条放在一起，因为它们是**同一种形态**：一个看起来在兜底的表达式，
+ * 被紧挨着的另一句话抵消掉，而抵消是静默的。
+ *
+ *   `makeError`  `{ occurredAt: init.occurredAt ?? Date.now(), ...init }`
+ *                —— 后面的 `...init` 把前面算好的值盖回去
+ *   `sleep`      `signal?.addEventListener("abort", …)`
+ *                —— 对一个**已经** aborted 的 signal 永远不触发
+ *
+ * 两条都不会报错、都不会被既有判据照到（`makeError` 的调用点没有一个传
+ * `occurredAt`；`sleep` 的唯一调用点在模型错误退避那条罕见路径上）。
+ *
+ * 【定】判据打在**函数本身**而不是下游：`read_blob.line_offset` 那次的教训
+ * 是「判据打在下游，跨不过出事的那一跳」。这两条的那一跳就在函数体内部。
+ * ══════════════════════════════════════════════════════════════════════
+ */
+async function sectionDefeatedFallbacks(): Promise<void> {
+  section("I. 两条被自己抵消掉的兜底：makeError 的时间戳、sleep 的 signal");
+
+  // ── ① makeError：显式传 `occurredAt: undefined` 时兜底必须仍然生效
+  //
+  // 【定】夹具必须**显式传** undefined，不能只调不传。
+  // 不传的话对象里根本没有那个键，展开顺序对错都一样 —— 又一次
+  // 「这条判据要区分的两个值，在夹具里相等吗」。
+  const err = makeError({
+    code: "VERIFY_FALLBACK_PROBE",
+    source: "RUNTIME",
+    category: "INTERNAL",
+    retryability: "NEVER",
+    sideEffectState: "NO_EFFECT",
+    safeMessage: "判据探针",
+    occurredAt: undefined,
+  });
+  fact("显式传 occurredAt: undefined 时，字段是", JSON.stringify(err.occurredAt));
+  const stampOk = typeof err.occurredAt === "number" && err.occurredAt > 0;
+  verdict(
+    stampOk,
+    stampOk
+      ? "`?? Date.now()` 真的兜住了 —— 展开必须排在它**前面**，" +
+        "反过来写的话这个键会连同 undefined 一起被盖掉（实测：键直接消失）"
+      : `occurredAt = ${JSON.stringify(err.occurredAt)} —— 兜底被 \`...init\` 抵消了`,
+  );
+
+  /**
+   * ── ② sleep 必须验**两个时序**，缺一个就落进守卫重叠区 ────────────────
+   *
+   * ⚠️ 这一条是注入实测当场逼出来的：第一版只验「先 abort 再 sleep」，
+   * 于是三向注入里**第三向没有翻红** —— `if (signal?.aborted) return` 那道
+   * 早返回把 `onAbort` 整个挡在后面，「abort 时是 resolve 还是 reject」
+   * 在那个夹具里**不可观察**。
+   *
+   * 本仓记过同一形态三次（ADR-0012 二次评审 P2-3/P2-4、归责 P1-6）：
+   * 「两道守卫只在一个可观察量上重合，单摘任何一道都不红」。
+   * 处置一律是**让每道守卫各有一个能单独触发它的时序**：
+   *
+   *   ②a 先 abort 再 sleep   → 只有「早返回」那道守得住
+   *   ②b sleep 到一半才 abort → 只有 `onAbort` 那道守得住
+   */
+  const clock = new SystemClock();
+
+  /** 跑一次 sleep，回报耗时与有没有抛。 */
+  const probe = async (
+    arm: (ac: AbortController) => void,
+  ): Promise<{ elapsed: number; threw: string }> => {
+    const ac = new AbortController();
+    arm(ac);
+    const t0 = Date.now();
+    let threw = "";
+    try {
+      await clock.sleep(3_000, ac.signal);
+    } catch (e) {
+      threw = (e as Error).name || String(e);
+    }
+    return { elapsed: Date.now() - t0, threw };
+  };
+
+  // ②a：Ctrl+C 之后才走到退避的那个时序 —— signal 进来时已经是 aborted。
+  const pre = await probe((ac) => ac.abort());
+  // ②b：等待已经开始，人才按下 Ctrl+C —— 走的是 `onAbort` 那条路。
+  const mid = await probe((ac) => setTimeout(() => ac.abort(), 30));
+
+  fact("②a 先 abort 再 sleep(3000ms)", `${pre.elapsed}ms，抛：${pre.threw || "没有"}`);
+  fact("②b sleep 到一半才 abort", `${mid.elapsed}ms，抛：${mid.threw || "没有"}`);
+
+  /**
+   * 【定】**四句都要断**。每一句各自挡住一种坏实现：
+   *
+   *   ②a 耗时 < 500ms   「只挂监听不查 aborted」→ 睡满 3 秒（不抛，所以只有耗时抓得住）
+   *   ②a 不抛           （与 ②b 同理，留着保持两个时序对称）
+   *   ②b 耗时 < 500ms   「abort 时什么都不做」→ 睡满 3 秒
+   *   ②b 不抛           「abort 时 reject(AbortError)」→ **只有这一句抓得住**，
+   *                     而那个异常会穿过整个 runLoop：不经 finish()、没有具名
+   *                     Terminal、最后在 main().catch() 里打成「启动失败：Aborted」。
+   *                     循环纪律第 2 条要求每个 return 都是具名 Terminal，
+   *                     一次 Ctrl+C 不该变成一次崩溃。
+   */
+  const sleepOk =
+    pre.elapsed < 500 && pre.threw === "" && mid.elapsed < 500 && mid.threw === "";
+  verdict(
+    sleepOk,
+    sleepOk
+      ? `两个时序都立刻返回且都不抛（${pre.elapsed}ms / ${mid.elapsed}ms）—— ` +
+        "取消交回循环顶部那句 `if (interrupts.aborted)`，走具名 Terminal"
+      : pre.elapsed >= 500
+        ? `②a 睡满了 ${pre.elapsed}ms：\`addEventListener("abort")\` 对已经 aborted 的 ` +
+          "signal 不触发，必须在挂监听之前先查一次 `signal.aborted`"
+        : mid.elapsed >= 500
+          ? `②b 睡满了 ${mid.elapsed}ms：abort 事件没有把等待唤醒`
+          : `抛了（②a：${pre.threw || "无"}｜②b：${mid.threw || "无"}）：` +
+            "那个异常会穿过 runLoop，绕过 finish() 与具名 Terminal",
+  );
+}

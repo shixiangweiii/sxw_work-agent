@@ -80,7 +80,15 @@ class AnthropicModelPort implements ModelPort {
               partialJson: "",
               closed: false,
             });
-            yield { type: "block_start", index: idx, blockType: String(b["type"] ?? "text") };
+            /**
+             * 【定】这里**不再 yield `block_start`**。
+             *
+             * 块的形态与闭合状态全部记在上面这个 `blocks` Map 里，由
+             * `assemble()` 消费；而那四个块级流事件（block_start / block_stop /
+             * tool_input_delta / reasoning_delta）在 Runtime 侧**一个消费者都没有**
+             * —— 唯一读过它们的是同样没人调的 `ModelProtocolPort.isBlockClosed`。
+             * 见 `ports/index.ts` 里 `ModelStreamEvent` 的说明。
+             */
             break;
           }
           case "content_block_delta": {
@@ -93,23 +101,23 @@ class AnthropicModelPort implements ModelPort {
               block.text += t;
               yield { type: "text_delta", text: t };
             } else if (d["type"] === "thinking_delta") {
-              const t = String(d["thinking"] ?? "");
-              block.text += t;
-              yield { type: "reasoning_delta", text: t };
+              // 推理增量照常累进块里（`assemble()` 会把它产出成 reasoning 内容），
+              // 但**不 yield** —— 全仓没有推理流的消费者。见上面 block_start 那段。
+              block.text += String(d["thinking"] ?? "");
             } else if (d["type"] === "signature_delta") {
               block.signature = (block.signature ?? "") + String(d["signature"] ?? "");
             } else if (d["type"] === "input_json_delta") {
-              const j = String(d["partial_json"] ?? "");
-              block.partialJson += j;
-              yield { type: "tool_input_delta", index: idx, partialJson: j };
+              // 同上：参数 JSON 增量只累进块里，闭合与解析由 `assemble()` 做。
+              block.partialJson += String(d["partial_json"] ?? "");
             }
             break;
           }
           case "content_block_stop": {
-            const idx = Number(ev["index"]);
-            const block = blocks.get(idx);
+            // 【定】闭合**必须**记进块里 —— `assemble()` 的
+            // 「未闭合的 Tool Call 不得转为 ProposedAction」（§8.4）读的就是它。
+            // 不再 yield `block_stop`：那个事件零消费者，见上面 block_start 那段。
+            const block = blocks.get(Number(ev["index"]));
             if (block) block.closed = true;
-            yield { type: "block_stop", index: idx };
             break;
           }
           case "message_delta": {

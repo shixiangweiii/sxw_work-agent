@@ -101,10 +101,18 @@ export function strictFakeProfile(): EndpointCapabilityProfile {
   });
 }
 
-/** 无 token 预估端点。用于验证 D-05 的触发点退化路径。 */
-export function noCountTokensProfile(): EndpointCapabilityProfile {
-  return fakeProfile({
-    modelId: "fake-no-count",
-    tokens: { hasCountTokensEndpoint: false, countTokensAccuracy: undefined, perRequestBaseTokens: 84 },
-  });
-}
+/**
+ * ── 这里**故意没有** `noCountTokensProfile()` ──────────────────────────
+ *
+ * 它曾经在，注释写着「无 token 预估端点。用于验证 D-05 的触发点退化路径」——
+ * 而**零调用点**：那条退化路径（端点没有 count_tokens → 本地估算 →
+ * accuracy 降成 ESTIMATED → `computeIrreducible` 走加 `fixedOverheadTokens`
+ * 的那一支）从来没有被任何判据覆盖过。
+ *
+ * 删掉的是那个**没人调的夹具**，不是那条缺口 —— 缺口照旧在，只是现在
+ * 没有一个函数在替它作证。与 `FakeClock` / `DeterministicIdGenerator`
+ * 同一条：「一个没有使用者的测试夹具与一条没有判据的断言是同一类东西」。
+ *
+ * 真要补那条判据的那天，第一步是写断言，第二步才是把这个 profile 加回来
+ * （`{ hasCountTokensEndpoint: false, countTokensAccuracy: undefined }` 就是它）。
+ */

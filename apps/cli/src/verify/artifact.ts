@@ -265,6 +265,155 @@ async function main(): Promise<void> {
   await sectionArtifacts();
   await sectionBinaryArtifacts();
   await sectionArtifactIdentity();
+  await sectionTimeoutKeepsArtifact();
+}
+
+/**
+ * J. 步骤超时不得把产物**静默丢掉**（2026-09-01 评审 A4）。
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ * `settle-batch` 里有一支「工具正常返回、但步骤 signal 已经因超时 abort」的
+ * 改写：它把 `ok` 翻成 false 并合成一条 `TOOL_TIMEOUT`。那一支原本是
+ * **逐字段重建**一个新 outcome（`{ ok, output, sideEffectState, error }`）——
+ * 于是 `artifact` 这个字段**被静默丢掉**。
+ *
+ * 后果不是「失败所以不登记」：紧接着的第 ⑦.5 步对成功与失败都跑登记，
+ * 所以正确行为是**照常登记 ＋ 让检查结果如实进事实表**。丢掉之后得到的是
+ *
+ *   命令跑完了 → 产物真的在盘上 → 只是恰好越过步级超时
+ *     → 一条产物登记都没有
+ *     → `artifactChecks` 里连一条**失败**事实都没有
+ *     → 结算时「没验过」表现成「没问题」
+ *
+ * 这与同一个函数里 catch 那段的【定】（「登记失败也必须留下一条失败的检查
+ * 事实」）是同一条纪律，那一支兑现了，这一支没有。
+ *
+ * ── 夹具为什么必须自己造一个工具 ────────────────────────────────────────
+ *
+ * 【定】14 个内置工具**没有一个**能走到这条分支：`timeoutPolicy` 最短的是
+ * `read_blob` 的 10s，而 `run_shell` 更是把自己的 timer 设得**必然早于**
+ * Runtime 那道（`STEP_TIMEOUT_MS = MAX + 30s`，见那段【定】）。
+ * 也就是说这一支在真实工具面下不可达 —— 拿真工具写这条判据只会得到一条
+ * 永远绿的装饰。所以这里注入一个 `timeoutMs: 30` 的工具 ＋ 一个睡 200ms
+ * 才返回的 Handler，让「跑完了但已超时」成为确定事件。
+ * ══════════════════════════════════════════════════════════════════════
+ */
+async function sectionTimeoutKeepsArtifact(): Promise<void> {
+  section("J. 步骤超时之后，产物仍然要进事实表（不得静默丢掉）");
+
+  const ws = tempWorkspace();
+  try {
+    const REL = "late.json";
+    const BODY = '{"ok":true}';
+
+    /** `timeoutMs: 30` —— 内置工具里没有这么短的，见上面那段【定】。 */
+    const slowSnapshot = {
+      toolId: "tool_slow_artifact" as never,
+      version: "1.0.0",
+      definition: {
+        id: "tool_slow_artifact" as never,
+        version: "1.0.0",
+        name: "slow_artifact",
+        description: "夹具：睡一会儿再产出一个 JSON 产物。只服务 verify:artifact J 段。",
+        inputSchema: { type: "object" as const, properties: {}, required: [], additionalProperties: false },
+        effectResolution: {
+          kind: "DECLARATIVE" as const,
+          rule: {
+            pointer: "/path",
+            effectType: "WRITE" as const,
+            scopeKind: "FILE" as const,
+            reversibility: "PARTIALLY_REVERSIBLE" as const,
+            operation: "write",
+          },
+        },
+        redaction: { profile: "STANDARD" as const },
+        idempotency: { isIdempotent: true, isReadOnly: false },
+        // ★ 这一行是整段的支点：让 Runtime 那道步级超时**必然**先到。
+        timeoutPolicy: { timeoutMs: 30 },
+        progressReporting: { mode: "NONE" as const },
+        verification: { mode: "NONE" as const, requiredForSuccess: false },
+        recoveryObservation: { requiresPreFingerprint: false },
+      },
+    };
+
+    /** 真的把文件写到盘上 —— 第 ① 项检查读的是磁盘那一份，不能只声明。 */
+    const slowHandler: ToolHandlerPort = {
+      async execute(): Promise<ToolExecutionOutcome> {
+        writeFileSync(join(ws.root, REL), BODY, "utf8");
+        await new Promise((r) => setTimeout(r, 200)); // > 30ms，超时必然发生
+        return {
+          ok: true,
+          output: `已写 ${REL}`,
+          sideEffectState: "APPLIED",
+          artifact: {
+            logicalId: REL,
+            role: "DELIVERABLE",
+            kind: "json",
+            path: REL,
+            content: BODY,
+          },
+        };
+      },
+    };
+
+    const trace = new CollectingTraceSink();
+    const composed = compose({
+      dbPath: ":memory:",
+      workspaceRoot: ws.root,
+      approvalDecider: async () => ({ approved: true }),
+      trace,
+      tools: [slowSnapshot as never],
+      portOverrides: { tools: slowHandler },
+      modelPortOverride: new ScriptedModelPort([
+        { text: "产出一个", toolCalls: [{ toolCallId: "j1", name: "slow_artifact", input: {} }] },
+        { text: "做完了。", toolCalls: [] },
+      ]),
+    });
+
+    const gen = composed.runtime.start(composed.makeRunSpec("verify:artifact J 段夹具"));
+    let runId = "";
+    let r = await gen.next();
+    while (!r.done) {
+      if (!runId) runId = String(r.value.runId);
+      r = await gen.next();
+    }
+
+    const registered = await composed.ports.artifacts.listByRun(runId as RunId);
+    const verifiedEvents = trace.byType("ArtifactVerified");
+    const messages = await composed.ports.transcript.rebuildMessages(runId as RunId);
+    const resultText = messages
+      .flatMap((m) => m.content)
+      .find((c) => c.type === "tool_result")?.content ?? "";
+    composed.db.close();
+
+    const timedOut = resultText.includes("TOOL_TIMEOUT");
+    fact("工具结果里出现 TOOL_TIMEOUT", timedOut ? "是（超时分支确实走到了）" : "否");
+    fact("登记的产物条数", registered.length);
+    fact("ArtifactVerified 事件数", verifiedEvents.length);
+    fact("磁盘上产物还在吗", existsSync(join(ws.root, REL)) ? "在" : "不在");
+
+    /**
+     * 【定】**成对**：先证明超时分支真的走到了，再证明产物没被它吃掉。
+     *
+     * 少了前一句，一个「压根没超时」的夹具会让后一句轻松变绿 ——
+     * 那时这条判据测的是「正常产物能登记」，而那件事 E 段已经测过了。
+     * 这正是本仓反复记的「判据测的不是它声称在测的东西」。
+     */
+    const kept = timedOut && registered.length === 1 && verifiedEvents.length === 1;
+    verdict(
+      kept,
+      kept
+        ? "工具跑完了但越过步级超时：调用如实报 TOOL_TIMEOUT，而它产出的交付物" +
+          "**照样进了登记与第二层检查** —— 「没验过」不会再表现成「没问题」"
+        : timedOut
+          ? `超时分支走到了，但产物被吃掉了：登记 ${registered.length} 条、` +
+            `ArtifactVerified ${verifiedEvents.length} 条（期望各 1）——` +
+            `改写 outcome 时逐字段重建就会丢掉 artifact`
+          : "夹具没有触发超时分支，这条判据此刻没有判别力（先修夹具再看断言）",
+    );
+  } finally {
+    ws.cleanup();
+  }
 }
 
 /**

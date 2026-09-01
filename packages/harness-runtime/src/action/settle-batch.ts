@@ -551,11 +551,27 @@ export async function* executeBatch(
          */
         if (stepSignal.aborted && !deps.signal.aborted && outcome.ok) {
           outcome = {
+            /**
+             * 【定】**保留 `artifact`**，不要在这里重建一个只有四个字段的对象。
+             *
+             * 原写法是 `{ ok, output, sideEffectState, error }` —— 四个字段
+             * 逐个抄过来，于是 `artifact` 被**静默丢掉**。而下面第 ⑦.5 步的
+             * 登记块对成功与失败都跑（`if (outcome.artifact && deps.artifacts)`），
+             * 所以丢掉它的后果不是「失败所以不登记」，是：
+             *
+             *   命令跑完了、产物真的写在盘上、只是恰好越过步级超时
+             *     → 产物不登记
+             *     → `artifactChecks` 里**连一条失败事实都没有**
+             *     → 结算时「没验过」表现成「没问题」
+             *
+             * 这与同一个函数里 catch 那段的【定】（「登记失败也必须留下一条
+             * **失败的**检查事实」）是同一条纪律，这里此前没兑现。
+             * 用展开而不是逐字段抄，将来给 outcome 加字段时也不会再漏一次。
+             */
+            ...outcome,
             ok: false,
-            output: outcome.output,
             // 工具确实跑完了，副作用是发生了的 —— 如实写 APPLIED，
             // 不要因为「超时」就改成 UNKNOWN 而凭空制造一个待确认项。
-            sideEffectState: outcome.sideEffectState,
             error: makeError({
               code: "TOOL_TIMEOUT",
               source: "TOOL_HANDLER",
@@ -686,7 +702,37 @@ export async function* executeBatch(
       }
       const vr = vrGuarded.value;
       verifiedCallIds.add(call.toolCallId);
-      verifications.push(vr);
+      /**
+       * ══════════════════════════════════════════════════════════════════
+       * 【定】**已经记下的成因要附到这条验证事实上**，否则它到不了任何地方。
+       *
+       * 这是补给一个真洞的：上面第 605 行左右的
+       * `if (!outcome.ok) causeByCall.set(call.toolCallId, "TOOL_FAILED")`
+       * 看起来是接好的，实际**在正常路径上从来没有消费者** ——
+       * `causeByCall` 唯一的读者是 `recordUnmetRequired()`，而它只处理
+       * **不在** `verifiedCallIds` 里的 call。一个工具失败了却仍然走到
+       * Verification（那是常态：`verify()` 就在下面一行），就会被加进
+       * `verifiedCallIds`，于是刚记下的 `TOOL_FAILED` 当场作废。
+       *
+       * 后果在 `unmetCauseCounts` 上直接可见：一次工具失败导致的未达成项
+       * 记成 `UNSPECIFIED`（`tallyUnmetCauses` 的缺省），而 ADR-0001 说
+       * 「是谁没做成」只能从事实表里聚合 —— 那个聚合于是答不出最常见的一种。
+       *
+       * 形态与 `riskFacts` / `dataMovement` / `replacedBytes` 三次一模一样：
+       * **一条撑着结论的依据从未离开产生它的那个函数。**
+       * 这次是写判据时被 `verify:pairing` 那条新用例当场打出来的
+       * （期望 `{CANCELLED:1}`，实际 `{UNSPECIFIED:1, CANCELLED:1}`）。
+       *
+       * 【定】只在「必需 ＋ 没通过 ＋ Verifier 自己没给成因」时附 ——
+       * Verifier 若已经说了，以它的为准（它比这里更接近事实）。
+       * ══════════════════════════════════════════════════════════════════
+       */
+      const recordedCause = causeByCall.get(call.toolCallId);
+      verifications.push(
+        vr.required && vr.status !== "PASSED" && vr.unmetCause === undefined && recordedCause
+          ? { ...vr, unmetCause: recordedCause }
+          : vr,
+      );
       yield ev(deps, "VerificationCompleted", {
         actionId,
         status: vr.status,
@@ -874,6 +920,26 @@ export async function* executeBatch(
       }
     }
   } finally {
+    /**
+     * ── 【定】「没启动」也是一个**有事实来源**的成因，要记 `CANCELLED` ──────
+     *
+     * `UnmetCause` 的值域里一直有 `CANCELLED`（注释写着「被取消（用户 cancel
+     * 或批内策略跳过）」），而它**零生产者** —— 于是一次跑到一半被 Ctrl+C 的
+     * Run，那些没轮到的必需操作在 `unmetCauseCounts` 里全部记成 `UNSPECIFIED`。
+     * 「说不出为什么」与「因为被取消了」在归因报告里是两件事。
+     *
+     * 【定】它来自**局部事实**（`aborted` / `skipRemaining` 这两个变量在事情
+     * 发生的那一刻被置位），不是事后解析 result 文案 —— 与 `causeByCall`
+     * 那段【定】同一条纪律。所以必须排在 `finalize()` **之前**：
+     * finalize 一跑，ledger 就满了，「谁没启动」这个事实就读不出来了。
+     */
+    const stopped = deps.signal.aborted || aborted || skipRemaining;
+    if (stopped) {
+      for (const c of calls) {
+        if (ledger.has(c.toolCallId)) continue;
+        if (!causeByCall.has(c.toolCallId)) causeByCall.set(c.toolCallId, "CANCELLED");
+      }
+    }
     // 【定】所有出口都经过这里。缺失的 result 在此补齐。
     finalize(calls, ledger, deps.signal.aborted || aborted, skipRemaining);
     // 【定】result 补齐了，事实也必须补齐 —— 两者是同一条不变量的两面。

@@ -58,7 +58,9 @@ export const resolverKey = (ref: { id: string; version: string }) => `${ref.id}@
  * ── 为什么不能共用一个 ────────────────────────────────────────────────
  *
  * `TrustedEffectResolver.resolve(normalizedInput, workspaceRoot)`
- * **拿不到 toolName**（`ports/index.ts:312`）。一个共享实例说不出自己
+ * **拿不到 toolName**（见 `ports/index.ts` 里 `TrustedEffectResolver` 的声明 ——
+ * 【定】引接口名不引行号：行号会漂，而漂了之后没有任何东西会说话）。
+ * 一个共享实例说不出自己
  * 正在解析哪个工具，于是 Trace 上和审批面上只能写"某个 MCP 工具" ——
  * 而 `resolverRef` 本来就是逐工具声明的，注册表按 `id@version` 查，
  * 一个工具一条记录是这套机制原本就支持的用法。
@@ -191,7 +193,18 @@ export function bridgeTools(conn: McpConnection): BridgedTool[] {
      *     handler 调当前实现，**静默错配**。
      *
      * 加上 digest 之后，后一种退化成前一种：至少变成一个**看得见**的失败。
-     * 而 `assertMcpToolsUnchanged`（facade 那道闸门）会在抛之前先说出人话。
+     *
+     * ⚠️ 【定】**facade 那一侧没有闸门，只有一条事实。** 这里此前写着
+     * 「`assertMcpToolsUnchanged`（facade 那道闸门）会在抛之前先说出人话」——
+     * 而全仓**没有**这个函数。真实的东西是 `resume()` 里那条
+     * `ResumeExternalToolsUnverifiable` 事件（带 `toolNames` 与 `drifted`）：
+     * 它**报告，不拦截**，理由写在 §18.3 里（Atlas 核对不了外部世界，
+     * 做不到就说出来，而不是假装验过）。
+     *
+     * 所以真正会拦下漂移的只有一处：`DeclarativeEffectResolver` 查不到
+     * `resolverRef` 时抛的那句「注册表里没有它」。它的措辞指向"装配错误"，
+     * 与真实成因（服务器换了 schema）差一层 —— 而上面那条事件正是补这一层的。
+     * 两者缺一不可，但它们**不是同一个东西**，别再把事件写成闸门。
      * ══════════════════════════════════════════════════════════════════════
      */
     const identity = digest(
@@ -234,7 +247,7 @@ export function bridgeTools(conn: McpConnection): BridgedTool[] {
        * 【定】`NONE`，即使我们真的把 MCP 的 progress notification 接到了
        * `ctx.onProgress`（见 client.ts 细节 ③）。
        *
-       * 三个 mode 的语义里，`HEARTBEAT` 是"**周期性**回报，intervalMs 是间隔上界"。
+       * 三个 mode 的语义里，`HEARTBEAT` 是"执行期间**周期性**回报"。
        * 而**服务器发不发进度通知完全由它自己决定** —— 声明 HEARTBEAT 就是
        * 承诺一个可能不存在的节奏。`NONE` 的语义恰好是"允许偶尔报，不承诺节奏"。
        * `fetch_url` 因为一模一样的理由从 HEARTBEAT 改回过 NONE。
@@ -244,8 +257,8 @@ export function bridgeTools(conn: McpConnection): BridgedTool[] {
       /**
        * 【定】恒 `true`，且**不注册 MCP 的 VerificationPort**。
        *
-       * 两者合起来让 `canObserve` 恒假（`facade/index.ts:460`：
-       * `requiresPreFingerprint && pre === undefined` → false），
+       * 两者合起来让 `canObserve` 恒假（`facade/index.ts` 里 `resume()` 的分支
+       * 判定：`requiresPreFingerprint && pre === undefined` → false），
        * 于是 `execute` 档的工具落 §18.2 **分支三**，与 `run_shell` 同档。
        *
        * 这是诚实的结果不是偷懒：崩在 `browser_click` 中途，

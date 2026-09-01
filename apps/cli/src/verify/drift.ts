@@ -109,9 +109,12 @@ async function main(): Promise<void> {
     protocol: { ...lenient.protocol, honorsDisableParallelToolCalls: true },
   };
   const dHonors = new DriftDetector(honors);
-  const r1multi = dHonors.observeToolCallCount(8, true);
-  const r1single = dHonors.observeToolCallCount(1, true);
-  const r1notSent = new DriftDetector(lenient).observeToolCallCount(1, true);
+  const r1multi = dHonors.observeToolCallCount(8);
+  const r1single = dHonors.observeToolCallCount(1);
+  // 【定】第三条用的是**声明开关无效**的 profile —— 那一档 `buildRequest`
+  // 根本不发这个参数。它此前靠一个恒为 true 的 `disabledParallelRequested`
+  // 入参表达，而那个参数四个调用点全传 true，已经删掉（见 DriftDetector）。
+  const r1notSent = new DriftDetector(lenient).observeToolCallCount(1);
   fact("声明开关有效 ＋ 收到 8 条", r1multi ? `报漂移（${r1multi.disposition}）` : "未报");
   fact("声明开关有效 ＋ 收到 1 条", r1single ? "报漂移" : "未报（正确：单条没有信息量）");
   fact("声明开关无效 ＋ 收到 1 条", r1notSent ? "报漂移" : "未报（正确：开关根本没发出去）");

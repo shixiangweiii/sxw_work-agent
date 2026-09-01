@@ -126,10 +126,20 @@ export function workspaceStorage(workspaceRoot: string): { dbPath: string; trace
  * 默认装配的工具集（阶段 3 §2.1 的工具账）。
  *
  * ```text
- * tools/common  场景工具  list_dir stat read_file search write_file edit_file fetch_url now
- *               机制工具  read_blob request_handoff ask_user
- * micro-cases   测量工具  append_log slow_write
+ * tools/common  场景工具  list_dir stat read_file search write_file edit_file
+ *                         fetch_url now run_shell            ← 9（run_shell 见下）
+ *               机制工具  read_blob request_handoff ask_user  ← 3
+ * micro-cases   测量工具  append_log slow_write               ← 2
  * ```
+ *
+ * ⚠️ 【定】`run_shell` **必须列在这张表里**。它此前漏了，于是这段注释报的是
+ * 13 个而实际装 14 个 —— 而这张表的全部用途就是让人一眼读出起步价
+ * （14 × 180 ≈ 2520 token），少一个就少 180，偏差方向还是"看起来更省"。
+ * 阶段 3.5 加它的时候只改了 `tools/common/src/index.ts` 的那份清单。
+ *
+ * ⚠️ 【定】`run_shell` 只在 `isSandboxAvailable()` 为真时进工具面
+ * （见 `commonSceneTools`），所以**非 darwin 上这个数组是 13 个**，
+ * 固定开销少 180 —— 跨平台比对 token 数据时要记得这一条。
  *
  * 【定】它是全仓唯一一处「工具清单」。固定开销基线（每工具约 180 token，
  * §16.1【定·实测】）随这个数组长度线性增长 —— **这是随时可读的过拟合警报**：
@@ -1140,8 +1150,23 @@ class SimpleRedaction implements RedactionPort {
        */
       for (const field of profile.fieldsToRedact ?? []) {
         const re = new RegExp(`("${field}"\\s*:\\s*)"[^"]*"`, "g");
-        text = text.replace(re, (_m, head: string) => {
+        text = text.replace(re, (m: string, head: string) => {
           if (!fields.includes(field)) fields.push(field);
+          /**
+           * 【定】这一支也要累加 `bytes`。
+           *
+           * 它此前只往 `fields` 里加名字、**不动字节数** —— 于是一次
+           * 「按字段名打掉了 4KB 凭证」的脱敏，`bytesRedacted` 报 0。
+           * 下面按正则打的那一支从一开始就在累加，两支口径不一致。
+           *
+           * 后果不是差几个字节：`RedactionReport` 的全部用途就是**在不记录
+           * 内容本身的前提下**回答「这次到底打掉了多少东西」，一个恒 0 的
+           * 数会让「有没有真的脱敏过」这个问题在事后答不出来。
+           *
+           * 只算被替换掉的**值**那一段（`m` 减去 `head`）—— `head` 是
+           * `"field":` 这个键名前缀，它原样留在输出里，没有被脱敏。
+           */
+          bytes += Buffer.byteLength(m, "utf8") - Buffer.byteLength(head, "utf8");
           return `${head}"[REDACTED:${field}]"`;
         });
       }

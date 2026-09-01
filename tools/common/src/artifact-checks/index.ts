@@ -301,17 +301,6 @@ function invalidTextReason(content: string): string | undefined {
 }
 
 /**
- * ZIP 结构是否可解开。
- *
- * 【定】只做**结构**判定，不真的解压。
- * 判 local file header 魔数 `PK\x03\x04` 与 End of Central Directory
- * `PK\x05\x06` —— 一个被截断的 ZIP（下载中断、写到一半崩了）恰好会缺
- * 后者，而那是最常见的坏 ZIP 形态。
- *
- * 不引入解压库是刻意的：运行期依赖只有两个（§工程基线），
- * 为一条首批检查加一个依赖不划算，而魔数判定已经能抓住主要失败形态。
- */
-/**
  * 内容 → 可读的文本。
  *
  * 【定】非 fatal 解码：无效字节变 U+FFFD，正好被 `invalidTextReason` 抓住。
@@ -360,6 +349,24 @@ function magicReason(path: string, content: ArtifactContent): string | undefined
   );
 }
 
+/**
+ * ZIP 结构是否可解开。
+ *
+ * 【定】只做**结构**判定，不真的解压。
+ * 判 local file header 魔数 `PK\x03\x04` 与 End of Central Directory
+ * `PK\x05\x06` —— 一个被截断的 ZIP（下载中断、写到一半崩了）恰好会缺
+ * 后者，而那是最常见的坏 ZIP 形态。
+ *
+ * 不引入解压库是刻意的：运行期依赖只有四个（§工程基线），
+ * 为一条首批检查加一个依赖不划算，而魔数判定已经能抓住主要失败形态。
+ *
+ * 【定】强度就到这里，**不许把「像」说成「能」**（二次评审 codex P1-5）：
+ * `run_shell` 的 `artifact_path` description 曾经写「zip 能不能解开」，
+ * 而这里从来只判头尾。措辞与实现的距离没有任何判据量得出来，只有人守得住。
+ *
+ * （这段注释此前挂错了位置 —— 它写在 `asText` 头上、被后一个 doc 块顶掉，
+ * 而本函数一行文档都没有。与 `sandbox.ts` 的 `sbplString` 是同一天同一形态。）
+ */
 function zipStructureReason(content: ArtifactContent): string | undefined {
   /**
    * 【定】字节这一档必须原样用，不能再经字符串（ADR-0010）。

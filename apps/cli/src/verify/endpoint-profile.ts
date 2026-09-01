@@ -60,6 +60,14 @@ async function main(): Promise<void> {
   // ── B. protocolRoleOf 的判定必须随声明改变
   section("B. 同一个推理块，两个端点下的协议角色");
 
+  /**
+   * 【定】字段要与 `ContextItem` 当前的形状一致。
+   *
+   * 这里此前多带一个 `redactionApplied: true` —— 那个字段已于 2026-08-31 删除，
+   * 而 `as unknown as ContextItem` 这层断言让编译器完全看不见它。
+   * 夹具比被测类型多一个字段是无害的，但它是一条**读起来像事实的假话**：
+   * 下一个人会以为 `ContextItem` 上还有那个字段。
+   */
   const reasoningItem = {
     id: "ci_x",
     kind: "MODEL_REASONING",
@@ -69,7 +77,6 @@ async function main(): Promise<void> {
     content: { type: "reasoning", text: "我先看看目录", signature: "" },
     contentHash: "x",
     estimatedTokens: 10,
-    redactionApplied: true,
     createdAt: 0,
   } as unknown as ContextItem;
 

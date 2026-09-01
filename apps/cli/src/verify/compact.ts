@@ -37,6 +37,7 @@
 import {
   CollectingTraceSink,
   DEFAULT_CONTEXT_POLICY,
+  compactMessages,
   findOrphanResults,
   findUnpairedToolUses,
   type ContextMessage,
@@ -356,8 +357,75 @@ async function main(): Promise<void> {
         : `推理块没被剥掉：DROPPABLE 下仍携带 ${marksInLast} 个片段，与对照的 ${controlMarks} 无差别`,
     );
 
+    /**
+     * ── G：「最近两轮」是不是真的两轮（2026-09-01 评审 A1）───────────────
+     *
+     * 这一段是补给一条**已经存在过的缺陷**的：判定曾经写成
+     * `working.map(m => m.turn).sort(desc).slice(0, 2)` —— 取的是**数组的前两项**
+     * 而不是前两个**不同**的轮号。
+     *
+     * 【定】它此前没有任何判据，而且**不可能**被别的判据顺带抓住**：
+     * 保护窗口小一半既不报错（配对组由 `protocolUnits` 另行保护，不变量 8 不破），
+     * 也不改变 freedTokens 的方向（C 段看的是"每轮要干多少活"，丢得更多只会
+     * 让那条更绿）。也就是说它是一个**只会让 Compact 更激进**的偏差 ——
+     * 而 Compact 的判据几乎都在验"它真的丢了东西"。
+     */
+    section("G. 「最近两轮」是不是真的两轮");
+    console.log(
+      "   §11.6 要求完整保留最近两轮 —— 未完成 Action 与错误恢复状态都在那里。\n" +
+        "   一个典型回合至少两条消息（assistant 的 tool_call ＋ user 的 tool_result），\n" +
+        "   于是不去重的 `[4,4,3,3,…].slice(0,2)` 得到 [4,4]、Set 收成 {4}：\n" +
+        "   「最近两轮」实际只保护了最近一轮，而丢掉的那一轮恰好装着「上一步为什么失败」。\n",
+    );
+
+    /**
+     * 【定】夹具必须**每轮两条消息** —— 那正是触发条件本身。
+     *
+     * 每轮一条的话，有 bug 与没 bug 的实现给出**同一个答案**，这条判据
+     * 就退化成装饰（摸底考试那条教训：「这条判据要区分的两个值，
+     * 在夹具里相等吗？相等就先去改夹具，再写断言」）。
+     *
+     * 【定】全部用纯 text 的 assistant 消息：不带 tool_call 就不会被
+     * `protocolUnits` 聚成大单元，也不会被 `isUserInput` 保护 ——
+     * 于是唯一还在起作用的保护就是 `recentTurns`，判据因此只测它一个。
+     */
+    const mkMsg = (role: "user" | "assistant", turn: number, text: string): ContextMessage => ({
+      role,
+      turn,
+      content: [{ type: "text", text }],
+    });
+    const twoPerTurn: ContextMessage[] = [
+      mkMsg("user", 0, "任务：把这件事做完"),
+      ...[1, 2, 3, 4].flatMap((t) => [
+        mkMsg("assistant", t, `第 ${t} 轮上半：${"补充说明".repeat(20)}`),
+        mkMsg("assistant", t, `第 ${t} 轮下半：${"补充说明".repeat(20)}`),
+      ]),
+    ];
+    const recentResult = compactMessages(twoPerTurn, {
+      protocol: composed.ports.protocol,
+      // 压到 1：逼它把所有**不受保护**的单元都丢掉，剩下的就是保护集本身。
+      targetTokens: 1,
+      now: Date.now(),
+    });
+    const keptTurns = [...new Set(recentResult.kept.map((m) => m.turn))].sort((a, b) => a - b);
+
+    fact("夹具（每轮两条消息）", "turn 0 = user 任务；turn 1/2/3/4 各两条 assistant");
+    fact("Compact 之后 kept 里的轮号", keptTurns.join(", ") || "（空）");
+    fact("期望", "0（当前目标，永不丢）＋ 3 与 4（最近两轮）；2 应当被丢掉");
+
+    const recentTwoOk =
+      keptTurns.includes(4) && keptTurns.includes(3) && !keptTurns.includes(2);
+    verdict(
+      recentTwoOk,
+      recentTwoOk
+        ? "最近两轮（3 与 4）都完整保留，更早的 turn 2 被丢掉 —— 「最近两轮」名副其实"
+        : `保护窗口不对：kept 里是 [${keptTurns.join(", ")}]，期望含 3 与 4、不含 2。` +
+          `只剩 4 说明轮号没有去重（那正是这条判据要抓的形态）`,
+    );
+
     section("总判定");
-    const allOk = triggered && writebackOk && boundaryOk && rebuildOk && strippedOk;
+    const allOk =
+      triggered && writebackOk && boundaryOk && rebuildOk && strippedOk && recentTwoOk;
     verdict(
       allOk,
       allOk

@@ -417,11 +417,19 @@ export class HarnessRuntime {
         t.definition.name.startsWith("mcp__"),
       );
       if (externalFrozen.length > 0) {
-        const current = new Map(
+        /**
+         * 【定】名字不能叫 `current` —— 那会**遮蔽**外层那个
+         * `const current: RunStatus`（生命周期闸门读回来的状态行），
+         * 而两者的类型毫不相干。块作用域让它今天不出错，
+         * 但下面几十行里还在用外层那个 `current` 判 `WAITING_FOR_INTERACTION`
+         * 与 `RECOVERY_REQUIRED`：一个读代码的人得先分清哪个 `current`
+         * 才敢动这一段。
+         */
+        const currentVersionOf = new Map(
           (this.deps.currentToolSnapshots ?? []).map((t) => [t.definition.name, t.version]),
         );
         const drifted = externalFrozen
-          .filter((t) => current.get(t.definition.name) !== t.version)
+          .filter((t) => currentVersionOf.get(t.definition.name) !== t.version)
           .map((t) => t.definition.name);
         yield await emit("ResumeExternalToolsUnverifiable", {
           toolNames: externalFrozen.map((t) => t.definition.name),

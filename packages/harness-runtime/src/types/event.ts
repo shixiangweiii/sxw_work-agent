@@ -202,4 +202,13 @@ interface EvBase {
 
 type Ev<T extends string, P> = EvBase & { type: T; payload: P };
 
-export type RunEventType = RunEvent["type"];
+/**
+ * ── 这里**故意没有** `RunEventType` ────────────────────────────────────
+ *
+ * 它曾经是 `export type RunEventType = RunEvent["type"]`，全仓**零引用** ——
+ * 需要那个联合的地方（`emit()` 的泛型、投影的 switch）都直接写
+ * `RunEvent["type"]`，一个别名反而多一层要去查的间接。
+ *
+ * 与 `STAGE1_ACTIVE_*` 那批别名同一条：别名让「这个联合叫什么」有两个答案，
+ * 而两个答案迟早会分叉。真需要缩写的那天再加，那时它会有第一个引用点。
+ */

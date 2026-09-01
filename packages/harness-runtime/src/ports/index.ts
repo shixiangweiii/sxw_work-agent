@@ -52,12 +52,25 @@ export interface ModelRequest {
   modelId: string;
 }
 
-export type ModelStreamEvent =
-  | { type: "text_delta"; text: string }
-  | { type: "reasoning_delta"; text: string }
-  | { type: "tool_input_delta"; index: number; partialJson: string }
-  | { type: "block_start"; index: number; blockType: string }
-  | { type: "block_stop"; index: number };
+/**
+ * 流式事件。**只有一种**，因为只有一种有消费者。
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ * 【定】这里此前还有四个变体：`reasoning_delta` / `tool_input_delta` /
+ * `block_start` / `block_stop`。形状适配器忠实产出它们，而**全仓唯一的
+ * 消费者是 `run-loop` 那一句 `if (sev.type === "text_delta")`** ——
+ * 另外四个只被一个同样没人调的 `ModelProtocolPort.isBlockClosed` 读过。
+ * 两个零消费者互相引用，看起来像一条接好的链路。
+ *
+ * 【定】删掉它们**不丢任何信息**：块的闭合判定（§8.4「未闭合的 Tool Call
+ * 不得转为 ProposedAction」）由形状适配器的 `assemble()` 自己做，
+ * 它读的是同一个 `hasExplicitBlockCloseEvent` 声明，而且那份是活的。
+ *
+ * 要做「界面上显示推理过程」的那天，第一步是写那个消费者，
+ * 第二步才是把 `reasoning_delta` 加回来 —— 不是先摆一个没人读的事件类型。
+ * ══════════════════════════════════════════════════════════════════════
+ */
+export type ModelStreamEvent = { type: "text_delta"; text: string };
 
 export interface ModelInvocationResult {
   /** 规范化后的助手消息内容。形状差异已被适配器吸收。 */
@@ -85,7 +98,21 @@ export interface ModelProtocolPort {
   /** 某个 ContextItem 在当前端点下能否被丢弃 / 是否需要占位。 */
   protocolRoleOf(item: ContextItem): ContextItem["protocolRole"];
   classifyError(err: unknown): RuntimeErrorRecord;
-  isBlockClosed(index: number, seen: ModelStreamEvent[]): boolean;
+  /**
+   * 【定】这里**没有** `isBlockClosed`。
+   *
+   * 它曾经在：签名是 `(index, seen: ModelStreamEvent[]) => boolean`，
+   * 形状适配器认真实现了它（有显式 stop 事件就用事件，没有就用
+   * 「后继 index 已出现」），**而全仓零调用点**。
+   *
+   * 更要紧的是它不是"少了个消费者"，是**一份重复实现**：同一条闭合规则
+   * 在 `shape-anthropic-messages/client.ts` 的 `assemble()` 里还有一份，
+   * 读同一个 `hasExplicitBlockCloseEvent` 声明，而**那一份是活的**
+   * （§8.4「未闭合的 Tool Call 不得转为 ProposedAction」靠它）。
+   *
+   * 两份同规则、一份没人调 —— 这正是本仓反复清理的形态：改活的那份时，
+   * 死的那份不会有任何征兆地留在原地，下一个人读到它会以为规则在 Port 上。
+   */
   /** 只读。供 Context 层判定档位，不供主循环读取。 */
   readonly profile: EndpointCapabilityProfile;
 }
@@ -403,13 +430,36 @@ export interface ObservationResult {
   at: Timestamp;
 }
 
-/** ClockPort —— 测试注入 FakeClock。 */
+/**
+ * ClockPort —— 时间与可打断的等待。
+ *
+ * 【定】这里**没有** FakeClock。它写在 V05 §24.2 里，但全仓零使用者，
+ * 2026-08-31 连同 `DeterministicIdGenerator` 一起删了 —— 验收脚本用的是
+ * 真时钟 ＋ 可控慢的工具。这条注释此前写着「测试注入 FakeClock」，
+ * 而 `testkit/clock/index.ts` 的文件头同时写着「这里没有 FakeClock」：
+ * 同一件事两处相反的说法，读的人只会记住先看到的那句。
+ */
 export interface ClockPort {
   now(): number;
+  /**
+   * 等 `ms` 毫秒，或等到 `signal` 被 abort —— **两种情况都正常返回，不抛**。
+   *
+   * 【定】打断时 resolve 而不是 reject。理由见 `SystemClock.sleep` 的实现注释：
+   * 唯一的消费者在 `run-loop` 的 catch 块里 await 它，一个 AbortError 会
+   * 穿过整个 generator，绕过 `finish()` 与具名 Terminal（循环纪律第 2 条）。
+   * 判「有没有被取消」一律读 signal，不读这个函数的返回方式。
+   */
   sleep(ms: number, signal?: AbortSignal): Promise<void>;
 }
 
-/** IdGeneratorPort —— 测试注入确定性实现，Replay 才可能逐字节一致。 */
+/**
+ * IdGeneratorPort —— id 分配。
+ *
+ * 【定】这里**没有**确定性实现。「Replay 要能逐字节一致」的理由成立，
+ * 但 Replay 至今没做，`DeterministicIdGenerator` 全仓零使用者，已于
+ * 2026-08-31 删除。真做 Replay 的那天第一步是写比对器，不是先摆一个没人调的
+ * 生成器 —— 见 `testkit/id-generator/index.ts` 的文件头。
+ */
 export interface IdGeneratorPort {
   next(prefix: string): string;
 }

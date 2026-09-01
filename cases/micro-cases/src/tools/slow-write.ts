@@ -34,8 +34,9 @@ import type {
   ToolExecutionOutcome,
   ToolSnapshot,
 } from "@workagent/harness-runtime";
-import { asId, makeError } from "@workagent/harness-runtime";
+import { asId } from "@workagent/harness-runtime";
 import {
+  cancelledError,
   classifyFsError,
   writeBoundaryRefusal,
   resolveToolPath,
@@ -75,10 +76,14 @@ export const slowWriteDefinition: ToolDefinition = {
   /**
    * 慢工具必须回报进展（V05 §16.2）。
    *
-   * 【定】intervalMs 是 200，与实现一致 —— `slices` 按 `delay/200` 切，
-   * 每段回报一次。此前写的是 1000，而实现每 200ms 报一次：
-   * 声明比实现慢五倍，`verify:progress` A 段「600ms 至少报 3 次」这条期望
-   * 依赖的其实是实现的 200，按声明算一次都不该有（阶段 3 收口批改）。
+   * 【定】实现每 200ms 报一次（`slices` 按 `delay/200` 切，每段一次），
+   * 而 `verify:progress` A 段的「600ms 至少报 3 次」正是按这个节奏写的。
+   *
+   * 【定】节奏**不在声明里** —— `ProgressReportingDescriptor` 只有 `mode`。
+   * 这段注释此前写着「intervalMs 是 200，与实现一致」，而那个字段在
+   * 2026-08-31 那批已被删除：一句「声明与实现一致」指着一个不存在的声明。
+   * 要改节奏就改下面那个除数，同时改 `verify:progress` 的期望值 ——
+   * 两者的一致性只有那条判据在管。
    */
   progressReporting: { mode: "HEARTBEAT" },
   verification: {
@@ -114,19 +119,15 @@ export async function executeSlowWrite(
    */
   const slices = delay > 0 ? Math.max(1, Math.ceil(delay / 200)) : 0;
   for (let i = 0; i < slices; i++) {
+    // 【定】走 `cancelledError`（唯一一份）。逐次不同的那句「等了多久」
+    // 由它的 `detail` 参数承载 —— 那个参数正是为了让第四处也能共用而加的，
+    // 否则这里会以「我要多说一句」为由再抄一遍。
     if (ctx.signal.aborted) {
       return {
         ok: false,
         output: "",
         sideEffectState: "NOT_STARTED",
-        error: makeError({
-          code: "TOOL_CANCELLED",
-          source: "RUNTIME",
-          category: "CANCELLED",
-          retryability: "SAME_INPUT_IMMEDIATE",
-          sideEffectState: "NOT_STARTED",
-          safeMessage: `slow_write 在写入前被取消（已等待 ${i * 200}ms / 共 ${delay}ms）`,
-        }),
+        error: cancelledError("slow_write", `已等待 ${i * 200}ms / 共 ${delay}ms`),
       };
     }
     ctx.onProgress(`准备写入 ${input.path}（${i + 1}/${slices}）`);

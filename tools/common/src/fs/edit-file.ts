@@ -41,7 +41,7 @@ import type {
   ToolSnapshot,
 } from "@workagent/harness-runtime";
 import { asId, makeError } from "@workagent/harness-runtime";
-import { classifyFsError, resolveToolPath, writeBoundaryRefusal } from "./fs-common.js";
+import { cancelledError, classifyFsError, resolveToolPath, writeBoundaryRefusal } from "./fs-common.js";
 
 export const editFileDefinition: ToolDefinition = {
   id: asId("tool_edit_file"),
@@ -178,20 +178,9 @@ export async function executeEditFile(
     };
   }
 
+  // 【定】走 `cancelledError`（唯一一份），见 fs-common.ts 那段。
   if (ctx.signal.aborted) {
-    return {
-      ok: false,
-      output: "",
-      sideEffectState: "NOT_STARTED",
-      error: makeError({
-        code: "TOOL_CANCELLED",
-        source: "RUNTIME",
-        category: "CANCELLED",
-        retryability: "SAME_INPUT_IMMEDIATE",
-        sideEffectState: "NOT_STARTED",
-        safeMessage: "edit_file 在写入前被取消",
-      }),
-    };
+    return { ok: false, output: "", sideEffectState: "NOT_STARTED", error: cancelledError("edit_file") };
   }
 
   const at = hits[0]!;
