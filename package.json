@@ -32,7 +32,8 @@
     "verify:scenarios": "tsx apps/cli/src/verify/scenarios.ts",
     "verify:shell": "tsx apps/cli/src/verify/shell.ts",
     "verify:ui": "tsx apps/cli/src/verify/ui.ts",
-    "verify:all": "npm run verify:endpoint-profile && npm run verify:pairing && npm run verify:resume && npm run verify:compact && npm run verify:persistence && npm run verify:budget && npm run verify:crash && npm run verify:drift && npm run verify:tools && npm run verify:artifact && npm run verify:progress && npm run verify:shell && npm run verify:ui && npm run verify:scenarios",
+    "verify:mcp": "tsx apps/cli/src/verify/mcp.ts",
+    "verify:all": "npm run verify:endpoint-profile && npm run verify:pairing && npm run verify:resume && npm run verify:compact && npm run verify:persistence && npm run verify:budget && npm run verify:crash && npm run verify:drift && npm run verify:tools && npm run verify:artifact && npm run verify:progress && npm run verify:shell && npm run verify:ui && npm run verify:mcp && npm run verify:scenarios",
     "eval:suite": "tsx eval/suite/index.ts",
     "probe:reasoning-tokens": "tsx apps/cli/src/verify/reasoning-tokens.ts",
     "probe:binary-chain": "tsx apps/cli/src/verify/probe-binary-chain.ts",
@@ -40,6 +41,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.65.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "dotenv": "^17.2.0",
     "turndown": "^7.2.4"
   },

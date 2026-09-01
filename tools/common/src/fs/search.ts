@@ -101,6 +101,8 @@ export const searchDefinition: ToolDefinition = {
     "要在很多文件里定位内容时用本工具，不要逐个 read_file。",
   inputSchema: {
     type: "object",
+    // 【定】显式严格：未声明的键丢弃。见 validateAndNormalize 的标准语义那段。
+    additionalProperties: false,
     properties: {
       pattern: { type: "string", description: "要找的子串。忽略大小写，不是正则" },
       path: { type: "string", description: '起始目录，相对 workspace 根。默认 "."' },

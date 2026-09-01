@@ -41,7 +41,6 @@ import { isInsideWorkspace } from "@workagent/tools-common";
 import {
   autoGrantVerdict,
   compose,
-  DEFAULT_TOOLS,
   gitProvenance,
   hostOf,
   REPO_ROOT,
@@ -69,7 +68,7 @@ export interface RunHostOptions {
   /** 验收脚本用：注入脚本化 ModelPort、子集工具、固定时区等。 */
   composeOverrides?: Pick<
     ComposeOptions,
-    "modelPortOverride" | "profileOverride" | "tools" | "timezone" | "contextPolicy"
+    "modelPortOverride" | "profileOverride" | "tools" | "timezone" | "contextPolicy" | "mcp"
   >;
 }
 
@@ -191,7 +190,16 @@ export class RunHost {
   // ──────────────────────────────────────────────────────────── 只读
 
   info(): UiServiceInfo {
-    const tools = this.opts.composeOverrides?.tools ?? DEFAULT_TOOLS;
+    /**
+     * 【定】读 `composed.tools`，**不要**在这里重算成
+     * `composeOverrides?.tools ?? DEFAULT_TOOLS`。
+     *
+     * 那是它原来的写法，而接了外部 MCP 之后它立刻不成立：MCP 的工具是
+     * `compose()` 内部追加的，重算出来的列表**少掉那一截** —— 于是界面上
+     * 报的工具数与固定开销起步价都偏小，而模型手里拿着的是全量。
+     * 这种错看起来很正常（数字合理，只是偏小），最难被发现。
+     */
+    const tools = this.composed.tools;
     return {
       workspaceRoot: this.opts.workspaceRoot,
       dbPath: this.opts.dbPath,

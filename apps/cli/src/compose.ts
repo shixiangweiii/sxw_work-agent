@@ -55,6 +55,7 @@ import {
   type HandoffChannel,
   type QuestionChannel,
 } from "@workagent/tools-common";
+import type { McpRuntime } from "@workagent/tools-mcp";
 import { CompositeToolHandler, CompositeVerifier } from "./composite.js";
 import {
   RandomIdGenerator,
@@ -78,6 +79,26 @@ export const REPO_ROOT = resolve(HERE, "../../..");
  * 【定】它不再放库。见 `workspaceStorage()`。
  */
 export const DEFAULT_STATE_DIR = ".workagent-state";
+
+/**
+ * MCP 配置文件名（住在 `DEFAULT_STATE_DIR` 里，与 `workspaces.json` 同目录）。
+ *
+ * ── 【定】跨 workspace，**不**放 `<ws>/.workagent/` ────────────────────
+ *
+ * 与库、trace 的规则刻意不同，理由是进程生命周期：MCP 服务器绑 Atlas 会话、
+ * 跨 Run 存活（登录态在浏览器进程里）。放进 workspace 目录的话，
+ * 界面上切一次工作空间就意味着换一份 MCP 配置 → 重连 → **浏览器关掉、
+ * 登录态没了**，而用户完全不知道是切目录导致的。
+ *
+ * 换句话说：库跟着 workspace 走，是因为 Run 属于某个 workspace；
+ * MCP 不跟着走，是因为那个浏览器窗口不属于任何一个 workspace。
+ */
+export const MCP_CONFIG_FILE = "mcp.json";
+
+/** `.workagent-state/mcp.json` 的绝对路径。`--mcp-config` 可覆盖。 */
+export function defaultMcpConfigPath(): string {
+  return resolve(REPO_ROOT, DEFAULT_STATE_DIR, MCP_CONFIG_FILE);
+}
 
 /**
  * 一个 workspace 一套存储。
@@ -453,6 +474,23 @@ export interface ComposeOptions {
    * 不传通道时报明确装配错误是刻意的差别：没人接管是失败，没人回答不是。
    */
   question?: QuestionChannel;
+  /**
+   * 外部 MCP 服务器带来的工具面（`@workagent/tools-mcp`）。
+   *
+   * ── 【定】它是**已经连好的**运行时，不是一个配置路径 ────────────────────
+   *
+   * 建连、`tools/list`、翻译成 ToolSnapshot 全都发生在 `compose()` **之前**，
+   * 由入口（`main.ts`）`await` 完再传进来。两个理由：
+   *
+   *   ① 工具面必须在 Run 启动时冻结进 `RunSpec.agentSpec.toolSnapshots` ——
+   *      §18.2 三条恢复分支读的是冻结的那一份，中途长出新工具会让
+   *      同一条 transcript 在 resume 时走进另一条分支，而盘上看不出来；
+   *   ② `compose()` 保持同步。改成 async 会波及 main.ts / run-host.ts /
+   *      15 条 verify 脚本 / eval，而那些地方一件正事都不多干。
+   *
+   * 不传 = 没有 MCP，工具面就是 `DEFAULT_TOOLS`。
+   */
+  mcp?: McpRuntime;
 }
 
 export interface Composed {
@@ -467,6 +505,19 @@ export interface Composed {
   transcript: TranscriptStorePort;
   db: Db;
   profile: EndpointCapabilityProfile;
+  /**
+   * **实际装配好**的工具面（`opts.tools` ＋ MCP 带来的那些）。
+   *
+   * ── 【定】它必须从这里读，不许在别处重算 ────────────────────────────────
+   *
+   * `run-host.ts` 的 `info()` 此前写的是 `composeOverrides?.tools ?? DEFAULT_TOOLS`
+   * —— 一个**第二出处**。接了 MCP 之后它立刻不成立：界面上报的工具数与
+   * 起步价会少掉 MCP 那一截，而模型手里真实拿着的是全量。
+   *
+   * 更糟的是这种错**看起来很正常**：数字是个合理的数字，只是偏小。
+   * 一个「唯一出处」在加功能时长出第二个出处，是本仓反复清理的形态。
+   */
+  tools: ToolSnapshot[];
   /**
    * 实际配置的 baseUrl（S1）。
    *
@@ -541,9 +592,23 @@ export function compose(opts: ComposeOptions): Composed {
   if (!opts.modelPortOverride && !opts.profileOverride) {
     assertProfileMatchesEndpoint(profile, cfg.baseUrl);
   }
-  const notices = [...warnIfAssumed(profile), ...(modelMismatch ? [modelMismatch] : [])];
+  const notices = [
+    ...warnIfAssumed(profile),
+    ...(modelMismatch ? [modelMismatch] : []),
+    // MCP 装了几个工具、几个自动放行 —— 起步价与闸门档位都在这一行里，
+    // 而这两件事恰好是接入外部工具面最该被看见的代价。
+    ...(opts.mcp?.notices ?? []),
+  ];
 
-  const tools = opts.tools ?? DEFAULT_TOOLS;
+  /**
+   * 【定】MCP 的工具**追加在后面**，而不是让调用方自己拼进 `opts.tools`。
+   *
+   * `opts.tools` 的语义是"装哪些 Atlas 自己的工具"（验收脚本传子集用它）。
+   * 让每个入口各自去拼 `[...DEFAULT_TOOLS, ...mcp.snapshots]`，
+   * 会在加入口时留下"有的入口装了 MCP、有的没装"的不一致 ——
+   * 而那种不一致在绿灯下看不出来。这与 Composition Root 只有一份是同一条理由。
+   */
+  const tools = [...(opts.tools ?? DEFAULT_TOOLS), ...(opts.mcp?.snapshots ?? [])];
   const systemPrompt = opts.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
   const contextPolicy = opts.contextPolicy ?? DEFAULT_CONTEXT_POLICY;
 
@@ -603,6 +668,9 @@ export function compose(opts: ComposeOptions): Composed {
           ...(opts.question ? { question: opts.question } : {}),
         }),
         new MicroCaseToolHandler(),
+        // 外部 MCP。放最后 —— 前两个包的 `handles()` 认的是自家固定工具名，
+        // 而 MCP 的名字带 `mcp__` 前缀，三者不可能撞。
+        ...(opts.mcp ? [opts.mcp.handler] : []),
       ]),
     redaction: opts.portOverrides?.redaction ?? new SimpleRedaction(),
     /**
@@ -619,7 +687,20 @@ export function compose(opts: ComposeOptions): Composed {
      */
     effects:
       opts.portOverrides?.effects ??
-      new DeclarativeEffectResolver(new Map([[SHELL_RESOLVER_KEY, new ShellEffectResolver()]])),
+      new DeclarativeEffectResolver(
+        new Map([
+          [SHELL_RESOLVER_KEY, new ShellEffectResolver()],
+          /**
+           * MCP 是**逐工具**一条注册项，不是一条共用的。
+           *
+           * 【定】`TrustedEffectResolver.resolve(normalizedInput, workspaceRoot)`
+           * 拿不到 toolName，所以一个共享实例说不出自己在解析哪个工具 ——
+           * 而 Trace 与审批面上"这次要动的是哪个外部工具"是必须说清楚的。
+           * 注册表按 `id@version` 查，一工具一条本来就是这套机制支持的用法。
+           */
+          ...(opts.mcp?.resolvers ?? new Map()),
+        ]),
+      ),
     verification:
       opts.portOverrides?.verification ??
       new CompositeVerifier([
@@ -651,6 +732,9 @@ export function compose(opts: ComposeOptions): Composed {
     // 「当前端点是谁」是 Composition Root 的知识 —— 从这里往里传，
     // Runtime 自己没有任何途径去查它（那正是边界 2 要守的东西）。
     currentEndpointProfile: profile,
+    // 同上，第二维：resume 时用来判断冻结快照里的**外部工具**有没有漂移。
+    // 【定】只比对，不顶替 —— §18.2 的分支判定读的永远是冻结的那份。
+    currentToolSnapshots: tools,
   });
 
   const makeRunSpec = (task: string, entry: RunEntry = "CLI"): RunSpec => ({
@@ -714,6 +798,7 @@ export function compose(opts: ComposeOptions): Composed {
     transcript,
     db,
     profile,
+    tools,
     endpointBaseUrl: cfg.baseUrl,
     makeRunSpec,
     notices,

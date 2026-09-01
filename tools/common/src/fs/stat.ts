@@ -40,6 +40,8 @@ export const statDefinition: ToolDefinition = {
     "目标不存在时返回 exists:false 而**不是**报错 —— 「不存在」本身就是一个有效答案。",
   inputSchema: {
     type: "object",
+    // 【定】显式严格：未声明的键丢弃。见 validateAndNormalize 的标准语义那段。
+    additionalProperties: false,
     properties: {
       path: { type: "string", description: "相对 workspace 根的路径，也接受绝对路径" },
     },

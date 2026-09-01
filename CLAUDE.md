@@ -16,6 +16,232 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 当前状态
 
+### 通用 MCP 客户端能力（2026-08-31）：外部工具面接进来了
+
+依据 [ADR-0011](sxw_aicoding/ADR/0011-通过外部-MCP-接入浏览器能力.md)。
+起因是**一次真实的内网实测失败**：「访问内网网页 → 归档」第一步就断，
+因为它撞上 `fetch_url` 两条已拍板【定】的**交集** ——
+护栏 2 拒私网（且 `retryability: NEVER`，模型不会换写法重试）＋「不做登录态、
+不做 Cookie、不做浏览器」。这不是修 bug 能解决的，**它要求反转一条已拍板的决定**。
+
+```bash
+cp mcp.example.json .workagent-state/mcp.json    # 配好就能用，不用改任何代码
+npm run ui                                        # 浏览器任务用这个入口（见下）
+```
+
+新增 `tools/mcp/`（`@workagent/tools-mcp`）。运行期依赖 **3 → 4**
+（`@modelcontextprotocol/sdk`，17 个直接依赖 / 实测新增 94 个包），
+`verify:all` **165 → 198 条**（v1 交付 183，二次评审收口 +10，实测收口 +5），边界 grep 扩到 **13 条**（编号到 12）。
+
+> ### 【定】它的价值不在「能开浏览器」，在**凭证从头到尾不进 Atlas**
+>
+> 人在浏览器里登录，Atlas 只拿渲染后的内容。给 `fetch_url` 加 cookie 参数则
+> 立刻要求一整套凭证解析、脱敏与 Trace 隔离机制 —— 而全仓没有那个东西
+> （`SecretResolverPort` 那个空壳刚在 current-only 那批被删掉，
+> 注释写着「要做的那天先写实现」）。走 MCP 一行凭证代码都不用写。
+
+> ### 【定】能通用的秘密是**不翻译 schema**，抄自 opencode
+>
+> 读了 opencode 的 `mcp/catalog.ts`：`convertTool` 是全部抽象、约 40 行 ——
+> `inputSchema` 原样交给下游，**从不试图理解它**。
+>
+> 最自然的处置是「扩校验器支持 array / object / enum」。**不能这么写**：
+> 枚举就永远有下一个构造（`$ref` / `oneOf` / `prefixItems`…），
+> 而下一个构造就是下一次「接个新 MCP 得改 Atlas 代码」。
+> 改成**最小翻译** —— `validateAndNormalize` 变成「认识的照校、**不认识的原样放行**」。
+> 失败方向按外部工具定：拒绝一个不认识的构造，后果是**整个工具废掉**
+> （模型看得见、调得动、每次被 Runtime 挡在门口，且它无从改对）。
+>
+> 代价是索引签名让自家工具的关键字拼写错误不再被编译器抓住。
+> 对价是 `verify:tools` **B4 段**：自家工具的属性必须是标量、且只带 `type` / `description`。
+
+> ### 【定】二次评审抓到：**「不翻译」这条我只做到了一半**（2026-09-01）
+>
+> 入参那一侧漏了一个洞，而它恰恰推翻了这一批唯一的卖点。
+> `normalizeSchemaShell` 会给没有 `properties` 的 schema **伪造一个空的**，
+> 然后 `validateAndNormalize` 按这份伪造把模型入参**整个裁掉** ——
+> 校验通过、下游收到 `{}`、零报错。根级 `$ref` / `oneOf` /
+> `additionalProperties` / `patternProperties` 的服务器，接上就是坏的。
+>
+> **成因值得记**：过程记录里我明确论证过「未声明字段仍然丢弃，**这条不用改**」，
+> 理由是「模型不该发未声明字段」。那句话只有在 `properties` 完整覆盖所有参数时
+> 才成立，而**那是一个解析过 schema 才能下的判断**。
+> 我一边写着「从不试图理解那个 schema」，一边用了一个需要理解才成立的假设。
+>
+> 处置：`properties` 改可选，裁不裁按 **JSON Schema 的标准语义**判
+> （缺省允许，只有显式 `additionalProperties: false` 才丢），
+> 自家 14 个工具显式写上那一行。两类工具走**同一条规则**，
+> Runtime 因此仍然不需要知道「有 MCP 这回事」。
+>
+> ⚠️ **注入实测推翻了方案里写的靶子**：把伪造 `properties` 的写法加回去，
+> 判据**照样全绿** —— 承重的只有 `validateAndNormalize` 一处（`{}` 与
+> `undefined` 在那条路径上等价）。那处改动仍然保留（不该向模型谎报 schema），
+> 但**不能声称它是守卫**。与阶段 3.5「几条 `kills` 声称的因果不成立」同形态。
+
+> ### 【定】三条 P1 是同一个形态：**说了「理解了才能说的话」**
+>
+> 这一批的全部前提是「Atlas 不理解 MCP 的参数与返回」，而实现里有三处违反了它：
+>
+> | | Atlas 说了什么 | 它实际知道什么 |
+> |---|---|---|
+> | 脱敏 | `safeMessage` 的契约是「**已脱敏**，可展示给用户」 | 塞进去的是未经处理的服务器原文 |
+> | 入参 | 按伪造的 `properties` 裁剪 | 服务器没声明 properties |
+> | 审计 | `riskFacts` 有、`dataMovement` 无 ＝「没有数据外发」 | 去向完全未知 |
+>
+> **Case B 的 `SUCCESS` 是第四个实例**：Atlas 宣称成功，
+> 它知道的只有「zip 的 PK 魔数与 EOCD 完好」。
+>
+> 由此得到一个可复用的动作：**凡是 Atlas 对 MCP 说出的每一句话，
+> 先问「这句需要理解参数才能成立吗」** —— 需要，就不许说，或者如实说「我不知道」。
+>
+> `dataMovement` 的处置是**如实记「无法解析」**（先例：`effect-resolver.ts` 对
+> 解析不了的 URL 写 `"(无法解析)"`）。**「解析不了」不等于「可以不记」**：
+> 一个不存在的字段与「查过、没有外发」在事后完全不可区分。
+
+> ### 【定】审批**不是** MCP server 的安全边界（ADR-0011 已改写）
+>
+> ADR 原来同时写着「进程能读 `.env`、能联网、能任意写」和「唯一还在的闸门是
+> 审批和人」—— **这两句不能同时成立**。`connectMcpServers()` 跑在 compose
+> **之前**：在任何 Run、任何 ActionProposed、任何审批之前，那个进程已经以
+> 宿主用户身份跑起来了。
+>
+> 准确表述：**写入或选择 `mcp.json` 的人，已经向那条 command 授予了宿主用户级的
+> 代码执行权。** 逐次审批只约束「模型发起的**某一次** tool call」。
+> 示例配置因此**锁版本、不用 `@latest`**。
+
+> ### 【定】声明的来源只能是**人**，不读 MCP 的 `annotations`
+>
+> MCP 协议一个 Atlas 必填字段都不提供，而 `Tool.annotations` 里的
+> `readOnlyHint` / `idempotentHint` 看起来正好能填上。**一行都不许读** ——
+> 它们是服务器自述的，拿它决定审批档位等于**让被审计方书写自己的审计规则**
+> （与 `shouldUseSandbox` 那条「命令名匹配不是安全边界」同源）。
+>
+> 配置里一个词说三件事：`"read"` = 只读 ＋ 幂等 ＋ 自动放行 ＋ 报错记 `NO_EFFECT`；
+> `"execute"`（默认）= 非只读 ＋ 非幂等 ＋ 逐次审批 ＋ 报错记 `UNKNOWN`。
+> **用 `read` 不用 opencode 的 `allow`**：`allow` 表达偏好、`read` 表达属性，
+> 而从「别问我」推出「所以它只读」是一次不成立的合并 ——
+> 那会让 Atlas 在事实表里写假话。
+
+> ### 【定】`execute` 默认档有一个已回源码确认的后果
+>
+> `sideEffectState: UNKNOWN` → `settle-batch` push RecoveryItem →
+> `settle-outcome` 降成 `COMPLETED_WITH_LIMITS`。**不会**触发 `RECOVERY_REQUIRED`，
+> 但 **execute 档每报错一次，这个 Run 就再也拿不到 `SUCCESS`**。
+> 浏览器自动化里报错很常见，所以跑几次之后**应该**把只读工具标成 `"read"` ——
+> 不是嫌审批烦，是不想让那个降级信号变成**一盏永远亮着的灯**。
+
+> ### 【定】不得复用 `scopeKind: "PROCESS"` —— 会让审批面**说假话**
+>
+> 审批展示按 `scope.kind` 分派，而 `PROCESS` 那一支是 `run_shell` 专属的：
+> 它读 `input["command"]`，并打印「沙箱：只能写 workspace 与本次调用的 `$TMPDIR`」。
+> **MCP 工具没有任何沙箱** —— 复用它的后果是人在批准的那一刻看到一句
+> **方向相反的保证**，而命令原文那栏是「(读不到命令原文)」。
+>
+> `main.ts` 那句「按 scope.kind 判而不是按工具名判，将来任何一个 PROCESS scope
+> 的工具都自动获得同样的展示」**是对的，而这正是它的陷阱**：展示按 scope 泛化，
+> 内容却按工具特化。处置是新增 `EffectScope.kind: "EXTERNAL_TOOL"` ＋ 成对的
+> CLI / Web 展示（服务器名 ＋ 工具名 ＋ **完整入参 JSON** ＋ 一行「不在沙箱内」）。
+> **整份入参、不挑字段** —— Atlas 不解析 MCP 的参数，挑就等于假装看懂了它。
+
+> ⚠️ **四条代价，写在 ADR-0011 里，一条都不许假装没有**：
+> ① 沙箱不在（`run_shell` 有 seatbelt，MCP 子进程没有，唯一闸门是审批和人）；
+> ② **护栏 2 被绕过 —— 而这正是它有用的原因**（两个工具对同一件事给出相反答案，
+> 必须写明是刻意的，否则下一个人会来「统一」其中一个）；
+> ③ 登录态是 transcript 之外的隐藏状态（与阶段 3.5 拒绝持久 cwd 同形态，
+> 区别是这次那个隐藏状态就是用户要的东西本身）；
+> ④ **Atlas 的 workspace 边界对 MCP 子进程不成立** —— 不是弱，是不存在：
+> `riskFacts` 永远不会出现 `OUTSIDE_WORKSPACE`，因为没有任何东西在解析那些参数。
+
+> ⚠️ **浏览器任务用 `npm run ui`，不要用 `npm run dev`**。MCP 进程绑 Atlas 会话，
+> CLI 单次命令结束即退出 → 浏览器关闭。
+
+> ### 【定】交付集合里只放**最终版本**（2026-09-01 实测逼出来的）
+>
+> 实测 Run `run_18c20267c1a1`：上一个 Run 在 workspace 留下了 `images.zip`
+> （6.25MB / 49 个文件），而 `zip -9 ../images.zip …` 对**已存在的归档是追加**：
+>
+> | | |
+> |---|---|
+> | v2 | 6,412,214 B —— 上次的 49 个 ＋ 这次的 2 个，**内容是错的** |
+> | v3 | 155,558 B —— 模型看到 stdout 后 `rm` 重做，正确 |
+>
+> 两个版本**都 `ok`**（v2 确实是个结构完好的 zip，检查器没判错），于是
+> `deliveredArtifactIds` 同时列着它们 —— Atlas 宣称交付了**两份同名产物**，
+> 而磁盘上只有一份，另一份的 6.4MB 已经不可取回。
+>
+> 【定】**被后续版本取代的产物不是「交付物」，是中间状态。**
+> 它与 §17 已有的两条同源：不许把坏的列进去、不许把 INTERMEDIATE 列进去 ——
+> 三条都是「交付集合里不许出现一个对外宣称而实际不成立的东西」。
+>
+> 失败方向按「最终 / 被取代」分流，**不是一律降级**：
+> 最终版本坏 → `FAILED`；被取代的版本坏 → `COMPLETED_WITH_LIMITS`
+> （过程有瑕疵，最终交付物是好的）。被取代的失败**不许丢掉** ——
+> 丢掉的话「产出过坏产物后来自己修好了」与「一次就做对了」在结算上不可区分。
+>
+> ⚠️ **两条注入实测缺一不可**：改回「ok 的全收」→ 翻红；
+> 退化成「只留全局最后一条」→ 另一条版本链消失，也翻红。
+> 少了第二条，一个恒返回单元素的实现照样能让第一条绿。
+
+> ### 【定】ADR-0010 的「旧文件不得冒认」拦不住上面那个，而那是**对的**
+>
+> 那道守卫问的是「命令碰没碰它」（`mtimeMs + size` **完全没变**才拒），
+> 而 `zip` 追加**真的改了**这个文件。它没判错，是问题不在它的射程里。
+>
+> 真正缺的那一半已补上：`ProducedArtifact.replacedBytes` ——
+> 「执行前同名文件有多少字节」。`run_shell` 早就在 `artifactNote` 里说了这句话
+> （模型正是靠它发现问题的），但**那条事实只活在 tool result 的文本里**，
+> 人在 Trace / 事件流 / 界面上一个字都查不到。形态与 `dataMovement` 那次
+> 一字不差：撑着结论的依据从未离开产生它的函数。
+>
+> 【定】`undefined` 与 `0` 是两件事 —— 后者说的是「执行前那里有一个空文件」。
+> ⚠️ 反向判据**必须打在 `run_shell` 上**：我第一版写在 `write_file` 那段，
+> 而把 `run_shell` 改成恒填 0（让这个字段彻底失去判别力）时它**照样是绿的** ——
+> 靶子与判据不在同一条路径上，`read_blob.line_offset` 那次的同族。
+
+> ### 【定】「不做 `--user-data-dir`」是一句被实测证伪的话（2026-09-01 改）
+>
+> 这里原来写着「v1 不做 `--user-data-dir` 持久化（那是一份 Atlas 看不见也管不了的
+> 凭证存储）」。**盘上的事实相反** —— Playwright MCP 默认就在做：
+>
+> ```
+> --user-data-dir=…/Library/Caches/ms-playwright-mcp/mcp-chrome-d83d3ae
+>
+> ~/Library/Caches/ms-playwright-mcp/
+>   mcp-chrome-aa1e1b6   29M      Default/Cookies                20,480 B
+>   mcp-chrome-d83d3ae   34M      Default/Login Data             40,960 B
+> ```
+>
+> **「我们不做」与「它不发生」是两回事。** 不传那个参数并不能阻止服务器用它
+> 自己的默认 profile。所以代价 ③ 要按实情升级：登录态**不在内存里，在磁盘上**，
+> 在 workspace 之外、跨 Atlas 重启存活，**Atlas 既不会读也不会清理**。
+> 想清掉它只能手工删那个目录。
+>
+> 准确表述是「Atlas **不接管** MCP 服务器的 profile 目录」——
+> 而不是「没有那样一份凭证存储」。这一条只改表述、不加功能
+> （Browser Session 身份仍不做，2026-09-01 用户决定）。
+
+> ### 【定】判据用**手写的假 MCP 服务器**，不依赖 Playwright
+>
+> 三条理由，第三条最要紧：拿一个真实服务器当夹具，测的就成了
+> 「Atlas 能不能接 **Playwright**」，而这一批要答的是「能不能接**任意** MCP」——
+> 用一个真实服务器校准正是本仓反复清理的过拟合形态。
+> 夹具刻意造出真实服务器的那些难处：分页、数组参数、嵌套对象、
+> `isError`、image 块、运行中的 `list_changed` 通知。
+>
+> **九条做过外部注入实测**（改坏实现 → 退出码必须非 0 → 改回）。
+> 而那一轮抓到了 D 段第一版的真实缺陷：它直接调 `handler.execute`，
+> 而 `validateAndNormalize` **根本不在那条路径上** —— 把 array 分支改成
+> 无条件报错，那条判据**照样是绿的**。与摸底考试 `read_blob.line_offset`
+> 一字不差：判据打在下游，跨不过出事的那一跳。
+> **这是「每加一条判据就做一次注入实测」又一次证明自己 —— 读代码看不出来。**
+
+> ⚠️ **v1 全程用假服务器验证，没有跑过真实 Playwright。** 四件事等实测回填：
+> 有几个工具的 schema 装不上 · 审批问得烦不烦 · 模型会不会主动
+> `request_handoff` 请人登录（摸底考试 B 组的结论是它**倾向零调用**）·
+> 归档产物有没有被脱敏打花（脱敏选的是 `STANDARD`，与 `fetch_url` 一致 ——
+> `STRICTEST` 的高熵串正则会把网页快照打成一片 `[REDACTED]`，
+> **而模型没有办法发现自己拿到的内容被改过**）。
+
 ### Current-only 清理（2026-08-31）：兼容层、死面与命名一次性拆干净
 
 依据 [current-only 清理实施方案 V20260831-01](sxw_aicoding/实施方案设计/current-only清理实施方案_V20260831.md)，
@@ -636,6 +862,29 @@ npm run dev -- --resume <runId> --recovery-decision CONTINUE --recovery-note "�
 npm run dev -- --endpoint deepseek --task "..."   # 换对照端点（受枚举约束，拼错立刻失败）
 ```
 
+**外部 MCP（ADR-0011）**：`cp mcp.example.json .workagent-state/mcp.json` 就能用，
+不改任何代码；`--mcp-config <path>` 可换位置。配置文件不存在**不是错误**。
+
+```jsonc
+{ "servers": { "playwright": {
+    "type": "local",
+    "command": ["npx", "-y", "@playwright/mcp@latest"],
+    "environment": { "PLAYWRIGHT_HEADLESS": "false" },
+    "tools": { "browser_snapshot": "read" }   // 可选。不写 = 全部 execute（最保守）
+} } }
+```
+
+> ⚠️ **`mcp.json` 放 `.workagent-state/`，跨 workspace** —— 与库、trace 的规则刻意不同。
+> 理由是进程生命周期：MCP 绑 Atlas 会话、跨 Run 存活（登录态在浏览器进程里），
+> 放进 workspace 目录的话切一次目录就等于**关掉浏览器**，而用户不会把这两件事联系起来。
+>
+> ⚠️ **连不上就抛，Atlas 起不来**（`"required": false` 可逐服务器放宽）。
+> 降级成「少几个工具」的失败形态特别难查：同一句任务昨天能开浏览器今天不能，
+> 而 Run 照常跑到底，最后告诉你「我访问不了那个页面」。
+>
+> ⚠️ **`tools` 段里的工具名拼错会报错**，并列出服务器真实提供的工具 ——
+> 不这么做的话 `tierOf()` 会静默落回默认档：那行配置**看起来生效了**、实际什么都没变。
+
 **审批档位（决 3）**：默认**自动放行 workspace 内、非 IRREVERSIBLE 的写**；
 `append_log` 这类不可逆操作与 EXECUTE 仍逐次问；**越界写由 Policy 直接拒绝，不给审批机会**。
 `--confirm` 恢复「每一步都问」；`--yes-all` 是显式的「批准一切」。
@@ -674,7 +923,16 @@ npm run verify:shell               # ★阶段 3.5：两道闸门 ＋ 沙箱实�
                                    #   ＋ ★$TMPDIR/tmp 双侧 ＋ effect 不得抄进 URL
 npm run verify:ui                  # ★阶段 4：边界判别力 ＋ 投影幂等 ＋ 三条等人通道走 HTTP ＋ 自动放行正分支
                                    #   ＋ 失败 resume ＋ 恢复项可见 ＋ **跨 workspace 闸门** ＋ workspace 隔离 ＋ §22.6 ＋ SSE 游标
-npm run verify:all                 # 14 条脚本 / 163 条判据
+npm run verify:mcp                 # ★ADR-0011：通用 MCP 客户端。边界 12 判别力 ＋ 默认最保守档
+                                   #   ＋ read/execute 两侧 ＋ array/嵌套 object 逐字送达 ＋ 分页
+                                   #   ＋ isError 分流 ＋ image 块不假装 ＋ list_changed 必须被忽略
+                                   #   ★二次评审收口：服务器原文不得进 safeMessage（走脱敏管道）
+                                   #   ＋ 四种**开放 schema**（additionalProperties/patternProperties/
+                                   #     根 $ref/根 oneOf）的参数逐字送达 ＋ dataMovement 如实记
+                                   #   ＋ 未知 content 块不得废掉工具 ＋ 握手卡住不留孤儿进程
+                                   #   ＋ resume 说出「外部工具核对不了」＋ 示例配置必须真能解析
+                                   #   用**手写的假 MCP 服务器**，不依赖 Playwright、不联网、不弹窗口
+npm run verify:all                 # 15 条脚本 / 198 条判据
 ```
 
 > **【定】`verify:ui` 必须真的起 HTTP 服务**，不能直接调 `PendingHub` 的方法测。
@@ -699,9 +957,17 @@ npm run probe:reasoning-tokens     # D-3：count_tokens 算不算推理块
 
 **不写单测、不引入测试框架**（D-25）。验收以**可运行脚本**交付，打印可读证据供人判断，而不是断言绿灯——与 Spike 0 的探针形态一致。新增验证时按这个形态写，放进 `apps/cli/src/verify/`，用 `harness.ts` 里的 `banner/section/fact/verdict` 输出。
 
-工程基线：**Node 24 ＋ npm workspaces，不引入 pnpm / turbo / nx**。运行期依赖 **3 个**：
-`@anthropic-ai/sdk`、`dotenv`、`turndown` —— **SQLite 用内置 `node:sqlite`，不新增依赖**；`tsx` 直接跑 TS，无构建步骤。
+工程基线：**Node 24 ＋ npm workspaces，不引入 pnpm / turbo / nx**。运行期依赖 **4 个**：
+`@anthropic-ai/sdk`、`dotenv`、`turndown`、`@modelcontextprotocol/sdk` —— **SQLite 用内置 `node:sqlite`，不新增依赖**；`tsx` 直接跑 TS，无构建步骤。
 
+> ⚠️ **`@modelcontextprotocol/sdk` 是 ADR-0011 破的基线**（3 → 4）。
+> **17 个直接依赖**（`express@5` · `hono` · `jose` · `ajv` · `zod` · `cors` ·
+> `express-rate-limit` · `pkce-challenge` …），实测 `npm install` 新增 **94 个包**。
+> 诚实记账：**stdio client 这条路上用得到的只有 `cross-spawn` 与 `zod`**，
+> 其余全是给 MCP **server 端** HTTP 传输与 OAuth 用的，而 npm 不管 import 哪个入口都全装。
+> 采纳理由是一条读协议想不到的坑：真实服务器发得出 SDK 解不开的 `$ref` outputSchema，
+> 手写客户端会以「某个 server 一接就崩」的形态失败。
+>
 > ⚠️ **`turndown` 是阶段 3.5 破的基线**（原本只有 2 个，见 [ADR-0007](sxw_aicoding/ADR/0007-html-结构转换可内置语义挑选不可.md)）。
 > 磁盘 208K ＋ 传递依赖 `@mixmark-io/domino` 8.6M。
 > 换来的是抓网页时 66% 的 token 削减（实测 38280 → 13023 字符）。
@@ -829,7 +1095,7 @@ isBlockClosed     形状提供事件          端点提供有无
 
 主力端点是**百炼 Anthropic 形状 `qwen3.7-plus`**（D-16）。选它而不是评分更高的 DeepSeek，因为它**零协议兜底**（缺 tool_result、错 tool_call_id 一律 200 放行）且服务端无状态——用一个什么都不校验的端点开发，能逼出自持逻辑的全部漏洞。`compose.ts` 是全仓唯一写死端点名的地方。
 
-### 边界 grep：编号 1…11、共 12 条规则（有机械判据，改动后复核）
+### 边界 grep：编号 1…12、共 13 条规则（有机械判据，改动后复核）
 
 **【定】表在 `apps/cli/src/verify/boundaries.ts`，不要在别处抄第二份。**
 从阶段 4 起有两个消费者（`verify:tools` 跑全表、`verify:ui` 对新增几条做判别力实测），
@@ -848,7 +1114,14 @@ grep -rn "@workagent/" apps/workagent-ui/public              # 8. ★阶段 4：
 grep -rnE "\.setStatus\(|runLoop\(|executeBatch\(|settleOutcome\(" apps/workagent-service/src  # 9. ★阶段 4：Layer 2 不得推进执行语义
 grep -rnE "\.(inner|outer)HTML|insertAdjacentHTML" apps/workagent-ui/public  # 10. ★阶段 4：模型产出不得走 innerHTML
 grep -rnE 'style: "|style="' apps/workagent-ui/public       # 11. ★阶段 4 收口：不得用内联 style（被自己的 CSP 丢弃）
+grep -rniE "modelcontextprotocol|StdioClientTransport" packages adapters  # 12. ★ADR-0011：MCP 客户端不得进 Runtime
 ```
+
+> **第 12 条与第 7 条同源但更隐蔽。** MCP 的诱惑**不需要 import 任何工具包** ——
+> 把 `StdioClientTransport` 搬进 `packages/harness-runtime/src/ports/` 就行，
+> 那里本来就叫 Port，一个「MCP Port」看着天经地义。搬进去之后 Runtime 就认识了
+> JSON-RPC 与子进程管理，而**边界 4 / 6 / 7 一条都不会响**。
+> 判别力实测在 `verify:mcp` A 段（注入一行 SDK import，必须当场翻红）。
 
 阶段 4 三条各自的「违反了会怎样」：
 
@@ -871,7 +1144,7 @@ grep -rnE 'style: "|style="' apps/workagent-ui/public       # 11. ★阶段 4 �
 > 这几个文件的文件头就在讲这条规则。第一次跑时第 8 条就抓到了我自己写在
 > `index.html` 注释里的模式串。
 
-**`verify:tools` A 段机械跑这 12 条**，不要手工 grep 了事 —— 它还会过滤注释行
+**`verify:tools` A 段机械跑这 13 条**，不要手工 grep 了事 —— 它还会过滤注释行
 （这些文件里到处在引用边界规则本身），并在 A2 段做**判别力实测**：
 往 `tools/common` 注入一行对 Case 包的 import，第 6b 条必须当场翻红并指出行号。
 
@@ -949,6 +1222,17 @@ tools/common/                ★阶段 3。Case 无关的通用能力面（@work
                              【定】`artifactKindOf`（扩展名 → kind）**唯一一份**住在这里 ——
                              kind 的全部意义就是决定跑哪些检查器；抄第二份的后果是
                              两个工具对同一个扩展名跑不同检查器，而两边都是绿的（ADR-0010）
+tools/mcp/                   ★ADR-0011。通用 MCP 客户端（@workagent/tools-mcp）
+  src/config.ts              mcp.json 解析。【定】**不读 MCP 的 annotations** —— 那是
+                             服务器自述的，拿它决定审批档位＝让被审计方写自己的审计规则
+  src/client.ts              stdio ＋ 生命周期。分页 / outputSchema 宽容 / progress→超时重置
+                             【定】`tools/list_changed` 登记 handler 但**只记日志不重新 list**
+                             （工具面已冻结进 RunSpec，跟着改会破坏 §18.2 分支判定前提）
+  src/tool-bridge.ts         MCP Tool → ToolSnapshot。inputSchema **原样搬**，一个字不解析
+                             McpEffectResolver **逐工具一个实例**（Resolver 接口拿不到 toolName）
+  src/handler.ts             isError 按档位分流：read→NO_EFFECT，execute→UNKNOWN
+                             【定】成功时 execute 档记 APPLIED，不是 UNKNOWN ——
+                             否则每次正常调用都 push RecoveryItem，降级信号变成永远亮的灯
 cases/micro-cases/           只剩 append_log 与 slow_write —— **测量工具**，不是能力
 apps/cli/                    Composition Root（compose.ts）＋ 终端入口 ＋ 14 条验收脚本 ＋ 一次性探针
   src/composite.ts           ★阶段 3。工具包组合器。【定】必须路由 Verifier 的**三个**方法
@@ -1005,7 +1289,8 @@ apps/workagent-ui/public/    ★阶段 4。Layer 1。**没有 src/、没有构�
 | [探针记录](sxw_aicoding/WorkAgent调研/探针记录/) | 花钱探针的**原始输出**。`probe-requirement-extraction` 推翻了回归评测 §5.1 的归因 |
 | `WorkAgent调研/ProviderProtocolFacts_*.md` | Spike 0 三轮实测事实（75 份证据 / 4 个端点） |
 | `代码评审/` | 按日期分目录。`2026-08-24/` 两份阶段 1 评审；`2026-08-25/` 一份 Bugfix 批次评审 |
-| `ADR/` | 决策记录。阶段 2 三份（[0001](sxw_aicoding/ADR/0001-outcome-kind-不区分是谁没做成.md) / [0002](sxw_aicoding/ADR/0002-恢复可观测性改为-action-级事实.md) / [0003](sxw_aicoding/ADR/0003-受信时间事实冻结到执行段.md)）＋ 阶段 3 三份（[0004 工具归属](sxw_aicoding/ADR/0004-通用工具归属与两类分拣标准.md) / [0005 lease 不做](sxw_aicoding/ADR/0005-PARKED-lease-不做的理由.md) / [0006 读放开的护栏](sxw_aicoding/ADR/0006-读放开的护栏边界.md)）＋ **阶段 3.5 两份**（[0007 结构转换 vs 语义挑选](sxw_aicoding/ADR/0007-html-结构转换可内置语义挑选不可.md) / [0008 ask_user 与 handoff 是两个洞](sxw_aicoding/ADR/0008-ask-user-与-request-handoff-是两个洞.md)）＋ **阶段 4 一份**（[0009 UI 不引入前端框架与 Electron](sxw_aicoding/ADR/0009-阶段4-UI-不引入前端框架与-Electron.md)）＋ **2026-08-31 一份**（[0010 二进制交付物走字节通道与按路径声明](sxw_aicoding/ADR/0010-二进制交付物走字节通道与按路径声明.md)）；**阶段 1 的四份欠了三个阶段了** |
+| [ADR-0011 外部 MCP](sxw_aicoding/ADR/0011-通过外部-MCP-接入浏览器能力.md) | **通用 MCP 客户端能力的实现依据**。四条代价、与 opencode 的对照、为什么不读 annotations |
+| `ADR/` | 决策记录。阶段 2 三份（[0001](sxw_aicoding/ADR/0001-outcome-kind-不区分是谁没做成.md) / [0002](sxw_aicoding/ADR/0002-恢复可观测性改为-action-级事实.md) / [0003](sxw_aicoding/ADR/0003-受信时间事实冻结到执行段.md)）＋ 阶段 3 三份（[0004 工具归属](sxw_aicoding/ADR/0004-通用工具归属与两类分拣标准.md) / [0005 lease 不做](sxw_aicoding/ADR/0005-PARKED-lease-不做的理由.md) / [0006 读放开的护栏](sxw_aicoding/ADR/0006-读放开的护栏边界.md)）＋ **阶段 3.5 两份**（[0007 结构转换 vs 语义挑选](sxw_aicoding/ADR/0007-html-结构转换可内置语义挑选不可.md) / [0008 ask_user 与 handoff 是两个洞](sxw_aicoding/ADR/0008-ask-user-与-request-handoff-是两个洞.md)）＋ **阶段 4 一份**（[0009 UI 不引入前端框架与 Electron](sxw_aicoding/ADR/0009-阶段4-UI-不引入前端框架与-Electron.md)）＋ **2026-08-31 两份**（[0010 二进制交付物走字节通道与按路径声明](sxw_aicoding/ADR/0010-二进制交付物走字节通道与按路径声明.md) / [0011 通过外部 MCP 接入浏览器能力](sxw_aicoding/ADR/0011-通过外部-MCP-接入浏览器能力.md)）；**阶段 1 的四份欠了三个阶段了** |
 | `spikes/s0-provider-protocol/` | 一次性探针，已完成，不进主干依赖（`tsconfig.json` 已 exclude） |
 
 V04 及更早的架构设计、`V03_Spike0回填清单.md` **不再作为实现依据**，只作过程记录。

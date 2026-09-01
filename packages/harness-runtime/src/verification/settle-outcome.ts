@@ -149,7 +149,46 @@ function splitArtifactChecks(facts: ArtifactCheckFact[]): {
   const failedDeliverables: IncompleteItem[] = [];
   const failedOthers: IncompleteItem[] = [];
 
-  for (const f of facts) {
+  /**
+   * ══════════════════════════════════════════════════════════════════════
+   * 【定】一个 `logicalId` 的**最后一条**事实，才是这个 Run 对它的交付。
+   *
+   * 被后续版本取代的产物不是「交付物」，是**中间状态** ——
+   * 它甚至可能已经不在盘上了（`artifacts` 表只存 metadata＋hash＋path，
+   * 而 path 上躺着的是最新那一版的字节）。
+   *
+   * ── 实测（Run `run_18c20267c1a1`，2026-09-01）───────────────────────────
+   *
+   * 上一个 Run 在 workspace 留下了 `images.zip`（6.25MB / 49 个文件），
+   * 而 `zip -9 ../images.zip …` 对**已存在的归档是追加**：
+   *
+   *     v2  6,412,214 B  ← 上次的 49 个 ＋ 这次的 2 个，内容是错的
+   *     v3    155,558 B  ← 模型看到 stdout 后 rm 重做，正确
+   *
+   * 两个版本都 `ok`（v2 **确实**是个结构完好的 zip，检查器没判错），
+   * 于是 `deliveredArtifactIds` 同时列着它们 —— Atlas 宣称交付了**两份**
+   * 同名产物，而磁盘上只有一份，另一份的 6.4MB 已经不可取回。
+   *
+   * 这条与紧挨着的另外两条【定】共同构成 §17 的 Deliverable 语义，
+   * 三条是同一个形状：**交付集合里不许出现一个「对外宣称、而实际不成立」的东西。**
+   *
+   * ── 失败方向按「最终 / 被取代」分流，而不是一律降级 ─────────────────────
+   *
+   *   最终版本坏     → failedDeliverables → `FAILED`（这次交付的东西是坏的）
+   *   被取代的版本坏 → failedOthers       → `COMPLETED_WITH_LIMITS`（过程有瑕疵，
+   *                                          但最终交付物是好的）
+   *
+   * 【定】被取代的失败**不许直接丢掉**。丢掉的话，「模型产出过一份坏产物、
+   * 后来自己修好了」与「一次就做对了」在结算上完全不可区分 —— 而前者意味着
+   * 这条任务链路上有一个真实的坑。失败方向仍然保守：它照样让 Run 拿不到 SUCCESS。
+   * ══════════════════════════════════════════════════════════════════════
+   */
+  const finalIndexOf = new Map<string, number>();
+  facts.forEach((f, i) => finalIndexOf.set(f.logicalId, i));
+
+  facts.forEach((f, i) => {
+    const isFinal = finalIndexOf.get(f.logicalId) === i;
+
     if (f.ok) {
       /**
        * 【定】只有 `DELIVERABLE` 进 `deliveredArtifactIds`（二次评审 codex P2-3）。
@@ -165,18 +204,21 @@ function splitArtifactChecks(facts: ArtifactCheckFact[]): {
        * 【定】`RESULT` 也不进。它与 `INTERMEDIATE` 在失败分流上同档，
        * 这里保持同一条线，别让第三个值有第三种行为。
        */
-      if (f.role === "DELIVERABLE" && !delivered.includes(f.artifactId)) {
+      if (isFinal && f.role === "DELIVERABLE" && !delivered.includes(f.artifactId)) {
         delivered.push(f.artifactId);
       }
-      continue;
+      return;
     }
+
     const item: IncompleteItem = {
-      what: `产物 ${f.logicalId}（${f.role}）未通过完整性检查`,
+      what: isFinal
+        ? `产物 ${f.logicalId}（${f.role}）未通过完整性检查`
+        : `产物 ${f.logicalId}（${f.role}）的一个**中间版本**未通过完整性检查（后来被新版本取代）`,
       why: f.detail,
     };
-    if (f.role === "DELIVERABLE") failedDeliverables.push(item);
+    if (isFinal && f.role === "DELIVERABLE") failedDeliverables.push(item);
     else failedOthers.push(item);
-  }
+  });
   return { delivered, failedDeliverables, failedOthers };
 }
 

@@ -28,9 +28,11 @@ import type {
 import { NullTraceSink, asId, readRunFacts } from "@workagent/harness-runtime";
 import { SqliteRunStore, openDb } from "@workagent/store-sqlite";
 import type { HandoffChannel, QuestionChannel } from "@workagent/tools-common";
+import { connectMcpServers } from "@workagent/tools-mcp";
 import {
   autoGrantVerdict,
   compose,
+  defaultMcpConfigPath,
   gitProvenance,
   hostOf,
   parseEndpointArg,
@@ -87,6 +89,14 @@ interface Args {
    * 开发期要频繁换端点验证工具行为，所以它是批 1 的第一步。
    */
   endpoint: EndpointChoice;
+  /**
+   * `mcp.json` 的路径。默认 `.workagent-state/mcp.json`，文件不存在不是错误。
+   *
+   * ⚠️ CLI 入口跑浏览器类 MCP 有一个真实代价：MCP 进程随这条命令一起结束，
+   * 于是**每个 Run 都要重新登录**。要保留登录态请用 `npm run ui`
+   * （service 常驻，MCP 进程跨 Run 存活）。见 ADR-0011。
+   */
+  mcpConfig: string;
 }
 
 /**
@@ -101,7 +111,7 @@ interface Args {
  * 而这正是本仓反复记的「静默忽略用户配置比不支持更糟」（M-5 的形态）。
  * ══════════════════════════════════════════════════════════════════════
  */
-const VALUE_FLAGS = ["task", "workspace", "trace", "db", "resume", "recovery-decision", "recovery-note", "endpoint"];
+const VALUE_FLAGS = ["task", "workspace", "trace", "db", "resume", "recovery-decision", "recovery-note", "endpoint", "mcp-config"];
 const BOOL_FLAGS = ["confirm", "yes-all", "no-trace", "list-runs"];
 
 function assertKnownArgs(argv: string[]): void {
@@ -169,6 +179,7 @@ function parseArgs(argv: string[]): Args {
     recoveryDecision: decision as Args["recoveryDecision"],
     recoveryNote: get("recovery-note"),
     endpoint,
+    mcpConfig: get("mcp-config") ?? defaultMcpConfigPath(),
   };
 }
 
@@ -278,6 +289,38 @@ function interactiveApproval(
         console.log(`  声明的交付物：${forTerminal(String(input["artifact_path"]))}（${role}）`);
       }
     }
+
+    /**
+     * ── 外部 MCP 工具（ADR-0011）──────────────────────────────────────────
+     *
+     * 【定】它**必须**有自己的一支，不能并进上面的 PROCESS。
+     *
+     * PROCESS 那一支是 `run_shell` 专属的：它读 `input["command"]`，
+     * 并打印「沙箱：只能写 workspace 与本次调用的 $TMPDIR」。
+     * **MCP 工具没有任何沙箱** —— 复用那一支的后果是人在批准的那一刻
+     * 看到一句方向相反的保证，而命令原文那栏是「(读不到命令原文)」。
+     *
+     * 展示内容与 `run_shell` 那段同构、理由也同源：
+     * `browser_navigate(内网URL)` 与 `browser_click(删除按钮)` 在一行
+     * `scope.value` 里长得一模一样 —— 那不是审批，那是盲批。
+     * 而这里比 `run_shell` 更要紧：沙箱这道闸门不在，
+     * **审批面是唯一还在的那道**。
+     *
+     * 【定】入参必须整份打出来。Atlas 不解析 MCP 的参数（那正是"换个 MCP
+     * 只改配置"的代价），所以没有任何一个字段是"关键字段"可以单独挑出来 ——
+     * 挑就意味着 Atlas 假装看懂了它，而那个假装迟早在某个服务器上错。
+     */
+    if (e.scope.kind === "EXTERNAL_TOOL") {
+      const input = a.normalizedInput as Record<string, unknown>;
+      console.log(`\n  \x1b[33m即将调用外部工具\x1b[0m：${forTerminal(e.scope.value)}`);
+      const args = JSON.stringify(input, null, 2);
+      for (const l of forTerminal(args).split("\n")) console.log(`    \x1b[1m${l}\x1b[0m`);
+      console.log(
+        `  \x1b[31m此工具由外部 MCP 服务器执行，不在沙箱内\x1b[0m —— ` +
+          `Atlas 不解析它的参数，也不约束它能读写什么。`,
+      );
+    }
+
     stdin.setMode("WAITING_FOR_APPROVAL");
     try {
       /**
@@ -442,7 +485,47 @@ async function main(): Promise<void> {
     : undefined;
   const trace: TraceSinkPort = fileSink ?? new NullTraceSink();
 
+  /**
+   * 【定】MCP 在 `compose()` **之前**连好，连不上就抛（ADR-0011）。
+   *
+   * 工具面要冻结进 `RunSpec`，所以 `tools/list` 必须先跑完；
+   * 而"连不上就抛"放在这里，是因为**这是最便宜的发现时机** ——
+   * 降级成"少几个工具"的失败形态特别难查：同一句任务昨天能开浏览器
+   * 今天不能，而 Run 照常跑到底，最后告诉你"我访问不了那个页面"。
+   */
+  const mcp = await connectMcpServers({
+    configPath: args.mcpConfig,
+    workspaceRoot: args.workspace,
+  });
+  /**
+   * ⚠️ CLI 入口：MCP 进程随这条命令一起结束。浏览器关掉、登录态没了，
+   * 下一个 Run 要重新登录。要跨 Run 保留请用 `npm run ui`。
+   */
+  /**
+   * ══════════════════════════════════════════════════════════════════════
+   * 【定】正常出口必须 `await mcp.close()`，`exit` 钩子只是**兜底**。
+   *
+   * Node 的 `exit` 监听器**不能等 Promise** —— 而 `Protocol.close()` →
+   * `transport.close()` 里可能要 stdin end、等一会、SIGTERM、再 SIGKILL。
+   * 也就是说「回调开始执行」不等于「子进程收掉了」。
+   *
+   * 它实践中大概率没事，靠的是 SDK 的 `close()` **同步前缀**会先
+   * `stdin.end()`，多数 MCP 服务器收到 EOF 会自己退。
+   * ⚠️ 那是一个实现细节：SDK 若哪天把 `stdin.end()` 挪到某个 await 之后，
+   * 这条兜底立即失效，而症状是「后台悄悄多出一个浏览器进程」——
+   * 没有任何东西会报错。所以真正的保证在 `shutdownMcp()` 那一侧。
+   * ══════════════════════════════════════════════════════════════════════
+   */
+  let mcpClosed = false;
+  const shutdownMcp = async (): Promise<void> => {
+    if (mcpClosed) return;
+    mcpClosed = true;
+    await mcp.close();
+  };
+  process.once("exit", () => void (mcpClosed || mcp.close()));
+
   const composed = compose({
+    mcp,
     workspaceRoot: args.workspace,
     approvalDecider: interactiveApproval(
       !args.confirm,
@@ -491,6 +574,7 @@ async function main(): Promise<void> {
     const snapshot = await composed.runtime.inspect(asId<RunId>(runId));
     if (!snapshot) {
       console.error(`\n找不到 Run ${runId}。用 --list-runs 看看库里有什么。`);
+      await shutdownMcp();
       process.exit(1);
     }
     console.log(`resume   : ${runId}（上次状态 ${snapshot.status}，已跑 ${snapshot.turnCount} 轮）\n`);
@@ -594,6 +678,8 @@ async function main(): Promise<void> {
     console.log(`trace     : ${fileSink.filePath}`);
   }
 
+  // 【定】在 process.exit 之前真的等它收完，别指望 exit 钩子（见上）。
+  await shutdownMcp();
   process.exit(0);
 }
 

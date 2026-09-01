@@ -85,6 +85,8 @@ export const requestHandoffDefinition: ToolDefinition = {
     "只有当那件事根本不该做时，才在总结里说明并结束。",
   inputSchema: {
     type: "object",
+    // 【定】显式严格：未声明的键丢弃。见 validateAndNormalize 的标准语义那段。
+    additionalProperties: false,
     properties: {
       instructions: { type: "string", description: "要人做什么，具体到可执行" },
       expected_completion: {

@@ -50,6 +50,8 @@ export const readBlobDefinition: ToolDefinition = {
     "不要为了拿内容而重新执行原来那个工具 —— 那只会产生一个新的 ref。",
   inputSchema: {
     type: "object",
+    // 【定】显式严格：未声明的键丢弃。见 validateAndNormalize 的标准语义那段。
+    additionalProperties: false,
     properties: {
       ref: { type: "string", description: '外置结果里给出的 ref，形如 "blob_xxx"' },
       start_line: { type: "number", description: "从第几行开始取，1 起。默认 1" },

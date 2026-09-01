@@ -100,7 +100,21 @@ export class WorkspaceHosts {
    * （「有 Run 在跑」），不是程序错误。抛出去会走进 500 那条通用路径，
    * 而那条路径的措辞是给「不该发生的事」准备的。
    */
-  async switchTo(id: string): Promise<{ ok: boolean; entry?: WorkspaceEntry; error?: string }> {
+  /**
+   * 切换成功时可能带一条 `warning`（不阻断）。
+   *
+   * 【定】它现在只有一个来源：**MCP 的 cwd 不跟着切**。
+   * MCP 进程绑 Atlas 会话、跨 workspace 复用（登录态在浏览器进程里），
+   * 所以它写出的相对路径文件永远落在**启动时**那个 workspace。
+   * 切过来之后模型的 `read_file` 按新根解析，两者不再重合 ——
+   * 而这件事在界面上完全看不出来，只会表现为"文件莫名其妙读不到"。
+   *
+   * 不做成 409：跨 workspace 复用连接是**刻意的设计**（重连 = 丢登录态），
+   * 而大多数任务根本不用 MCP。把它降成一条警告，让人知道就行。
+   */
+  async switchTo(
+    id: string,
+  ): Promise<{ ok: boolean; entry?: WorkspaceEntry; error?: string; warning?: string }> {
     const entry = this.registry.get(id);
     if (!entry) return { ok: false, error: `没有这个 workspace：${id}` };
     if (this.current?.id === id) return { ok: true, entry: this.registry.activate(id) };
@@ -120,6 +134,19 @@ export class WorkspaceHosts {
 
     const activated = this.registry.activate(id)!;
     this.current = { id, host: this.spawn(activated) };
+
+    const mcp = this.opts.composeOverrides?.mcp;
+    if (mcp && mcp.snapshots.length > 0) {
+      return {
+        ok: true,
+        entry: activated,
+        warning:
+          `已切换，但 MCP 服务器**没有**跟着切：它绑的是 Atlas 会话（为了保住浏览器登录态），` +
+          `工作目录仍是启动时那个。\n` +
+          `所以 MCP 写出的相对路径文件（如 Playwright 的结果文件、快照）不会落在这个 workspace 里，` +
+          `模型在这里用相对路径去读会读不到。要在新目录用 MCP 产物，请用绝对路径。`,
+      };
+    }
     return { ok: true, entry: activated };
   }
 

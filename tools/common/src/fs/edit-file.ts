@@ -55,6 +55,8 @@ export const editFileDefinition: ToolDefinition = {
     "整份文件重写用 write_file，不要用本工具。",
   inputSchema: {
     type: "object",
+    // 【定】显式严格：未声明的键丢弃。见 validateAndNormalize 的标准语义那段。
+    additionalProperties: false,
     properties: {
       path: { type: "string", description: "相对 workspace 根的文件路径" },
       old_string: { type: "string", description: "要被替换的原文，必须在文件中唯一出现" },

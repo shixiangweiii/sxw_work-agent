@@ -56,6 +56,18 @@ export interface HarnessRuntimeDeps {
    * 是 Composition Root 的知识 —— Runtime 不该有办法自己去查。
    */
   currentEndpointProfile: EndpointCapabilityProfile;
+  /**
+   * 当前进程装配出来的工具面。
+   *
+   * 【定】与 `currentEndpointProfile` 同一个理由与同一条纪律：只用来**比对**
+   * 冻结在 RunSpec 里的那一份，**绝不用来顶替它**（§18.2 的分支判定读的
+   * 永远是冻结的那份）。「现在装了哪些工具」同样是 Composition Root 的知识。
+   *
+   * 当前唯一的消费者是 resume 时那条「外部工具核对不了」的事实
+   * （见 `ResumeExternalToolsUnverifiable`）。不传就只报「有外部工具」，
+   * 报不出「其中哪些漂移了」—— 少一半信息，但不会假装验过。
+   */
+  currentToolSnapshots?: ToolSnapshot[];
 }
 
 export interface StartResult {
@@ -337,6 +349,36 @@ export class HarnessRuntime {
         fromSequence: lastSeq,
         rebuiltMessages: messages.length,
       });
+
+      /**
+       * §18.3 里 Atlas **做不到**的那一维：外部工具的世界还是不是原来那个。
+       *
+       * 【定】做不到就说出来，不许默不作声。理由见
+       * `ResumeExternalToolsUnverifiable` 的类型注释 —— 与 workspace 闸门
+       * 那条 `UNKNOWN_LEGACY` 是同一条：放行了却没验过的闸门如果不说话，
+       * 与「验过并通过」在事后完全不可区分。
+       *
+       * 判别式用 `effectResolution.kind === "RESOLVER"` ＋ scope 不可解析这类
+       * **Runtime 自己的词汇**是做不到的（RunSpec 里存的是声明，不含 scope）。
+       * 用 `EXTERNAL_TOOL` 也不行 —— 那要跑一次 resolve。所以这里退到
+       * 工具名前缀：它由 `atlasToolName()` 唯一产生，而**边界 12 保证 Runtime
+       * 不认识 MCP** —— 认一个字符串前缀不等于认识那个协议。
+       */
+      const externalFrozen = spec.agentSpec.toolSnapshots.filter((t) =>
+        t.definition.name.startsWith("mcp__"),
+      );
+      if (externalFrozen.length > 0) {
+        const current = new Map(
+          (this.deps.currentToolSnapshots ?? []).map((t) => [t.definition.name, t.version]),
+        );
+        const drifted = externalFrozen
+          .filter((t) => current.get(t.definition.name) !== t.version)
+          .map((t) => t.definition.name);
+        yield await emit("ResumeExternalToolsUnverifiable", {
+          toolNames: externalFrozen.map((t) => t.definition.name),
+          drifted,
+        });
+      }
 
       /**
        * ── S10 ③：上次崩在「等人」那一刻 ──────────────────────────────────

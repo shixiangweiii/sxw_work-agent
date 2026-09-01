@@ -60,6 +60,8 @@ export const appendLogDefinition: ToolDefinition = {
     "path 相对于 workspace 根目录。注意：重复调用会追加多行。",
   inputSchema: {
     type: "object",
+    // 【定】显式严格：未声明的键丢弃。见 validateAndNormalize 的标准语义那段。
+    additionalProperties: false,
     properties: {
       path: { type: "string", description: "相对 workspace 根的日志文件路径" },
       line: { type: "string", description: "要追加的一行文本" },

@@ -687,6 +687,14 @@ export async function* executeBatch(
             version: record.version,
             role: record.role,
             kind: record.kind,
+            /**
+             * 【定】这个产物是不是在一个已存在的文件上改出来的 —— 见
+             * `ProducedArtifact.replacedBytes`。不带这个字段 = 它是新建的。
+             *
+             * 它只上事件、不进 outcome：覆盖一个已存在文件完全合法
+             * （重新打包就是），所以它是审计事实而不是结算依据。
+             */
+            ...(a.replacedBytes === undefined ? {} : { replacedBytes: a.replacedBytes }),
           });
 
           if (deps.artifactChecks) {
@@ -748,7 +756,28 @@ export async function* executeBatch(
         }
         settle(call.toolCallId, materialized.text + note, vr.status === "FAILED");
       } else {
-        settle(call.toolCallId, renderError(errorOf(outcome, call.name)), true);
+        /**
+         * ── 【定】失败分支也要带上**脱敏后的** output ────────────────────────
+         *
+         * 在此之前这里只发 `renderError(...)`，而 `renderError` 只读
+         * `error.safeMessage` —— 于是一个工具想把「失败的细节」交给模型，
+         * 唯一的通道就是 `safeMessage`。而那个字段的契约写着
+         * 「**已脱敏**，可以展示给用户」（types/error.ts），脱敏管道
+         * （上面第 ⑥ 步）却只处理 `outcome.output`。
+         *
+         * 两件事凑在一起的后果是一条**绕过不变量 13 的通用洞**：任何把外部
+         * 内容放进 `safeMessage` 的工具，那段原文都会未经脱敏落进 transcript
+         * 与下一轮上下文。MCP 工具是第一个真正踩上去的（服务器的 isError
+         * 文本是任意外部内容），但洞不是 MCP 开的。
+         *
+         * 【定】所以处置在这里而不是在某个工具里：工具的正确写法是
+         * 「原文放 output（走脱敏），safeMessage 只写自己生成的话」，
+         * 而那个写法只有在这一行把 red.text 交出去之后才**成立**。
+         *
+         * 对既有工具是 no-op：它们 `ok:false` 时 `output` 本来就是空串。
+         */
+        const detail = red.text.trim() ? `\n${red.text}` : "";
+        settle(call.toolCallId, renderError(errorOf(outcome, call.name)) + detail, true);
         if (settlement.onActionFailure === "SKIP_REMAINING") skipRemaining = true;
         if (settlement.onActionFailure === "ABORT_BATCH") break;
       }

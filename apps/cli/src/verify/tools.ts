@@ -399,6 +399,77 @@ async function main(): Promise<void> {
       : `这些参数声明了却没被 handler 透传：${untransmitted.join("，")}`,
   );
 
+  // ── B4. 自家工具的 schema 必须留在标量子集内（ADR-0011 放宽的护栏）
+  section("B4. 自家工具的 inputSchema 必须留在标量子集内");
+  console.log(
+    "   ADR-0011 为了接外部 MCP，把 `JsonSchema` 放宽成了「认识的校验、不认识的原样保留」，\n" +
+      "   并给两个接口都加了索引签名。代价是**编译器不再抓自家工具的关键字拼写错误**\n" +
+      "   （`descripton` 会静默生效为一个没人读的字段）。\n\n" +
+      "   【定】这条判据就是那个代价的对价。它钉住两件事：\n" +
+      "     ① 自家工具只用 string / number / boolean —— 宽出来的那部分**只为外部工具存在**；\n" +
+      "     ② 属性上只出现 `type` 与 `description` 两个关键字 —— 别的都是拼错或夹带。\n" +
+      "   它红了不一定是错，但一定意味着有人在自家工具上用了本来只给 MCP 的口子。",
+  );
+  const SCALARS = ["string", "number", "boolean"];
+  const ALLOWED_KEYWORDS = ["type", "description"];
+  const schemaOffenders: string[] = [];
+  for (const snap of DEFAULT_TOOLS) {
+    const name = snap.definition.name;
+    const props = (snap.definition.inputSchema.properties ?? {}) as Record<
+      string,
+      Record<string, unknown>
+    >;
+    for (const [prop, spec] of Object.entries(props)) {
+      if (typeof spec?.["type"] !== "string" || !SCALARS.includes(spec["type"] as string)) {
+        schemaOffenders.push(`${name}.${prop} 的 type = ${JSON.stringify(spec?.["type"])}`);
+      }
+      for (const kw of Object.keys(spec ?? {})) {
+        if (!ALLOWED_KEYWORDS.includes(kw)) schemaOffenders.push(`${name}.${prop} 多了关键字 "${kw}"`);
+      }
+    }
+  }
+  fact("扫描的工具数", DEFAULT_TOOLS.length);
+  fact(
+    "属性总数",
+    DEFAULT_TOOLS.reduce(
+      (n, s) => n + Object.keys(s.definition.inputSchema.properties ?? {}).length,
+      0,
+    ),
+  );
+  verdict(
+    schemaOffenders.length === 0,
+    schemaOffenders.length === 0
+      ? "自家工具的每个属性都是 string/number/boolean，且只带 type 与 description —— " +
+          "放宽出来的那部分没有渗回自家工具面"
+      : `这些属性越过了标量子集：${schemaOffenders.join("；")}`,
+  );
+
+  /**
+   * ── B4b：自家工具必须**显式**写 `additionalProperties: false` ──────────────
+   *
+   * 二次评审（codex P1-2）之后，`validateAndNormalize` 改成按 JSON Schema
+   * 的标准语义处置未声明键：**缺省是允许**，只有显式 `false` 才丢弃。
+   *
+   * 这条改动让外部工具（根 `$ref` / `oneOf` / `additionalProperties` 形态）
+   * 的参数不再被裁掉，但它同时把自家工具的默认行为翻了过来 ——
+   * 不写这一行，模型的幻觉字段就会进 `normalizedInput`，污染 `inputDigest`，
+   * 而 `inputDigest` 是 Progress Guard 判断「在原地打转」的依据。
+   *
+   * 【定】所以要求**显式**而不是回到隐式默认：把"我要严格"说出来，
+   * 比让它做一个隐式约定要诚实；而这条判据保证新加工具时不会漏。
+   */
+  const looseTools = DEFAULT_TOOLS.filter(
+    (s) => s.definition.inputSchema["additionalProperties"] !== false,
+  ).map((s) => s.definition.name);
+  fact("未显式声明 additionalProperties:false 的自家工具", looseTools.join(", ") || "（无）");
+  verdict(
+    looseTools.length === 0,
+    looseTools.length === 0
+      ? `${DEFAULT_TOOLS.length} 个自家工具都显式声明了 additionalProperties:false —— ` +
+          "未声明键照旧丢弃，inputDigest 不会被模型的幻觉字段污染"
+      : `这些工具没写 additionalProperties:false，模型的幻觉字段会进 normalizedInput：${looseTools.join(", ")}`,
+  );
+
   // ── C. ToolDefinition 三个必填项
   section("C. ToolDefinition 三个必填项（不得绕过 #3）");
   console.log(

@@ -37,7 +37,8 @@ export const nowDefinition: ToolDefinition = {
     '返回 JSON：{"iso","local","timezone","epochMs"}。' +
     "上下文里的「[系统事实] 当前时间」是本次执行开始时的时刻；" +
     "只有在需要精确到分钟、或本次运行已持续较久时才需要调用本工具。",
-  inputSchema: { type: "object", properties: {}, required: [] },
+  // 【定】显式严格：未声明的键丢弃。见 validateAndNormalize 的标准语义那段。
+  inputSchema: { type: "object", properties: {}, required: [], additionalProperties: false },
   effectResolution: {
     kind: "DECLARATIVE",
     /**

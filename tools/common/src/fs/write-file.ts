@@ -53,6 +53,8 @@ export const writeFileDefinition: ToolDefinition = {
     "只有真正的产出才声明，草稿和临时文件不要声明。",
   inputSchema: {
     type: "object",
+    // 【定】显式严格：未声明的键丢弃。见 validateAndNormalize 的标准语义那段。
+    additionalProperties: false,
     properties: {
       path: { type: "string", description: "相对 workspace 根的文件路径" },
       content: { type: "string", description: "要写入的完整文本（会覆盖原内容）" },

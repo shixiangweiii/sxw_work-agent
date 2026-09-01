@@ -224,6 +224,39 @@ export const BOUNDARIES: Boundary[] = [
     paths: ["apps/workagent-ui/public"],
     allowed: [],
   },
+  {
+    /**
+     * ★ ADR-0011：**MCP 客户端不得进 Runtime 与适配器。**
+     *
+     * 它与边界 7（沙箱与命令解析）同源，但形态更隐蔽。边界 4 / 6 抓的是
+     * 「Runtime import 了工具包」，而 MCP 的诱惑**不需要 import 任何工具包**：
+     * 它是把 `StdioClientTransport` 直接搬进
+     * `packages/harness-runtime/src/ports/` —— 那里本来就叫 Port，
+     * 一个"MCP Port"看着天经地义。搬进去之后 Runtime 就认识了 JSON-RPC
+     * 与子进程管理，而 4 / 6 / 7 **一条都不会响**。
+     *
+     * 【定】Runtime 侧允许存在的只有 `TrustedEffectResolver` 这个类型
+     * （`McpEffectResolver` 实现它，住在 `tools/mcp/`）——
+     * 与 `ShellEffectResolver` 的处置完全一致。
+     *
+     * ── ⚠️ 【定】如实写明它的**射程盲区**（二次评审 zcode P2-4）─────────────
+     *
+     * 这条 grep 抓的是「**把 SDK 搬进 Runtime**」。它抓不到的是：
+     * 有人在 `packages/` 里用 `node:child_process` ＋ `JSON.parse`
+     * **手写**一个 JSON-RPC 客户端 —— 那同样让 Runtime 认识了 MCP，
+     * 而模式串一个字都不会命中。
+     *
+     * 不去扩模式（`child_process` 在 `packages/` 里有正当用途，
+     * 扩了会变成一条噪音规则），而是**把盲区写在这里**。
+     * 一条声称射程比实际更大的规则，比一条老实交代边界的规则更危险：
+     * 它会让人以为这个方向已经有人守着了。
+     */
+    id: "12",
+    desc: "★ADR-0011：MCP 客户端不得进 Runtime / 适配器",
+    pattern: "modelcontext" + "protocol|Stdio" + "ClientTransport",
+    paths: ["packages", "adapters"],
+    allowed: [],
+  },
 ];
 
 /**

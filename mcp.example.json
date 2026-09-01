@@ -1,0 +1,30 @@
+{
+  "_读我_1_放哪": "复制到 .workagent-state/mcp.json（跨 workspace，与 workspaces.json 同目录）。--mcp-config <path> 可换位置。文件不存在不是错误。",
+  "_读我_2_安全前提": "写入或选择这个文件的人，已经向下面每一条 command 授予了宿主用户级的代码执行权。MCP 进程在任何 Run、任何审批之前就已经跑起来了，它没有沙箱、能读凭证文件、能联网、能任意写盘。逐次审批只约束「模型发起的某一次 tool call」，不是这个进程的安全边界。",
+  "_读我_3_不要用_latest": "命令里锁了版本号，是刻意的。@latest 会在上面那条完全信任的启动路径上解析并执行可漂移的代码；而且它让 resume 的工具身份每次重启都可能变（工具 version 含 schema/description/档位的 digest，见 tool-bridge.ts）。升级请显式改这个数字。",
+  "_读我_4_输出目录": "MCP 进程绑 Atlas 会话、跨 workspace 复用（为了保住浏览器登录态），所以它的工作目录在服务启动那一刻就固化了。在界面上切到另一个 workspace 之后，MCP 写出的相对路径文件仍然落在启动时那个目录里 —— 那边的 Run 用相对路径读不到它们。",
+  "_读我_5_登录态": "浏览器任务请用 npm run ui（service 常驻）。npm run dev 是单次命令，进程结束浏览器就关，每个 Run 都要重新登录。",
+
+  "servers": {
+    "playwright": {
+      "type": "local",
+      "command": ["npx", "-y", "@playwright/mcp@0.0.79"],
+      "environment": {
+        "PLAYWRIGHT_HEADLESS": "false"
+      },
+      "timeout": {
+        "startup": 90000,
+        "request": 120000
+      },
+
+      "_读我_6_档位": "不写 tools 段 = 全部落 execute（最保守）。跑几次之后建议把只读工具标出来，理由不是「审批问得烦」—— execute 档报错时记 sideEffectState=UNKNOWN，那会 push 一个 RecoveryItem 让这个 Run 永远结算不成 SUCCESS。浏览器自动化里报错很常见，于是那个降级信号会变成一盏永远亮着的灯。",
+      "_读我_7_别乱标read": "⚠️ browser_evaluate 不是只读工具 —— 它在页面上下文执行任意 JS，可以发请求、点按钮、改 DOM。标成 read 会让三件事一起错且零提示：跳过审批、按幂等重跑（§18.2 分支一）、报错时记「没有副作用」。同理 click / type / navigate / file_upload / press_key 都必须留在 execute。",
+      "tools": {
+        "browser_snapshot": "read",
+        "browser_console_messages": "read",
+        "browser_network_requests": "read",
+        "browser_take_screenshot": "read"
+      }
+    }
+  }
+}

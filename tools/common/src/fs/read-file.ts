@@ -75,6 +75,8 @@ export const readFileDefinition: ToolDefinition = {
     "读之前建议先用 stat 确认大小；要在很多文件里找东西用 search，不要逐个读。",
   inputSchema: {
     type: "object",
+    // 【定】显式严格：未声明的键丢弃。见 validateAndNormalize 的标准语义那段。
+    additionalProperties: false,
     properties: {
       path: { type: "string", description: "相对 workspace 根的文件路径，也接受绝对路径" },
       start_line: { type: "number", description: "从第几行开始读，1 起。默认 1" },

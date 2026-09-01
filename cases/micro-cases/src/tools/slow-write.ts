@@ -51,6 +51,8 @@ export const slowWriteDefinition: ToolDefinition = {
     "这是**测量用**工具，正常任务不要调用它 —— 需要写文件请用 write_file。",
   inputSchema: {
     type: "object",
+    // 【定】显式严格：未声明的键丢弃。见 validateAndNormalize 的标准语义那段。
+    additionalProperties: false,
     properties: {
       path: { type: "string", description: "相对 workspace 根的文件路径" },
       content: { type: "string", description: "要写入的文本" },

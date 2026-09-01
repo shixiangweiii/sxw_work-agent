@@ -88,8 +88,22 @@ export type RunEvent =
   | Ev<"ToolResultExternalized",
       { actionId: ActionId; toolName: string; ref: string; sizeBytes: number; approxTokens: number }>
   /** Artifact 登记（阶段 3 S8，§17）。它是第二层 Verification 的触发点。 */
+  /**
+   * `replacedBytes`：执行前同名文件的字节数。**不带这个字段 = 它是新建的。**
+   *
+   * 【定】`undefined` 与 `0` 是两件事，后者说的是「执行前那里有一个空文件」。
+   * 它撑的是事后追查里最要紧的一个问题：**这个交付物是新建的，还是在一个
+   * 来历不明的旧文件上改出来的？** 见 `ProducedArtifact.replacedBytes` 的实测背景。
+   */
   | Ev<"ArtifactRegistered",
-      { artifactId: string; logicalId: string; version: number; role: string; kind: string }>
+      {
+        artifactId: string;
+        logicalId: string;
+        version: number;
+        role: string;
+        kind: string;
+        replacedBytes?: number;
+      }>
   /**
    * Artifact 级 Verification 的结果（§10.4 第二层）。
    *
@@ -127,7 +141,30 @@ export type RunEvent =
    */
   | Ev<"InteractionResumed", { pendingToolUses: string[] }>
   | Ev<"ResumeUnpairedToolUse",
-      { toolCallId: string; toolName: string; branch: string ; hasPreFingerprint: boolean }>;
+      { toolCallId: string; toolName: string; branch: string ; hasPreFingerprint: boolean }>
+  /**
+   * 这个 Run 用过**外部工具**（MCP），而它们的外部状态 Atlas 核对不了。
+   *
+   * ══════════════════════════════════════════════════════════════════════
+   * 【定】它必须发，理由与 workspace 闸门那条 `UNKNOWN_LEGACY` 一字同源：
+   * **一条放行了却没验过的闸门如果不说话，与「验过并通过」事后不可区分。**
+   *
+   * V05 §18.3 要求 resume 检查 Browser Session 是否仍然有效。Atlas 做不到 ——
+   * 登录态活在 MCP 子进程里，是 transcript 之外的隐藏状态（ADR-0011 代价③），
+   * 而协议不提供任何会话身份。跨进程 resume 之后，那可能已经是另一个窗口、
+   * 另一个账号，甚至根本没登录。
+   *
+   * 【定】不硬拒。硬拒会让一个只用过一次 `browser_snapshot` 的长任务
+   * 整个恢复不了，而那次调用可能无关紧要。处置是**如实说「我无法核对」**，
+   * 把判断交给看 Trace 的人。
+   *
+   * `toolNames` 列出冻结快照里的外部工具；`drifted` 是那些在**当前装配**里
+   * 找不到、或身份（schema / description / 档位）已经变了的 ——
+   * 后者在 `npx …@latest` 这种写法下是常规路径，不是边角。
+   * ══════════════════════════════════════════════════════════════════════
+   */
+  | Ev<"ResumeExternalToolsUnverifiable",
+      { toolNames: string[]; drifted: string[] }>;
 
 interface EvBase {
   runId: RunId;

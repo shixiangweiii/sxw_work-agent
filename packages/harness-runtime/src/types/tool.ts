@@ -19,7 +19,22 @@ import type { RuntimeErrorRecord, SideEffectState } from "./error.js";
 export type EffectType = "READ" | "WRITE" | "DELETE" | "EXECUTE" | "NETWORK" | "NONE";
 
 export interface EffectScope {
-  kind: "FILE" | "DIRECTORY" | "URL" | "PROCESS" | "NONE";
+  /**
+   * ── `EXTERNAL_TOOL`：外部 MCP 服务器执行的工具 ────────────────────────
+   *
+   * 【定】它**不能**并进 `PROCESS`，虽然两者都是"跑一个外部东西"。
+   *
+   * 理由不在语义，在**审批展示**：`main.ts` 与 `human-channels.ts` 都按
+   * `scope.kind` 分派展示内容，而 `PROCESS` 那一支是 `run_shell` 专属的 ——
+   * 它读 `input["command"]`，并打印「沙箱：只能写 workspace 与本次调用的
+   * $TMPDIR；禁止联网」。**MCP 工具没有任何沙箱**，复用 PROCESS 的后果是
+   * 人在批准的那一刻看到一句方向相反的保证。
+   *
+   * `main.ts` 那段注释写着「按 scope.kind 判而不是按工具名判 —— 将来任何一个
+   * PROCESS scope 的工具都自动获得同样的展示」。那句话是对的，而这正是它的
+   * 代价：展示按 scope 泛化，内容却按工具特化。加一个 kind 是唯一诚实的出路。
+   */
+  kind: "FILE" | "DIRECTORY" | "URL" | "PROCESS" | "EXTERNAL_TOOL" | "NONE";
   /** 规范化语义对象，不以自由文本作为授权边界。 */
   value: string;
 }
@@ -118,16 +133,74 @@ export interface VerificationDescriptor {
   requiredForSuccess: boolean;
 }
 
-/** 一个极简的 JSON Schema 子集。够当前工具面用，不引入 schema 库（D-25 精神）。 */
+/**
+ * JSON Schema。
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ * 【定】它有**两个使用者，纪律相反**，这一点不能混：
+ *
+ *   Atlas 自家工具 —— 只用扁平标量子集（string / number / boolean）。
+ *                     由 `verify:tools` B4 段的机械判据钉住，写宽了就翻红。
+ *   外部工具（MCP）—— 原样携带服务器给的**完整** JSON Schema，
+ *                     Atlas 一个字都不解析，只透传给模型。
+ *
+ * ── 为什么是"放开索引签名"而不是"枚举支持哪些构造" ──────────────────────
+ *
+ * 参照 opencode 的 `convertTool`：它之所以能"换个 MCP 只改配置"，
+ * 是因为它**从不试图理解那个 schema** —— 原样交给下游。
+ * 反过来，"支持 array / object / enum" 这种写法有一个致命性质：
+ * **永远有下一个构造**（`$ref` / `oneOf` / `prefixItems` / …），
+ * 而下一个构造就是下一次"接个新 MCP 得改 Atlas 代码"。
+ *
+ * 代价如实记：索引签名让 Atlas 自家工具的**关键字拼写错误**（`descripton`）
+ * 不再被编译器抓住。这不是不管了 —— 换成了 `verify:tools` B4 那条判据，
+ * 它比类型系统管得更宽（还能一起判"自家工具不许用非标量"）。
+ * ══════════════════════════════════════════════════════════════════════
+ */
 export interface JsonSchema {
   type: "object";
-  properties: Record<string, JsonSchemaProperty>;
+  /**
+   * 【定】**可选**。「服务器没给 properties」与「服务器给了一个空 properties」
+   * 是两件事，而合并它们会造成一次静默的数据丢失。
+   *
+   * 根级 `$ref` / `oneOf` / `additionalProperties` / `patternProperties` 形态的
+   * schema **根本没有** `properties`，参数不展开在根上。此前 Atlas 会在翻译时
+   * 伪造一个空的补上，然后 `validateAndNormalize` 按这份**自己伪造的** schema
+   * 把模型的入参全部裁掉 —— 校验通过、`normalized` 为 `{}`、下游收到空对象，
+   * 一路没有任何报错。
+   *
+   * 那正是本仓反复猎杀的形态：**一边声称「从不解析外部 schema」，一边用一个
+   * 只有解析过才成立的假设去改写模型的意图。**
+   */
+  properties?: Record<string, JsonSchemaProperty>;
   required?: string[];
+  /**
+   * 外部 schema 的其余顶层关键字（`additionalProperties` / `$defs` / `oneOf` / …）
+   * 原样保留、原样发给模型。
+   *
+   * 其中 `additionalProperties` 是**唯一一个 Atlas 真的会读**的：它按 JSON Schema
+   * 的标准语义决定「`properties` 之外的键要不要丢」。见 `validateAndNormalize`。
+   */
+  [keyword: string]: unknown;
 }
 
 export interface JsonSchemaProperty {
-  type: "string" | "number" | "boolean";
+  /**
+   * 【定】可选，且不是字面量联合。
+   *
+   * 两条都由外部 schema 的真实形态逼出来：
+   *   · `type` 可以**缺失**（`oneOf` / `anyOf` / `$ref` 形态的属性）；
+   *   · `type` 可以是**数组**（`["string","null"]`）。
+   *
+   * 硬要求它是三个字面量之一，会让一个只有某个参数不合口味的 MCP 服务器
+   * **整个装不上**，而那个参数模型本来可能根本不用。
+   * Atlas 的校验策略因此是：认识的形态照校，不认识的**原样放行**
+   * （见 `validateAndNormalize`）。
+   */
+  type?: string | string[];
   description?: string;
+  /** `items` / `enum` / `properties` / `$ref` … 原样保留，原样发给模型。 */
+  [keyword: string]: unknown;
 }
 
 /**

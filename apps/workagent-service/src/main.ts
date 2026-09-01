@@ -12,7 +12,13 @@
 
 import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
-import { parseEndpointArg, REPO_ROOT, DEFAULT_STATE_DIR } from "../../cli/src/compose.js";
+import {
+  parseEndpointArg,
+  REPO_ROOT,
+  DEFAULT_STATE_DIR,
+  defaultMcpConfigPath,
+} from "../../cli/src/compose.js";
+import { connectMcpServers } from "@workagent/tools-mcp";
 import { startService } from "./server.js";
 
 function arg(argv: string[], name: string): string | undefined {
@@ -30,9 +36,28 @@ async function main(): Promise<void> {
   // （`workspaceStorage()`），CLI 与界面同一条规则。
   mkdirSync(workspaceRoot, { recursive: true });
 
+  /**
+   * ── 【定】MCP 连一次，跨 workspace 切换**复用同一个连接** ────────────────
+   *
+   * `WorkspaceHosts` 每次切换会关掉旧 `RunHost`、开一个新的（也就是重新
+   * `compose()`）。如果 MCP 跟着 RunHost 走，切一次目录就等于**关掉浏览器、
+   * 丢掉登录态** —— 而用户完全不会把这两件事联系起来。
+   *
+   * 这也是 `mcp.json` 放在 `.workagent-state/` 而不是 `<ws>/.workagent/`
+   * 的原因：那个浏览器窗口不属于任何一个 workspace。
+   *
+   * 【定】连不上就抛，Atlas 起不来（ADR-0011）。降级成"少几个工具"的失败
+   * 形态特别难查：同一句任务昨天能开浏览器今天不能，而 Run 照常跑到底。
+   */
+  const mcp = await connectMcpServers({
+    configPath: arg(argv, "mcp-config") ?? defaultMcpConfigPath(),
+    workspaceRoot,
+  });
+
   const svc = await startService({
     workspaceRoot,
     endpoint,
+    composeOverrides: { mcp },
     /**
      * 【定】注册表放在 `.workagent-state/` 而不是某个 workspace 里面。
      *
@@ -64,6 +89,9 @@ async function main(): Promise<void> {
   const stop = async (): Promise<void> => {
     console.log("\n正在停止……");
     await svc.close();
+    // MCP 子进程（浏览器）也要收掉 —— 不收的话它会留在后台，
+    // 而下次启动会再开一个，用户只会看到「浏览器窗口越来越多」。
+    await mcp.close();
     process.exit(0);
   };
   process.on("SIGINT", () => void stop());

@@ -246,7 +246,12 @@ async function handle(
       const r = await workspaces.switchTo(wsId);
       // 【定】「有 Run 在跑」返回 **409**，不是 500。它是一个用户能自己解决的
       // 冲突（先取消或等它跑完），而 500 的措辞是留给「不该发生的事」的。
-      sendJson(res, r.ok ? 200 : 409, r.ok ? { workspace: r.entry } : { error: r.error });
+      sendJson(
+        res,
+        r.ok ? 200 : 409,
+        // 【定】warning 不阻断切换，但必须送到界面上。见 WorkspaceHosts.switchTo。
+        r.ok ? { workspace: r.entry, ...(r.warning ? { warning: r.warning } : {}) } : { error: r.error },
+      );
       return;
     }
     if (req.method === "DELETE" && rest === "") {

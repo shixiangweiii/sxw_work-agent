@@ -268,6 +268,18 @@ export interface UiPending {
      */
     artifactPath?: string;
     artifactRole?: string;
+    /**
+     * EXTERNAL_TOOL scope（外部 MCP 工具）的**完整入参 JSON**。
+     *
+     * 【定】整份带上、不挑字段。Atlas 不解析 MCP 的参数 —— 那正是
+     * 「换个 MCP 只改配置」这条能力的代价 —— 所以没有哪个字段能被认定为
+     * 「关键字段」单独挑出来展示；挑就等于 Atlas 假装看懂了它，
+     * 而那个假装迟早在某个服务器上错。
+     *
+     * 它比 `command` 更要紧：`run_shell` 背后还有 seatbelt 兜着，
+     * 而 MCP 工具**没有沙箱**，这张卡是唯一还在的闸门。
+     */
+    externalArgs?: string;
     /** 自动放行档位下为什么没放行。 */
     why?: string;
   };

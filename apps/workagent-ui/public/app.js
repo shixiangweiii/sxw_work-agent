@@ -174,7 +174,7 @@ function renderWorkspaces() {
 async function switchWorkspace(id) {
   if (!id || id === S.activeWorkspaceId) return;
   try {
-    await api("/api/workspaces/" + encodeURIComponent(id) + "/activate", { method: "POST" });
+    const r = await api("/api/workspaces/" + encodeURIComponent(id) + "/activate", { method: "POST" });
     // 【定】切换之后必须把当前选中的 Run 清掉 —— 另一个 workspace 有它自己的库，
     // 旧 runId 在那边根本不存在，留着会让详情区停在一个查不到的 Run 上。
     S.runId = "";
@@ -183,7 +183,15 @@ async function switchWorkspace(id) {
     document.getElementById("runview").hidden = true;
     document.getElementById("empty").hidden = false;
     await refresh();
-    toast("已切换工作空间");
+    /**
+     * 【定】warning 要用**错误样式**显示，虽然切换是成功的。
+     *
+     * 它说的是「MCP 的工作目录没有跟着切」——一个不说出来就完全看不见、
+     * 只会表现为「文件莫名其妙读不到」的事实。用普通 toast 一闪而过，
+     * 等于没说。
+     */
+    if (r && r.warning) toast(r.warning, true);
+    else toast("已切换工作空间");
   } catch (err) {
     // 有 Run 在跑时服务端回 409 —— 那是一个用户能自己解决的冲突，如实转述。
     toast(err.message, true);
@@ -945,6 +953,27 @@ function approvalCard(p) {
         el("div", { class: "kv", text: "声明的交付物：" + a.artifactPath + "（" + a.artifactRole + "）" }),
       );
     }
+  }
+  /**
+   * 【定】外部 MCP 工具（ADR-0011）。**与 CLI 的 main.ts 是同一份内容的两处。**
+   *
+   * 它是独立的一支，不能并进上面 `a.command` 那一支 —— 那支会打出
+   * 「沙箱：只能写 workspace 与 $TMPDIR」，而 MCP 工具**没有沙箱**。
+   * 在审批的那一刻给出一句方向相反的保证，比不给保证更糟。
+   *
+   * 整份入参打出来、不挑字段：Atlas 不解析 MCP 的参数（那正是"换个 MCP
+   * 只改配置"的代价），所以没有哪个字段能被认定为"关键字段"。
+   */
+  if (a.externalArgs !== undefined) {
+    card.appendChild(el("pre", { text: a.externalArgs }));
+    card.appendChild(
+      el("div", {
+        class: "kv bad",
+        text:
+          "此工具由外部 MCP 服务器执行，不在沙箱内 —— " +
+          "Atlas 不解析它的参数，也不约束它能读写什么。",
+      }),
+    );
   }
   card.appendChild(
     el("div", { class: "row" }, [

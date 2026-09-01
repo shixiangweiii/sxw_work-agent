@@ -74,6 +74,8 @@ export const askUserDefinition: ToolDefinition = {
     "写明你选了哪个、为什么，**不要停下来也不要假装问过**。",
   inputSchema: {
     type: "object",
+    // 【定】显式严格：未声明的键丢弃。见 validateAndNormalize 的标准语义那段。
+    additionalProperties: false,
     properties: {
       question: { type: "string", description: "你在纠结什么，一句话说清楚" },
       options: {

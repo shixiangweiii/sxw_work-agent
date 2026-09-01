@@ -12,7 +12,9 @@
       "@workagent/shape-anthropic-messages": ["adapters/shape-anthropic-messages/src/index.ts"],
       "@workagent/micro-cases": ["cases/micro-cases/src/index.ts"],
       "@workagent/tools-common": ["tools/common/src/index.ts"],
-      "@workagent/tools-common/*": ["tools/common/src/*"]
+      "@workagent/tools-common/*": ["tools/common/src/*"],
+      "@workagent/tools-mcp": ["tools/mcp/src/index.ts"],
+      "@workagent/tools-mcp/*": ["tools/mcp/src/*"]
     }
   },
   "include": [

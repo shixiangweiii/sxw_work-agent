@@ -41,6 +41,8 @@ export const listDirDefinition: ToolDefinition = {
     "只想知道单个文件的大小或存在性时用 stat，不要用本工具去探测文件。",
   inputSchema: {
     type: "object",
+    // 【定】显式严格：未声明的键丢弃。见 validateAndNormalize 的标准语义那段。
+    additionalProperties: false,
     properties: {
       path: { type: "string", description: '相对 workspace 根的目录路径，根目录用 "."' },
       cursor: {

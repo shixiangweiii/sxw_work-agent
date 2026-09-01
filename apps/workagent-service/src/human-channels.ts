@@ -210,6 +210,21 @@ export class PendingHub {
                   : {}),
               }
             : {}),
+          /**
+           * 外部 MCP 工具（ADR-0011）。**与 `main.ts` 的 EXTERNAL_TOOL 分支
+           * 是同一份内容的两处**，必须一起改。
+           *
+           * 【定】不能并进上面的 PROCESS 分支：那一支会打出
+           * 「沙箱：只能写 workspace 与 $TMPDIR」，而 MCP 工具**没有沙箱**。
+           * 在审批的那一刻给出一句方向相反的保证，比不给保证更糟。
+           *
+           * 【定】整份入参带上，不挑字段。Atlas 不解析 MCP 的参数
+           * （那正是"换个 MCP 只改配置"的代价），所以没有哪个字段能被
+           * 认定为"关键字段"—— 挑就等于 Atlas 假装看懂了它。
+           */
+          ...(e.scope.kind === "EXTERNAL_TOOL"
+            ? { externalArgs: stripUnsafeDisplayChars(JSON.stringify(input, null, 2)) }
+            : {}),
         },
       };
 

@@ -188,6 +188,8 @@ export const runShellDefinition: ToolDefinition = {
     "命令返回非零退出码不算工具故障，看 exitCode 字段判断。",
   inputSchema: {
     type: "object",
+    // 【定】显式严格：未声明的键丢弃。见 validateAndNormalize 的标准语义那段。
+    additionalProperties: false,
     properties: {
       command: { type: "string", description: "要执行的 shell 命令" },
       description: {
@@ -691,6 +693,15 @@ async function collectDeclaredArtifact(
       kind: artifactKindOf(rel),
       path: rel,
       content: bytes,
+      /**
+       * 【定】与上面那句 note **同一个事实的两个读者**：note 给模型看，
+       * 这个字段给人和 Trace 看。
+       *
+       * 在此之前它只有前者 —— 实测 Run `run_18c20267c1a1` 里，模型确实
+       * 靠那句话发现了 `zip` 追加旧归档的问题，但事后要在盘上回答
+       * 「这个交付物是新建的还是改出来的」，一个字都查不到。
+       */
+      ...(pre?.existed === true ? { replacedBytes: pre.size } : {}),
     },
   };
 }

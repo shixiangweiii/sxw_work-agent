@@ -473,6 +473,31 @@ async function sectionBinaryArtifacts(): Promise<void> {
             `size ${rec?.sizeBytes} vs 磁盘 ${realBytes.byteLength}、hash 一致=${rec?.contentHash === realHash}、` +
             `delivered ${r.outcome?.deliveredArtifactIds.length ?? 0}、kind ${r.outcome?.kind}`,
     );
+
+    /**
+     * ── `replacedBytes` 的**反向**一半，落在这里而不是 E2 段 ──────────────────
+     *
+     * 【定】它必须由 **`run_shell`** 产出的**新建**产物来验。
+     *
+     * 这一条是注入实测逼出来的：我原先把反向判据写在 E2 段，而那一段用的是
+     * `write_file`（它压根不设这个字段）。于是把 `run_shell` 改成**恒填 0**
+     * ——一个让这个字段彻底失去判别力的改动——那条判据**照样是绿的**。
+     *
+     * 靶子和判据不在同一条路径上，是本仓反复出现的形态（`read_blob.line_offset`、
+     * 上一批 D 段的第一版）。反向判据必须打在**与正向同一个工具**上。
+     */
+    const newlyCreated = registered[0]?.replacedBytes;
+    fact(
+      "新建产物的 replacedBytes（run_shell）",
+      newlyCreated === undefined ? "（不带 ← 对）" : `${newlyCreated} ← 错，它不是覆盖出来的`,
+    );
+    verdict(
+      newlyCreated === undefined,
+      newlyCreated === undefined
+        ? "`out.zip` 是这条命令新建的 → **不带** replacedBytes；" +
+          "「覆盖了什么」与「新建」因此在事件上分得开（H4 下半条验的是另一侧）"
+        : `新建的产物也带上了 replacedBytes=${newlyCreated} —— 这个字段无法再区分「新建」与「覆盖」`,
+    );
   } finally {
     composed?.db.close();
     ws.cleanup();
@@ -643,6 +668,29 @@ async function sectionPreExisting(): Promise<void> {
         ? "真的重新生成同名产物时照常登记并计入交付，同时留下「覆盖了执行前就存在的同名文件」的记录 —— " +
             "没有这一半，一个「凡是执行前存在就拒绝」的实现也能通过上半条，而重新打包是最正常的操作"
         : `正当的覆盖被误伤：登记 ${registered.length}，kind=${r.outcome?.kind}，note=${JSON.stringify(note)}`,
+    );
+
+    /**
+     * ── 【定】那条事实必须**上事件**，不能只活在 tool result 的文本里 ────────
+     *
+     * 上面那条 `note.includes("覆盖")` 验的是**模型**看得到；这一条验的是
+     * **人和 Trace** 看得到。两个读者，两条判据。
+     *
+     * 实测背景（Run `run_18c20267c1a1`）：`artifactNote` 说得很准，模型也确实
+     * 靠它发现了 `zip` 追加旧归档的问题 —— 但事后要在盘上回答「这个交付物是
+     * 新建的还是在别人身上改出来的」，一个字都查不到。形态与 ADR-0011 那批
+     * 修过的 `dataMovement` 一字不差：撑着结论的依据从未离开产生它的函数。
+     *
+     * 注入实测：删掉 settle-batch 里那一行透传，本条必须翻红。
+     */
+    const replaced = registered[0]?.payload["replacedBytes"];
+    fact("ArtifactRegistered.replacedBytes", replaced === undefined ? "（缺席 ← 事实没上事件）" : String(replaced));
+    verdict(
+      typeof replaced === "number" && replaced > 0,
+      typeof replaced === "number" && replaced > 0
+        ? `覆盖的事实上了 ArtifactRegistered 事件（replacedBytes=${replaced}）—— ` +
+          "Trace 与界面上查得到「这个交付物是在一个执行前就存在的文件上改出来的」"
+        : "replacedBytes 没上事件 —— 这条事实只有模型看得见，人在 Trace 上查不到",
     );
   } finally {
     cB?.db.close();
@@ -1240,6 +1288,118 @@ async function sectionArtifacts(): Promise<void> {
   } finally {
     composed?.db.close();
     ws.cleanup();
+  }
+
+  // ══════════════ E2. 同一 logicalId 的版本链，只有最终版本算交付
+  section("E2. 同一 logicalId 登记两次 → 交付集合里只有**最终**那一版");
+  console.log(
+    "   实测逼出来的（Run `run_18c20267c1a1`，2026-09-01）。上一个 Run 在 workspace\n" +
+      "   留下了 images.zip（6.25MB / 49 个文件），而 `zip -9 ../images.zip …` 对**已存在的\n" +
+      "   归档是追加**：v2 = 上次的 49 个 ＋ 这次的 2 个（6.4MB，内容是错的），\n" +
+      "   模型看到 stdout 后 rm 重做 → v3 = 155KB，正确。\n\n" +
+      "   两个版本都 ok（v2 **确实**是个结构完好的 zip，检查器没判错），于是\n" +
+      "   deliveredArtifactIds 同时列着它们 —— Atlas 宣称交付了**两份**同名产物，\n" +
+      "   而磁盘上只有一份，另一份的 6.4MB 已经不可取回。\n\n" +
+      "   【定】被后续版本取代的产物不是「交付物」，是中间状态。\n" +
+      "   注入实测：把 splitArtifactChecks 改回「ok 的全收」，本段必须翻红。",
+  );
+  {
+    const ws2 = tempWorkspace();
+    let composed2: RunResult["composed"] | undefined;
+    try {
+      const r2 = await runScript(ws2.root, [
+        {
+          text: "先产出一版，再改一版",
+          toolCalls: [
+            {
+              toolCallId: "v1",
+              name: "write_file",
+              input: {
+                path: "out.json",
+                content: JSON.stringify({ v: 1, note: "被取代的那一版" }),
+                artifact_role: "DELIVERABLE",
+              },
+            },
+            // 【定】反向的一半：**另一个** logicalId 必须仍然在交付集合里。
+            // 少了它，一个「只留全局最后一条」的实现照样能让上面那条绿。
+            {
+              toolCallId: "other",
+              name: "write_file",
+              input: {
+                path: "sidecar.json",
+                content: JSON.stringify({ k: "另一条版本链" }),
+                artifact_role: "DELIVERABLE",
+              },
+            },
+          ],
+        },
+        {
+          text: "改掉第一版",
+          toolCalls: [
+            {
+              toolCallId: "v2",
+              name: "write_file",
+              input: {
+                path: "out.json",
+                content: JSON.stringify({ v: 2, note: "最终版" }),
+                artifact_role: "DELIVERABLE",
+              },
+            },
+          ],
+        },
+      ]);
+      composed2 = r2.composed;
+
+      const reg2 = r2.trace.byType("ArtifactRegistered").map((e) => e.payload);
+      const outIds = reg2.filter((a) => a.logicalId === "out.json");
+      const sidecar = reg2.find((a) => a.logicalId === "sidecar.json");
+      const delivered2 = r2.outcome?.deliveredArtifactIds ?? [];
+
+      for (const a of reg2) console.log(`     · 登记 ${a.logicalId} v${a.version} → ${a.artifactId}`);
+      fact("out.json 登记了几版", outIds.length);
+      fact("deliveredArtifactIds", JSON.stringify(delivered2));
+
+      const finalOut = outIds[outIds.length - 1];
+      const supersededOut = outIds.slice(0, -1);
+      const finalIn = finalOut !== undefined && delivered2.includes(finalOut.artifactId);
+      const supersededIn = supersededOut.filter((a) => delivered2.includes(a.artifactId));
+      const sidecarIn = sidecar !== undefined && delivered2.includes(sidecar.artifactId);
+
+      fact("最终版 v" + (finalOut?.version ?? "?") + " 在交付集合里", finalIn ? "是（对）" : "否（错）");
+      fact("被取代的版本在交付集合里", supersededIn.length > 0 ? `是（错，${supersededIn.length} 个）` : "否（对）");
+      fact("另一条版本链 sidecar.json 仍在", sidecarIn ? "是（对）" : "否（错）");
+
+      const e2Ok =
+        outIds.length === 2 &&
+        finalIn &&
+        supersededIn.length === 0 &&
+        sidecarIn &&
+        delivered2.length === 2 &&
+        r2.outcome?.kind === "SUCCESS";
+      verdict(
+        e2Ok,
+        e2Ok
+          ? "同一 logicalId 的两版里**只有最终版**进了交付集合，而**另一条版本链不受影响** —— " +
+            "「交付」说的是最终状态，不是产出过的一切"
+          : `版本链收敛不对：out.json 登记 ${outIds.length} 版，delivered=${JSON.stringify(delivered2)}，` +
+            `kind=${r2.outcome?.kind}`,
+      );
+
+      // ── F2：覆盖已存在文件这件事必须上事实表 ─────────────────────────────
+      // write_file 没有执行前快照机制，所以这里只验「新建时不带这个字段」那一侧；
+      // 「覆盖时带」由 H 段的 run_shell 链路验（它才有 preSnapshot）。
+      const anyReplaced = reg2.some((a) => a.replacedBytes !== undefined);
+      fact("write_file 新建的产物带 replacedBytes 吗", anyReplaced ? "带了（错）" : "没带（对）");
+      verdict(
+        !anyReplaced,
+        !anyReplaced
+          ? "新建的产物**不带** replacedBytes —— undefined 与 0 是两件事，后者说的是「执行前那里有个空文件」"
+          : "新建的产物也带上了 replacedBytes，这个字段失去了判别力",
+      );
+    } finally {
+      composed2?.db.close();
+      ws2.cleanup();
+    }
   }
 
   // ── F 段：四种坏产物 ＋ role 分流
