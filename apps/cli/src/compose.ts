@@ -42,6 +42,7 @@ import {
   type TranscriptStorePort,
 } from "@workagent/harness-runtime";
 import { createAnthropicModelPort, createAnthropicProtocol } from "@workagent/shape-anthropic-messages";
+import { FileModelInvocationAuditStore } from "./model-audit/file-store.js";
 import {
   MicroCaseToolHandler,
   MicroCaseVerifier,
@@ -119,9 +120,17 @@ export function defaultMcpConfigPath(): string {
  * 「A 的 Run 出现在 B 的列表里」物理上不成立，闸门只是兜底。
  * ══════════════════════════════════════════════════════════════════════
  */
-export function workspaceStorage(workspaceRoot: string): { dbPath: string; traceDir: string } {
+export function workspaceStorage(workspaceRoot: string): {
+  dbPath: string;
+  traceDir: string;
+  modelAuditDir: string;
+} {
   const dir = resolve(workspaceRoot, ".workagent");
-  return { dbPath: resolve(dir, "runs.db"), traceDir: resolve(dir, "runs") };
+  return {
+    dbPath: resolve(dir, "runs.db"),
+    traceDir: resolve(dir, "runs"),
+    modelAuditDir: resolve(dir, "model-invocations"),
+  };
 }
 
 /**
@@ -632,6 +641,8 @@ export interface ComposeOptions {
   workspaceRoot: string;
   approvalDecider: ApprovalDecider;
   trace: TraceSinkPort;
+  /** 默认随 workspace 落在 `.workagent/model-invocations/`；验收可重定向。 */
+  modelAuditDir?: string;
   /** 覆盖端点能力声明。verify:endpoint-profile 靠它换 profile。 */
   profileOverride?: EndpointCapabilityProfile;
   /** 不发真实请求时用。 */
@@ -646,7 +657,9 @@ export interface ComposeOptions {
    * 「登记与磁盘一致」这条检查在生产路径上造不出反例。
    * 【定】旋钮长在测量装置这边，不长在工具身上（决 6 的口径）。
    */
-  portOverrides?: Partial<Pick<RuntimePorts, "effects" | "redaction" | "verification" | "tools">>;
+  portOverrides?: Partial<
+    Pick<RuntimePorts, "effects" | "modelAudit" | "redaction" | "verification" | "tools">
+  >;
   systemPrompt?: string;
   /** IANA 时区名。不传则取宿主时区。验收脚本可固定它，让帧内容可复现。 */
   timezone?: string;
@@ -745,7 +758,7 @@ export interface ComposeOptions {
    *      §18.2 三条恢复分支读的是冻结的那一份，中途长出新工具会让
    *      同一条 transcript 在 resume 时走进另一条分支，而盘上看不出来；
    *   ② `compose()` 保持同步。改成 async 会波及 main.ts / run-host.ts /
-   *      15 条 verify 脚本 / eval，而那些地方一件正事都不多干。
+   *      16 条 verify 脚本 / eval，而那些地方一件正事都不多干。
    *
    * 不传 = 没有 MCP，工具面就是 `DEFAULT_TOOLS`。
    */
@@ -1000,6 +1013,11 @@ export function compose(opts: ComposeOptions): Composed {
     clock,
     ids,
     trace: opts.trace,
+    modelAudit:
+      opts.portOverrides?.modelAudit ??
+      new FileModelInvocationAuditStore(
+        opts.modelAuditDir ?? workspaceStorage(opts.workspaceRoot).modelAuditDir,
+      ),
     blobs,
     artifacts,
     /**

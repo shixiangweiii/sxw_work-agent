@@ -151,18 +151,25 @@ npm run dev -- --mcp-config ./my-mcp.json --task "..."  # 使用其他 MCP 配�
 `--db <path>` 指定 SQLite 库（默认 `<workspace>/.workagent/runs.db`）；
 `--trace <file>` 指定事件流落盘位置（默认按 runId 定名，resume 续写同一文件），`--no-trace` 关闭。
 
+CLI 与 Web 的每次模型推理还会默认写一份敏感调用审计：
+`<workspace>/.workagent/model-invocations/<runId>/<invocationId>.jsonl`。它包含实际请求 body、
+SDK 解码后的 Provider 事件、独立的流内错误和规范化结果，不含认证头/API key，
+也不受 `--no-trace` 影响。SDK 的 ping 不记录，SSE error 进入 `provider_error`；
+这里不承诺 wire-level 字节还原。
+这些文件不得提交或随意分享；`count_tokens` 与 EVAL 不采集。
+
 **运行期交互**：TTY 下 stdin 是**单一通道**，按「谁在等」分派三种语义 ——
 RUNNING 敲一句话回车 = 插话；等审批时回车 = 应答；等接管时回车 = 完成信号。
 非 TTY 优雅降级（审批按**拒绝**处置，接管按「没有人」处置，都不挂起）。
 
 ---
 
-## 15 条验收脚本 / 235 条判据
+## 16 条验收脚本
 
 不写单测（D-25）。验收以**可运行脚本**交付，输出可读证据供人判断，与 Spike 0 的探针形态一致。
 
 ```bash
-npm run verify:all                 # 15 条脚本 / 235 条判据
+npm run verify:all                 # 16 条脚本；每条打印可读证据与判据合计
 ```
 
 | 脚本 | 挂了意味着 |
@@ -181,6 +188,7 @@ npm run verify:all                 # 15 条脚本 / 235 条判据
 | `verify:progress` | 长任务被误杀、原地打转叫不停、人机通道不通 |
 | `verify:ui` | ★阶段 4：Layer 2 开始推进执行语义、投影自己算数、本地通信边界破了、自动放行的正分支回退、失败的 resume 留幻影、或 RECOVERY_REQUIRED 的项看不见 |
 | `verify:mcp` | ★ADR-0011：MCP 跑进 Runtime、默认档不保守、开放 schema 被裁剪、分页/失败分流/生命周期/resume 漂移处理失效 |
+| `verify:model-audit` | 实际请求、SDK 解码 Provider 事件或独立错误没有落盘，或审计故障改变了 Run |
 | `verify:scenarios` | 三个场景不再共用同一套工具（过拟合警报） |
 
 `verify:scenarios -- --live` 与 `verify:drift -- --live` 用真实端点跑，**花钱，不在 `verify:all` 里**。
@@ -239,7 +247,7 @@ adapters/endpoint-profiles/  端点行为的**数据**形态，不是代码
 tools/common/                Case 无关的通用能力面（9 场景 ＋ 3 机制工具）
 tools/mcp/                   通用本地 stdio MCP 客户端；配置、生命周期、工具桥接与 handler
 cases/micro-cases/           append_log 与 slow_write —— **测量工具**，不是能力
-apps/cli/                    Composition Root ＋ 终端入口 ＋ 15 条验收脚本 ＋ 一次性探针
+apps/cli/                    Composition Root ＋ 终端入口 ＋ 16 条验收脚本 ＋ 一次性探针
 apps/workagent-service/      ★阶段 4。Layer 2：投影 / Runtime Host / 三条人机通道 / HTTP ＋ SSE
 apps/workagent-ui/public/    ★阶段 4。Layer 1：**没有 src/、没有构建、没有一行 import**
 ```

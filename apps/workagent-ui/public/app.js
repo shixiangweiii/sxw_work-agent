@@ -1188,6 +1188,7 @@ const TRACE_EVENT_META = {
   RecoveryResolved: { label: "恢复项已决定", category: "diagnostic", tone: "flow", important: true },
   NoProgressDetected: { label: "检测到无进展", category: "diagnostic", tone: "warn", important: true },
   RuntimeErrorOccurred: { label: "Runtime 错误", category: "diagnostic", tone: "bad", important: true },
+  ModelInvocationAuditFailed: { label: "模型调用审计失败", category: "diagnostic", tone: "bad", important: true },
   EndpointBehaviorDrift: { label: "端点行为漂移", category: "diagnostic", tone: "bad", important: true },
   InteractionResumed: { label: "人工接管已恢复", category: "diagnostic", tone: "flow", important: true },
   ResumeUnpairedToolUse: { label: "恢复时发现未配对工具调用", category: "diagnostic", tone: "warn", important: true },
@@ -1395,6 +1396,14 @@ function traceEventPresentation(line) {
       abnormal = true;
       break;
     }
+    case "ModelInvocationAuditFailed":
+      summary = (payload.stage || "UNKNOWN") + " · " +
+        traceClip(payload.message || "未给出原因", 220) + " · " +
+        (payload.invocationId || "无 invocationId");
+      abnormal = true;
+      important = true;
+      diagnostic = true;
+      break;
     case "EndpointBehaviorDrift":
       summary = (payload.field || "未知字段") + " · 声明 " + (payload.declared || "?") +
         " → 实际 " + (payload.observed || "?") + " · " + (payload.disposition || "UNKNOWN");

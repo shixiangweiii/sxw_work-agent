@@ -157,6 +157,14 @@ export function renderEvent(e: RunEvent): void {
       break;
     }
 
+    case "ModelInvocationAuditFailed":
+      console.error(
+        `${tag("审计写入失败", RED)} invocation=${e.payload.invocationId} ` +
+          `stage=${e.payload.stage}\n  ${e.payload.message}\n` +
+          `  ${YELLOW}模型调用与 Run 已继续执行；该调用的 sidecar 不完整。${RESET}`,
+      );
+      break;
+
     case "EndpointBehaviorDrift":
       console.log(
         `${tag("端点漂移", RED)} ${e.payload.field}\n` +

@@ -48,7 +48,10 @@
  * ══════════════════════════════════════════════════════════════════════
  */
 
-import { loadProfileFromFile } from "@workagent/harness-runtime";
+import {
+  NULL_MODEL_INVOCATION_OBSERVER,
+  loadProfileFromFile,
+} from "@workagent/harness-runtime";
 import { createAnthropicModelPort } from "@workagent/shape-anthropic-messages";
 import { ARCHIVE_TASK } from "../../../../eval/fixtures/archive-inventory.js";
 import { loadEnv, readEndpointConfig } from "../compose.js";
@@ -156,7 +159,7 @@ async function extractOnce(model: Port, modelId: string, task: string): Promise<
     messages: [{ role: "user", content: [{ type: "text", text: EXTRACT_PROMPT(task) }] }],
   };
   const ac = new AbortController();
-  const stream = model.invoke({ body, modelId }, ac.signal);
+  const stream = model.invoke({ body, modelId }, ac.signal, NULL_MODEL_INVOCATION_OBSERVER);
   let r = await stream.next();
   while (!r.done) r = await stream.next();
 
@@ -263,6 +266,7 @@ async function openEndpoint(choice: "deepseek" | "bailian"): Promise<Endpoint> {
         modelId: cfg.modelId,
       },
       ac.signal,
+      NULL_MODEL_INVOCATION_OBSERVER,
     );
     let r = await stream.next();
     while (!r.done) r = await stream.next();

@@ -37,6 +37,8 @@ import { DriftDetector, EndpointDriftError } from "../model/capability/drift-det
 import { RunInterrupts } from "./interrupt/index.js";
 import { ProgressGuard } from "./progress-guard.js";
 import { makeError } from "../types/error.js";
+import { MODEL_INVOCATION_AUDIT_SCHEMA_VERSION } from "../types/model-audit.js";
+import { FailOpenModelInvocationAudit } from "./model-audit.js";
 
 export interface RunLoopDeps {
   runId: RunId;
@@ -582,6 +584,8 @@ export async function* runLoop(
 
     const frame = compiled.frame;
     yield await emit("ContextFrameCompiled", {
+      frameId: frame.id,
+      invocationId: frame.invocationId,
       items: frame.items.length,
       totalTokens: compiled.totalTokens,
       fixedOverheadTokens: compiled.fixedOverheadTokens,
@@ -597,6 +601,33 @@ export async function* runLoop(
     // ── ② 调模型
     const request = ports.protocol.buildRequest(frame);
     const startedAt = now();
+    const audit = new FailOpenModelInvocationAudit(
+      ports.modelAudit,
+      {
+        schemaVersion: MODEL_INVOCATION_AUDIT_SCHEMA_VERSION,
+        runId,
+        invocationId: frame.invocationId,
+        frameId: frame.id,
+        turn: state.turnCount + 1,
+        endpointProfileVersion: frame.endpointProfileVersion,
+        modelId: request.modelId,
+        startedAt,
+        requestBody: request.body,
+      },
+      now,
+      spec.origin.kind !== "EVAL",
+    );
+    const auditFailureEvent = async (): Promise<RunEvent | undefined> => {
+      const failure = audit.takeFailure();
+      if (!failure) return undefined;
+      return emit("ModelInvocationAuditFailed", {
+        invocationId: frame.invocationId,
+        stage: failure.stage,
+        message: failure.message,
+      });
+    };
+    const openWarning = await auditFailureEvent();
+    if (openWarning) yield openWarning;
 
     /**
      * ── C1：给在途模型调用挂预算 deadline ────────────────────────────────
@@ -632,15 +663,19 @@ export async function* runLoop(
 
     let invocation;
     try {
-      const stream = ports.model.invoke(request, callSignal);
-      let r = await stream.next();
-      while (!r.done) {
+      const stream = ports.model.invoke(request, callSignal, audit.observer);
+      while (true) {
+        const r = await stream.next();
+        const streamWarning = await auditFailureEvent();
+        if (streamWarning) yield streamWarning;
+        if (r.done) {
+          invocation = r.value;
+          break;
+        }
         const sev = r.value;
         // 循环纪律第 4 条：delta 直接 yield，不进 LoopState。
         if (sev.type === "text_delta") yield await emit("ModelStreamDelta", { text: sev.text });
-        r = await stream.next();
       }
-      invocation = r.value;
     } catch (err) {
       /**
        * 【定】deadline 要在 classifyError 之前分流。
@@ -650,10 +685,30 @@ export async function* runLoop(
        * 别的实现完全可以抛 AbortError —— 那时若直接 classifyError，
        * 一次预算撞墙会被记成 `MODEL_ERROR`，成因线索当场丢失。
        */
-      if (deadlineHit()) return yield* finishOnCallDeadline();
+      if (deadlineHit()) {
+        const finishedAt = now();
+        audit.finish({
+          outcome: "INTERRUPTED",
+          finishedAt,
+          durationMs: finishedAt - startedAt,
+          interruptionReason: "DEADLINE",
+        });
+        const auditWarning = await auditFailureEvent();
+        if (auditWarning) yield auditWarning;
+        return yield* finishOnCallDeadline();
+      }
 
       const e = ports.protocol.classifyError(err);
-      yield await emit("RuntimeErrorOccurred", { error: e });
+      const finishedAt = now();
+      audit.finish({
+        outcome: "FAILED",
+        finishedAt,
+        durationMs: finishedAt - startedAt,
+        error: e,
+      });
+      const auditWarning = await auditFailureEvent();
+      if (auditWarning) yield auditWarning;
+      yield await emit("RuntimeErrorOccurred", { error: e, invocationId: frame.invocationId });
 
       /**
        * ── U-1 的第三个观测点：配对漂移（本批决 2 接线）────────────────────
@@ -681,7 +736,7 @@ export async function* runLoop(
           sideEffectState: "NO_EFFECT",
           safeMessage: new EndpointDriftError(pairingDrift).message,
         });
-        yield await emit("RuntimeErrorOccurred", { error: err2 });
+        yield await emit("RuntimeErrorOccurred", { error: err2, invocationId: frame.invocationId });
         return yield* finish({ reason: "MODEL_ERROR", error: err2 });
       }
 
@@ -705,12 +760,32 @@ export async function* runLoop(
       return yield* finish({ reason: "MODEL_ERROR", error: e });
     }
 
+    const invocationFinishedAt = now();
+    audit.finish({
+      outcome: invocation.interrupted ? "INTERRUPTED" : "COMPLETED",
+      finishedAt: invocationFinishedAt,
+      durationMs: invocationFinishedAt - startedAt,
+      result: invocation,
+      ...(invocation.interrupted
+        ? {
+            interruptionReason: deadlineHit()
+              ? "DEADLINE" as const
+              : interrupts.aborted
+                ? "USER_ABORT" as const
+                : "PROVIDER_ABORT" as const,
+          }
+        : {}),
+    });
+    const finishWarning = await auditFailureEvent();
+    if (finishWarning) yield finishWarning;
+
     const usage = invocation.usage;
     yield await emit("ModelInvocationCompleted", {
+      invocationId: frame.invocationId,
       toolCallCount: invocation.toolCalls.length,
       usage,
       stopReason: invocation.stopReason,
-      durationMs: now() - startedAt,
+      durationMs: invocationFinishedAt - startedAt,
     });
 
     /**
@@ -771,7 +846,7 @@ export async function* runLoop(
           sideEffectState: "NO_EFFECT",
           safeMessage: new EndpointDriftError(o).message,
         });
-        yield await emit("RuntimeErrorOccurred", { error: err });
+        yield await emit("RuntimeErrorOccurred", { error: err, invocationId: frame.invocationId });
         return yield* finish({ reason: "MODEL_ERROR", error: err });
       }
     }
@@ -847,6 +922,7 @@ export async function* runLoop(
       if (state.outputLimitRecoveries < spec.agentSpec.loopPolicy.maxOutputLimitRecoveries) {
         const attempt = state.outputLimitRecoveries + 1;
         yield await emit("RuntimeErrorOccurred", {
+          invocationId: frame.invocationId,
           error: makeError({
             code: "MODEL_OUTPUT_EATEN_BY_REASONING",
             source: "MODEL_PROVIDER",

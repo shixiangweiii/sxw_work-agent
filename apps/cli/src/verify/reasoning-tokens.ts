@@ -36,7 +36,11 @@
  * ══════════════════════════════════════════════════════════════════════
  */
 
-import { loadProfileFromFile, type ModelRequest } from "@workagent/harness-runtime";
+import {
+  NULL_MODEL_INVOCATION_OBSERVER,
+  loadProfileFromFile,
+  type ModelRequest,
+} from "@workagent/harness-runtime";
 import { createAnthropicModelPort } from "@workagent/shape-anthropic-messages";
 import {
   DEFAULT_SYSTEM_PROMPT,
@@ -259,7 +263,7 @@ async function realInputTokens(
   modelId: string,
 ): Promise<number | undefined> {
   const ac = new AbortController();
-  const stream = model.invoke({ body, modelId }, ac.signal);
+  const stream = model.invoke({ body, modelId }, ac.signal, NULL_MODEL_INVOCATION_OBSERVER);
   let r = await stream.next();
   while (!r.done) r = await stream.next();
   return r.value.usage.inputTokens || undefined;

@@ -20,6 +20,7 @@ import { join } from "node:path";
 import type {
   BudgetAxis,
   ContextMessage,
+  ModelInvocationObserver,
   ModelInvocationResult,
   ModelPort,
   ModelRequest,
@@ -76,6 +77,7 @@ class SlowModelPort implements ModelPort {
   async *invoke(
     _request: ModelRequest,
     signal: AbortSignal,
+    _observer: ModelInvocationObserver,
   ): AsyncGenerator<ModelStreamEvent, ModelInvocationResult> {
     const interrupted = signal.aborted
       ? true

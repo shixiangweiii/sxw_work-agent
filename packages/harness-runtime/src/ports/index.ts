@@ -1,5 +1,5 @@
 /**
- * Runtime Ports（V05 §8.7）。共 **14** 个，**全部有实现**。
+ * Runtime Ports（V05 §8.7）。共 **15** 个，**全部有实现**。
  *
  * §2.5 规格纪律第 4 条：每新增一个 Port，必须同时指出强制它存在的不变量。
  * 下面每个接口的注释都写了这一条。
@@ -33,6 +33,11 @@ import type {
   VerificationResult,
 } from "../types/tool.js";
 import type { JsonValue, RunId, RunSpecId, Timestamp } from "../types/ids.js";
+import type {
+  ModelInvocationAuditStart,
+  ModelInvocationAuditWriter,
+  ModelInvocationObserver,
+} from "../types/model-audit.js";
 
 /**
  * ModelPort —— 网络调用与流式传输。
@@ -42,6 +47,7 @@ export interface ModelPort {
   invoke(
     request: ModelRequest,
     signal: AbortSignal,
+    observer: ModelInvocationObserver,
   ): AsyncGenerator<ModelStreamEvent, ModelInvocationResult>;
   countTokens(request: ModelRequest): Promise<number | undefined>;
 }
@@ -470,6 +476,16 @@ export interface TraceSinkPort {
 }
 
 /**
+ * ModelInvocationAuditStorePort —— Provider I/O 的独立、追加式事实源。
+ *
+ * 强制它的不变量：完整请求与原始 Provider 流不得进入 transcript、SQLite 或
+ * 主 Trace；同时任何审计 I/O 故障都不得改变模型调用与 Run 的结果。
+ */
+export interface ModelInvocationAuditStorePort {
+  open(start: ModelInvocationAuditStart): ModelInvocationAuditWriter;
+}
+
+/**
  * BlobStorePort —— 大结果外置（阶段 3，§11.4）。
  *
  * 强制它的不变量：**§11.5 不变量 5 —— 外置必须保留协议合法的结构化 stub**，
@@ -629,6 +645,8 @@ export interface RuntimePorts {
   clock: ClockPort;
   ids: IdGeneratorPort;
   trace: TraceSinkPort;
+  /** 调用级原始请求/返回 sidecar；Runtime 只写，不从中恢复。 */
+  modelAudit: ModelInvocationAuditStorePort;
   /** 阶段 3 新增。大结果外置（§11.4）。 */
   blobs: BlobStorePort;
   /** 阶段 3 新增。交付物登记与第二层 Verification（§17、§10.4）。 */

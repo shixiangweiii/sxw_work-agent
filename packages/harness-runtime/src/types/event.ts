@@ -8,7 +8,14 @@
  * Trace 里能直接读出走了哪条恢复路径，不必去比对消息内容。
  */
 
-import type { ActionBatchId, ActionId, RunId, Timestamp } from "./ids.js";
+import type {
+  ActionBatchId,
+  ActionId,
+  ContextFrameId,
+  ModelInvocationId,
+  RunId,
+  Timestamp,
+} from "./ids.js";
 import type { Continue, Terminal } from "./loop.js";
 import type { ExecutionPrivilege, ModelUsage, RunOutcome } from "./run.js";
 import type { RuntimeErrorRecord } from "./error.js";
@@ -40,6 +47,8 @@ export type RunEvent =
    */
   | Ev<"ContextFrameCompiled",
       {
+        frameId: ContextFrameId;
+        invocationId: ModelInvocationId;
         items: number;
         totalTokens: number;
         fixedOverheadTokens: number;
@@ -49,7 +58,13 @@ export type RunEvent =
   | Ev<"ContextCompacted", { freedTokens: number; reason: string }>
   | Ev<"ModelStreamDelta", { text: string }>
   | Ev<"ModelInvocationCompleted",
-      { toolCallCount: number; usage: ModelUsage; stopReason: string; durationMs: number }>
+      {
+        invocationId: ModelInvocationId;
+        toolCallCount: number;
+        usage: ModelUsage;
+        stopReason: string;
+        durationMs: number;
+      }>
   | Ev<"ActionBatchPlanned", { batchId: ActionBatchId; callCount: number; mode: string }>
   /**
    * 【定】`riskFacts` / `dataMovement` 必须在这里，不能只活在 Resolver 的返回值里。
@@ -145,7 +160,13 @@ export type RunEvent =
    * 「交用户决定」必须真的拿到一个决定，而不是下次 resume() 自动放行。
    */
   | Ev<"RecoveryResolved", { decision: "CONTINUE" | "ABORT"; items: number; note?: string }>
-  | Ev<"RuntimeErrorOccurred", { error: RuntimeErrorRecord }>
+  | Ev<"RuntimeErrorOccurred", { error: RuntimeErrorRecord; invocationId?: ModelInvocationId }>
+  | Ev<"ModelInvocationAuditFailed",
+      {
+        invocationId: ModelInvocationId;
+        stage: string;
+        message: string;
+      }>
   /** 实际行为与端点声明不符。不得静默继续（V05 §8.6 不变量 4）。 */
   | Ev<"EndpointBehaviorDrift",
       { field: string; declared: string; observed: string; disposition: "RECORD" | "FAIL_FAST" }>

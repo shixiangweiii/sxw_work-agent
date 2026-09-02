@@ -21,7 +21,7 @@ External MCP is intentionally generic: no production code recognizes Playwright 
 - `cp mcp.example.json .workagent-state/mcp.json`: enable the Playwright MCP example. It uses `@latest`; review the command and its host-level privileges before enabling it.
 - Both production entrypoints accept `--workspace <path>`, `--endpoint bailian|deepseek`, `--mcp-config <path>`, `--approval confirm|default|auto`, and `--sandbox on|off`. Approval and execution privilege are orthogonal: full access requires both `--approval auto --sandbox off`; there is no `--yolo` alias.
 - Budget flags are `--max-turns`, `--max-wallclock`, `--max-total-wallclock`, `--max-model-calls`, `--max-tool-calls`, `--max-billed-input-tokens`, `--max-output-tokens`, and `--max-consecutive-failures`. CLI wall-clock values are milliseconds. These limits are validated as positive integers and frozen into a new RunSpec; they do not alter an existing Run during resume. `--max-output-tokens` limits cumulative Run output, not one provider request's `max_tokens`.
-- `npm run verify:all`: run the 15 acceptance scripts / 235 criteria; use an individual `verify:*` command for evidence. `npm run verify:mcp` uses a fake stdio server and does not launch Playwright or access the network.
+- `npm run verify:all`: run the 16 acceptance scripts; use an individual `verify:*` command for evidence. `npm run verify:mcp` uses a fake stdio server and does not launch Playwright or access the network. `npm run verify:model-audit` uses only a loopback fake Anthropic-compatible server.
 
 ## Coding Style & Naming Conventions
 
@@ -29,9 +29,9 @@ Use two-space indentation, double quotes, semicolons, trailing commas, and `.js`
 
 ## Testing Guidelines
 
-D-25 specifies no unit-test framework or coverage target. The current suite has 15 acceptance scripts / 235 criteria. Scripts in `apps/cli/src/verify/` must print readable evidence through `verify/harness.ts`, not only return a green assertion. Name scripts for the invariant and register them in root `package.json`. Before submitting, run `typecheck`, relevant `verify:*` scripts, and the boundary greps — run them via `npm run verify:tools` (section A), not by hand: the checker filters comment lines, because these files quote the boundary rules themselves everywhere, so copying the raw grep commands gives false reds.
+D-25 specifies no unit-test framework or coverage target. The current suite has 16 acceptance scripts. Scripts in `apps/cli/src/verify/` must print readable evidence through `verify/harness.ts`, not only return a green assertion. Name scripts for the invariant and register them in root `package.json`. Before submitting, run `typecheck`, relevant `verify:*` scripts, and the boundary greps — run them via `npm run verify:tools` (section A), not by hand: the checker filters comment lines, because these files quote the boundary rules themselves everywhere, so copying the raw grep commands gives false reds.
 
-Every new assertion must have discriminating power: state which single line, if broken, would turn it red, and actually run that experiment once. A green assertion that cannot fail is decoration, not a criterion — the 2026-08-28 closeout batch found four of them among 84 supposedly-green checks (see stale-issue list §0.7). Verification requires a configured root `.env`, even with fake ports. Never commit `.env`, credentials, `.workagent-workspace/`, or sensitive provider traces.
+Every new assertion must have discriminating power: state which single line, if broken, would turn it red, and actually run that experiment once. A green assertion that cannot fail is decoration, not a criterion — the 2026-08-28 closeout batch found four of them among 84 supposedly-green checks (see stale-issue list §0.7). Verification requires a configured root `.env`, even with fake ports. Never commit `.env`, credentials, `.workagent-workspace/`, `.workagent/model-invocations/`, or other sensitive provider traces.
 
 ## Commit & Pull Request Guidelines
 

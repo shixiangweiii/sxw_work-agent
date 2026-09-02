@@ -28,6 +28,7 @@ import type {
   ToolSnapshot,
 } from "@workagent/harness-runtime";
 import { makeError } from "@workagent/harness-runtime";
+import { readAnthropicErrorFacts, type AnthropicErrorFacts } from "./error-facts.js";
 
 export interface AnthropicProtocolDeps {
   profile: EndpointCapabilityProfile;
@@ -268,9 +269,9 @@ class AnthropicMessagesProtocol implements ModelProtocolPort {
    * 选定端点连 type / code 字段都没有，只能 HTTP_STATUS + MESSAGE_MATCH。
    */
   classifyError(err: unknown): RuntimeErrorRecord {
-    const e = err as { status?: number; message?: string; name?: string } | undefined;
-    const status = e?.status;
-    const message = String(e?.message ?? err ?? "unknown");
+    const facts = readAnthropicErrorFacts(err);
+    const status = facts.status;
+    const message = facts.message || "unknown";
     const discriminators = this.profile.errors?.discriminators ?? ["HTTP_STATUS", "MESSAGE_MATCH"];
 
     /**
@@ -298,7 +299,7 @@ class AnthropicMessagesProtocol implements ModelProtocolPort {
      * 【端点】这段不读端点声明：SDK 是形状层的东西，四个端点共用同一份 SDK。
      */
     if (status === undefined) {
-      const ctor = (err as { constructor?: { name?: string } } | undefined)?.constructor?.name ?? "";
+      const ctor = facts.constructorName;
 
       // 我们自己 abort 的。不是故障，更不是「SDK 拒绝」——取消由主循环的
       // interrupt 路径处置，这里只保证它不会被误判成永久失败。
@@ -313,6 +314,13 @@ class AnthropicMessagesProtocol implements ModelProtocolPort {
           endpointId: this.profile.endpointId,
         });
       }
+
+      /**
+       * HTTP 200 后的 SSE `event:error` 是 Provider 失败，不是连接失败：SDK 抛出的
+       * APIError 没有 status，但保留 requestID / error body。必须排在消息关键词
+       * 网络兜底之前，否则 Provider 文案里一句 "connection" 又会把来源改错。
+       */
+      if (facts.providerResponded) return classifyStreamProviderError(facts, this.profile.endpointId);
 
       const isTimeout = ctor === "APIConnectionTimeoutError" || /timed?\s?out|ETIMEDOUT/i.test(message);
       const isNetwork =
@@ -429,6 +437,86 @@ class AnthropicMessagesProtocol implements ModelProtocolPort {
    * 【定】要恢复它，先回答「谁调它」—— 如果答案还是 `assemble()`，
    * 那就该把 `assemble()` 改成调它，而不是再摆一份。
    */
+}
+
+function classifyStreamProviderError(
+  facts: AnthropicErrorFacts,
+  endpointId: EndpointCapabilityProfile["endpointId"],
+): RuntimeErrorRecord {
+  const type = facts.providerErrorType ?? "unknown";
+  const common = {
+    source: "MODEL_PROVIDER" as const,
+    sideEffectState: "UNKNOWN" as const,
+    safeMessage: `模型流返回 Provider 错误（${type}）：${facts.message.slice(0, 160)}`,
+    endpointId,
+  };
+
+  switch (type) {
+    case "rate_limit_error":
+      return makeError({
+        ...common,
+        code: "MODEL_RATE_LIMIT",
+        category: "RATE_LIMIT",
+        retryability: "SAME_INPUT_BACKOFF",
+      });
+    case "overloaded_error":
+    case "api_error":
+      return makeError({
+        ...common,
+        code: "MODEL_UNAVAILABLE",
+        category: "UNAVAILABLE",
+        retryability: "SAME_INPUT_BACKOFF",
+      });
+    case "timeout_error":
+      return makeError({
+        ...common,
+        code: "MODEL_TIMEOUT",
+        category: "TIMEOUT",
+        retryability: "SAME_INPUT_BACKOFF",
+      });
+    case "billing_error":
+      return makeError({
+        ...common,
+        code: "MODEL_QUOTA",
+        category: "QUOTA",
+        retryability: "AFTER_USER_ACTION",
+      });
+    case "authentication_error":
+      return makeError({
+        ...common,
+        code: "MODEL_AUTH",
+        category: "AUTHENTICATION",
+        retryability: "NEVER",
+      });
+    case "permission_error":
+      return makeError({
+        ...common,
+        code: "MODEL_AUTH",
+        category: "AUTHORIZATION",
+        retryability: "NEVER",
+      });
+    case "invalid_request_error":
+      return makeError({
+        ...common,
+        code: "MODEL_BAD_REQUEST",
+        category: "PROTOCOL",
+        retryability: "AFTER_MODEL_CORRECTION",
+      });
+    case "not_found_error":
+      return makeError({
+        ...common,
+        code: "MODEL_NOT_FOUND",
+        category: "NOT_FOUND",
+        retryability: "AFTER_ENVIRONMENT_CHANGE",
+      });
+    default:
+      return makeError({
+        ...common,
+        code: "MODEL_UNKNOWN",
+        category: "UNKNOWN",
+        retryability: "SAME_INPUT_BACKOFF",
+      });
+  }
 }
 
 // ══════════════════════════════════════════════════════════ 翻译层

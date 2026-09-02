@@ -432,6 +432,11 @@ function asNotice(ev: RunEvent): UiSystemNotice | undefined {
           ev.payload.error.safeMessage,
         "ERROR",
       );
+    case "ModelInvocationAuditFailed":
+      return mk(
+        `模型调用审计失败 ${ev.payload.invocationId}｜${ev.payload.stage}\n${ev.payload.message}`,
+        "ERROR",
+      );
     case "EndpointBehaviorDrift":
       return mk(
         `端点漂移 ${ev.payload.field}：声明 ${ev.payload.declared}，实测 ${ev.payload.observed}` +

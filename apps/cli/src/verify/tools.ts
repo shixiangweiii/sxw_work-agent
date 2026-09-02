@@ -583,6 +583,12 @@ async function main(): Promise<void> {
      * 看上去像挡住了（阶段 3 收口批补上）。
      */
     writeFileSync(join(fws.root, ".envrc"), "export AWS_SECRET=CANARY-DIRENV-VALUE\n", "utf8");
+    mkdirSync(join(fws.root, ".workagent"), { recursive: true });
+    writeFileSync(
+      join(fws.root, ".workagent", "private-canary.jsonl"),
+      '{"provider_event":"CANARY-AUDIT-VALUE"}\n',
+      "utf8",
+    );
     writeFileSync(join(fws.root, "normal.txt"), "这是一份正常文件，可以读\n", "utf8");
 
     const res = await runTools(fws.root, [
@@ -590,34 +596,46 @@ async function main(): Promise<void> {
       { toolCallId: "f2", name: "search", input: { pattern: "CANARY", path: ".", kind: "content" } },
       { toolCallId: "f3", name: "read_file", input: { path: "normal.txt" } },
       { toolCallId: "f4", name: "read_file", input: { path: ".envrc" } },
+      {
+        toolCallId: "f5",
+        name: "read_file",
+        input: { path: ".workagent/private-canary.jsonl" },
+      },
     ]);
 
     const readDenied = res.get("f1");
     const searchOut = parseResult(res.get("f2")?.content);
     const normal = parseResult(res.get("f3")?.content);
     const envrcDenied = res.get("f4");
+    const auditDenied = res.get("f5");
 
     const readBlocked = readDenied?.isError === true && readDenied.content.includes("TOOL_READ_DENIED");
-    // 两个 canary 文件都该被 search 跳过（.env 与 .envrc 各一）。
+    // 三处 canary 都该被 search 跳过（.env、.envrc 与整个 .workagent 目录）。
     const searchBlocked =
-      Number(searchOut["total"] ?? -1) === 0 && Number(searchOut["skippedByReadGuard"] ?? 0) >= 2;
+      Number(searchOut["total"] ?? -1) === 0 && Number(searchOut["skippedByReadGuard"] ?? 0) >= 3;
     // 反向：正常文件必须仍然读得到，否则「黑名单」退化成「什么都不让读」。
     const normalStillReadable = String(normal["content"] ?? "").includes("正常文件");
     const envrcBlocked = envrcDenied?.isError === true && envrcDenied.content.includes("TOOL_READ_DENIED");
+    const auditBlocked = auditDenied?.isError === true && auditDenied.content.includes("TOOL_READ_DENIED");
 
     fact("read_file(.env)", readBlocked ? "被拒（TOOL_READ_DENIED）" : `未被拒：${readDenied?.content.slice(0, 80)}`);
     fact("read_file(.envrc)", envrcBlocked ? "被拒（TOOL_READ_DENIED）" : `未被拒：${envrcDenied?.content.slice(0, 80)}`);
+    fact(
+      "read_file(.workagent)",
+      auditBlocked ? "被拒（TOOL_READ_DENIED）" : `未被拒：${auditDenied?.content.slice(0, 80)}`,
+    );
     fact("search(content) 命中数", `${searchOut["total"]}（黑名单跳过 ${searchOut["skippedByReadGuard"] ?? 0} 项）`);
     fact("反向：normal.txt 仍可读", normalStillReadable ? "是" : "否");
 
-    guardOk = readBlocked && envrcBlocked && searchBlocked && normalStillReadable;
+    guardOk = readBlocked && envrcBlocked && auditBlocked && searchBlocked && normalStillReadable;
     verdict(
       guardOk,
       guardOk
-        ? "两个工具各自被挡住（.env 与 .envrc 各一次），两个 canary 值一次都没进上下文；" +
+        ? "read_file 与 search 都挡住了凭证文件及 .workagent 审计目录，三个 canary 值一次都没进上下文；" +
           "同时正常文件仍然读得到 —— 黑名单有判别力，不是「一律拒绝」"
         : `护栏有缺口：${!readBlocked ? "read_file(.env) 没挡住 " : ""}` +
           `${!envrcBlocked ? "read_file(.envrc) 没挡住 " : ""}` +
+          `${!auditBlocked ? "read_file(.workagent) 没挡住 " : ""}` +
           `${!searchBlocked ? "search 没全挡住 " : ""}${!normalStillReadable ? "正常文件被误伤" : ""}`,
     );
   } finally {

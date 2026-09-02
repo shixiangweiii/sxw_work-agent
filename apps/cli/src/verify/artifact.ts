@@ -43,6 +43,7 @@ import {
   findOrphanResults,
   findUnpairedToolUses,
   type ContextMessage,
+  type ModelInvocationObserver,
   type PreparedAction,
   type RunId,
   type RunOutcome,
@@ -127,6 +128,7 @@ class BlobPagingModelPort implements ModelPort {
   async *invoke(
     request: ModelRequest,
     _signal: AbortSignal,
+    _observer: ModelInvocationObserver,
   ): AsyncGenerator<ModelStreamEvent, ModelInvocationResult> {
     const last = lastToolResult(request);
     let call: ToolCall | undefined;

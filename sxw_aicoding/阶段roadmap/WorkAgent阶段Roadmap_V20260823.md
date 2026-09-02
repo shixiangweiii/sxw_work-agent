@@ -632,6 +632,7 @@ Baseline 对比（决 4 推到评测）。
 | 半边 | 内容 | 状态 |
 |---|---|---|
 | **产品化** | Layer 2 Application Service ＋ Layer 1 白盒界面 ＋ Trace Inspector | ✅ 2026-08-30 |
+| **调用审计事实源** | CLI / Web 每次模型调用的实际 body、SDK 解码 Provider 事件/错误与规范化结果独立落盘 | ✅ 2026-09-02 |
 | **反证抽象** | Case 02（倾向 Git 仓库分析与技术方案生成，D-11） | ⬜ 未开始 |
 
 ### 为什么分开做（决 1）
@@ -687,6 +688,17 @@ npm run ui       # → http://127.0.0.1:<随机端口>/?t=<会话 Token>
 | 恢复 | §18.2 三条分支命中次数、未销账项、`RECOVERY_REQUIRED` 的决策按钮 |
 
 审批 / 提问 / 接管三条通道都在浏览器里应答，用的是**与 CLI 同一批注入点**。
+
+#### 6.1.1 调用级审计事实源 ✅（2026-09-02）
+
+Trace Inspector 证明了主 Trace 适合回答“Run 发生了哪些事件”，但它仍会在刷新时读取整份
+JSONL；把完整模型上下文与每条 Provider SSE 混进去，会同时污染事件统计和刷新性能。
+因此新增独立的 `.workagent/model-invocations/<runId>/<invocationId>.jsonl`：
+
+- 复用 `ContextFrame.invocationId`，Trace 只补关联字段，不增加正常调用事件；
+- 保存实际请求 body、HTTP 状态/request-id、SDK 解码 Provider 事件、独立 Provider 错误和 Runtime 规范化结果；ping 不记录，不承诺 wire-level 字节还原；
+- 审计 I/O fail-open，但以 `ModelInvocationAuditFailed` 响亮暴露；
+- 第一阶段不提供 HTTP/API/UI 读取，后续界面只能按单次 invocation 懒加载。
 
 #### 退出门槛（结构性，不依赖评测）
 

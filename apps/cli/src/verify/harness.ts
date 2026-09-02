@@ -11,6 +11,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
+  ModelInvocationObserver,
   ModelInvocationResult,
   ModelPort,
   ModelRequest,
@@ -166,6 +167,7 @@ export class ScriptedModelPort implements ModelPort {
   async *invoke(
     request: ModelRequest,
     _signal: AbortSignal,
+    _observer: ModelInvocationObserver,
   ): AsyncGenerator<ModelStreamEvent, ModelInvocationResult> {
     this.requestBodies.push(request.body);
     const t = this.script[this.turn] ?? { toolCalls: [], text: "（脚本已耗尽，结束）" };

@@ -22,18 +22,26 @@
  * ══════════════════════════════════════════════════════════════════════
  */
 
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
+  CollectingTraceSink,
   DEFAULT_BUDGETS,
   asId,
+  type ModelInvocationObserver,
+  type ModelInvocationResult,
+  type ModelPort,
+  type ModelRequest,
+  type ModelStreamEvent,
+  type RunEvent,
   type RunId,
+  type RunSpec,
   type ToolSnapshot,
   type TranscriptEntry,
 } from "@workagent/harness-runtime";
-import { compose, DEFAULT_TOOLS, REPO_ROOT, loadEnv } from "../compose.js";
+import { compose, DEFAULT_TOOLS, REPO_ROOT, loadEnv, type Composed } from "../compose.js";
 import {
   projectTimeline,
   projectTurns,
@@ -47,6 +55,55 @@ const TOKEN = "verify-ui-fixed-token-0123456789abcdef";
 /** 只装 D 段真正要用的工具。少一个工具就少 180 token，也少一堆无关噪声。 */
 function toolsFor(names: string[]): ToolSnapshot[] {
   return DEFAULT_TOOLS.filter((t) => names.includes(t.definition.name));
+}
+
+/** 只给 Trace 隔离验收：同时产生请求事实、Provider metadata/event 与规范化结果。 */
+class AuditedFixtureModelPort implements ModelPort {
+  constructor(private readonly providerCanary: string) {}
+
+  async *invoke(
+    _request: ModelRequest,
+    _signal: AbortSignal,
+    observer: ModelInvocationObserver,
+  ): AsyncGenerator<ModelStreamEvent, ModelInvocationResult> {
+    observer.responseMetadata({ status: 200, requestId: "req-ui-trace-isolation" });
+    observer.providerEvent({ type: "message_start", providerCanary: this.providerCanary });
+    yield { type: "text_delta", text: "什么都不做。" };
+    return {
+      content: [{ type: "text", text: "什么都不做。" }],
+      toolCalls: [],
+      stopReason: "end_turn",
+      usage: {
+        inputTokens: 100,
+        outputTokens: 20,
+        cacheCreationInputTokens: 0,
+        cacheReadInputTokens: 0,
+        billedInputTokens: 100,
+      },
+      interrupted: false,
+    };
+  }
+
+  async countTokens(_request: ModelRequest): Promise<number | undefined> {
+    return 100;
+  }
+}
+
+async function drainEventTypes(
+  composed: Composed,
+  spec: RunSpec,
+): Promise<{ runId: string; types: RunEvent["type"][] }> {
+  const events: RunEvent[] = [];
+  const gen = composed.runtime.start(spec);
+  let next = await gen.next();
+  while (!next.done) {
+    events.push(next.value);
+    next = await gen.next();
+  }
+  return {
+    runId: String(events.find((event) => event.type === "RunStarted")?.runId ?? ""),
+    types: events.map((event) => event.type),
+  };
 }
 
 // ══════════════════════════════════════════════════ A 段：判别力实测
@@ -1089,14 +1146,23 @@ async function main(): Promise<void> {
         "   而那句报错还在建议「或在界面上取消它」—— 取消并不复位，照做仍然是死的。\n",
     );
 
+    const requestOnlyCanary = "ui-request-body-only-canary";
+    const providerOnlyCanary = "ui-provider-event-only-canary";
+    const traceIsolationTools = toolsFor(["now"]).map((tool) => ({
+      ...tool,
+      definition: {
+        ...tool.definition,
+        description: `${tool.definition.description} ${requestOnlyCanary}`,
+      },
+    }));
     const svcG = await startService({
       workspaceRoot,
       storageOverride: { dbPath: ":memory:", traceDir: join(tmp, "runs-g") },
       endpoint: "bailian",
       token: TOKEN,
       composeOverrides: {
-        modelPortOverride: new ScriptedModelPort([{ text: "什么都不做。", toolCalls: [] }]),
-        tools: toolsFor(["now"]),
+        modelPortOverride: new AuditedFixtureModelPort(providerOnlyCanary),
+        tools: traceIsolationTools,
       },
     });
     try {
@@ -1116,7 +1182,8 @@ async function main(): Promise<void> {
        * Trace 视图的「段 N ＋ commit ＋ gitDirty」对 Web 段永远缺失 ——
        * 而那正是 Roadmap §6.1 声明过的东西。
        */
-      const traceLines = (await call(svcG, `/api/runs/${gid}/trace`)).body["lines"] as
+      const traceResponse = await call(svcG, `/api/runs/${gid}/trace`);
+      const traceLines = traceResponse.body["lines"] as
         | Array<Record<string, unknown>>
         | undefined;
       const kinds = (traceLines ?? []).map((l) => String(l["kind"]));
@@ -1124,9 +1191,66 @@ async function main(): Promise<void> {
       fact("Web 段的 trace 行构成", `header ${kinds.filter((k) => k === "header").length} / event ${kinds.filter((k) => k === "event").length} / footer ${kinds.filter((k) => k === "footer").length}`);
       fact("header 的 provenance", header ? `commit ${String(header["commit"]).slice(0, 10)} · gitDirty ${header["gitDirty"]} · entry ${header["entry"]}` : "（缺）");
       verdict(
-        kinds.includes("header") && kinds.includes("footer") && !!header?.["commit"],
+        kinds.includes("header") &&
+          kinds.includes("footer") &&
+          kinds.every((kind) => kind === "header" || kind === "event" || kind === "footer") &&
+          !!header?.["commit"],
         "Web 入口跑的段也写 header / event / footer 三种行，且带 commit ＋ gitDirty —— " +
-          "「Trace 按段分组、每段可审计」对 Web 段成立",
+          "「Trace 按段分组、每段可审计」对 Web 段成立；模型调用 sidecar 没有混成未知行",
+      );
+
+      /**
+       * 模型审计的隔离必须走**真实文件与 HTTP**，不能只查 CollectingTraceSink。
+       * 两个 canary 先在 sidecar 里验明正身，再去 `/trace` 查不在场；否则一个从未
+       * 被写出的 canary 天生就能让“没有泄漏”永远绿。
+       *
+       * EVAL 走同一 Runtime、同一协议、同一模型脚本，只关闭模型审计，正好是
+       * 事件行数基线。只比较 type 序列，不比较随机 id / 时间戳。
+       * 判别力实测：临时把 provider canary 放进 ModelStreamDelta 后，本判据单独翻红。
+       */
+      const auditDir = join(workspaceRoot, ".workagent", "model-invocations", gid);
+      const auditRaw = readdirSync(auditDir)
+        .filter((name) => name.endsWith(".jsonl"))
+        .map((name) => readFileSync(join(auditDir, name), "utf8"))
+        .join("\n");
+      const baselineTrace = new CollectingTraceSink();
+      const baseline = compose({
+        workspaceRoot,
+        approvalDecider: async () => ({ approved: true }),
+        trace: baselineTrace,
+        endpoint: "bailian",
+        modelPortOverride: new AuditedFixtureModelPort(providerOnlyCanary),
+        tools: traceIsolationTools,
+        dbPath: ":memory:",
+      });
+      const baselineRun = await drainEventTypes(
+        baseline,
+        baseline.makeRunSpec("G 段夹具", "EVAL"),
+      );
+      baseline.db.close();
+      const httpEventTypes = (traceLines ?? [])
+        .filter((line) => line["kind"] === "event")
+        .map((line) => String(line["type"]));
+      const headerCount = kinds.filter((kind) => kind === "header").length;
+      const footerCount = kinds.filter((kind) => kind === "footer").length;
+      fact(
+        "模型审计 Trace 隔离",
+        `sidecar canary=${auditRaw.includes(requestOnlyCanary) && auditRaw.includes(providerOnlyCanary)} · ` +
+          `HTTP canary=${traceResponse.raw.includes(requestOnlyCanary) || traceResponse.raw.includes(providerOnlyCanary)} · ` +
+          `event ${httpEventTypes.length}/${baselineRun.types.length}`,
+      );
+      verdict(
+        auditRaw.includes(requestOnlyCanary) &&
+          auditRaw.includes(providerOnlyCanary) &&
+          !traceResponse.raw.includes(requestOnlyCanary) &&
+          !traceResponse.raw.includes(providerOnlyCanary) &&
+          JSON.stringify(httpEventTypes) === JSON.stringify(baselineRun.types) &&
+          headerCount === 1 &&
+          footerCount === 1 &&
+          (traceLines ?? []).length === baselineRun.types.length + 2 &&
+          !httpEventTypes.some((type) => type.startsWith("ModelInvocationAudit")) &&
+          !existsSync(join(workspaceRoot, ".workagent", "model-invocations", baselineRun.runId)),
+        "Web 默认审计只进入 sidecar；真实 /trace 无请求/Provider canary，事件序列与 EVAL 无审计基线等长",
       );
 
       /**

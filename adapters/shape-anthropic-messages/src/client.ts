@@ -9,13 +9,16 @@ import Anthropic from "@anthropic-ai/sdk";
 import type {
   EndpointCapabilityProfile,
   ModelContent,
+  ModelInvocationObserver,
   ModelInvocationResult,
   ModelPort,
   ModelRequest,
   ModelStreamEvent,
   ModelUsage,
+  ProviderFailureObservation,
 } from "@workagent/harness-runtime";
 import { assertCredentialGoesWhereIntended } from "./credential-guard.js";
+import { readAnthropicErrorFacts } from "./error-facts.js";
 
 export interface AnthropicClientDeps {
   baseUrl: string;
@@ -51,6 +54,7 @@ class AnthropicModelPort implements ModelPort {
   async *invoke(
     request: ModelRequest,
     signal: AbortSignal,
+    observer: ModelInvocationObserver,
   ): AsyncGenerator<ModelStreamEvent, ModelInvocationResult> {
     const blocks = new Map<number, PartialBlock>();
     let stopReason = "";
@@ -58,12 +62,20 @@ class AnthropicModelPort implements ModelPort {
     let interrupted = false;
 
     try {
-      const stream = await this.client.messages.create(
+      const response = await this.client.messages.create(
         request.body as Anthropic.MessageCreateParamsStreaming,
         { signal },
-      );
+      ).withResponse();
+      const stream = response.data;
+      observer.responseMetadata({
+        status: response.response.status,
+        ...(typeof response.request_id === "string" ? { requestId: response.request_id } : {}),
+      });
 
       for await (const ev of stream as AsyncIterable<Record<string, any>>) {
+        // SDK 解码后的 Provider 事件必须先离开适配器，之后才能按端点声明归一化。
+        // ping 被 SDK 丢弃；流内 SSE error 由 catch 记录为独立 provider_error。
+        observer.providerEvent(ev);
         switch (ev["type"]) {
           case "message_start": {
             usage = mergeUsage(usage, readUsagePartial(ev["message"]?.usage, this.profile), this.profile);
@@ -138,9 +150,18 @@ class AnthropicModelPort implements ModelPort {
       if (signal.aborted || (err as { name?: string })?.name === "AbortError") {
         interrupted = true;
       } else {
+        observer.providerFailure(providerFailureOf(err));
         throw err;
       }
     }
+
+    /**
+     * Anthropic SDK 在底层响应因 AbortSignal 关闭时不保证抛 AbortError：
+     * 某些流会直接让 async iterator 正常结束。只在 catch 里置 interrupted，
+     * 就会把已经 abort、只收到完整前缀的半截流误报成 COMPLETED。
+     * signal 是这次调用是否被中断的权威事实，迭代结束后必须再对一次。
+     */
+    if (signal.aborted) interrupted = true;
 
     return assemble(blocks, stopReason, usage, interrupted, this.profile);
   }
@@ -156,6 +177,18 @@ class AnthropicModelPort implements ModelPort {
       return undefined;
     }
   }
+}
+
+function providerFailureOf(error: unknown): ProviderFailureObservation {
+  const facts = readAnthropicErrorFacts(error);
+  return {
+    kind: facts.providerResponded ? "PROVIDER" : "TRANSPORT",
+    name: facts.name,
+    message: facts.message,
+    ...(facts.status === undefined ? {} : { status: facts.status }),
+    ...(facts.requestId === undefined ? {} : { requestId: facts.requestId }),
+    ...(facts.errorBody === undefined ? {} : { errorBody: facts.errorBody }),
+  };
 }
 
 interface PartialBlock {

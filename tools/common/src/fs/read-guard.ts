@@ -41,11 +41,15 @@ import { basename, sep } from "node:path";
  *
  * `.git` 里有完整历史（含曾经提交过的凭证）；`.workagent-state` 是
  * Runtime 自己的 SQLite 库（里面有全部 transcript，也就有全部工具输出）；
- * 后三个是通用的凭证目录。
+ * `.workagent` 是 Runtime 的调用审计目录（里面有完整模型请求、reasoning、
+ * Provider 原始事件与工具参数）。这些运行态事实源只能供宿主侧观察，不能再被
+ * read_file / search / run_shell 喂回模型，否则既泄露敏感内容，也会形成上下文
+ * 自引用膨胀。其余条目是通用的凭证目录。
  */
 export const DENIED_SEGMENTS = new Set([
   ".git",
   ".workagent-state",
+  ".workagent",
   ".ssh",
   ".aws",
   ".gnupg",

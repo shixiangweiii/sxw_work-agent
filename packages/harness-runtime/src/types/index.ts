@@ -7,3 +7,4 @@ export * from "./run.js";
 export * from "./transcript.js";
 export * from "./loop.js";
 export * from "./event.js";
+export * from "./model-audit.js";
