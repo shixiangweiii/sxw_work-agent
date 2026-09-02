@@ -422,12 +422,6 @@ function renderRunbar() {
     );
   }
   bar.appendChild(actions);
-
-  if (d.outcome) {
-    bar.appendChild(
-      el("span", { class: "chip " + (d.outcome.kind === "SUCCESS" ? "ok" : "bad"), text: d.outcome.kind }),
-    );
-  }
   bar.appendChild(
     el("span", {
       class: "kv",
@@ -435,6 +429,7 @@ function renderRunbar() {
         "轨道：transcript " + d.tracks.transcriptEntries + " 条 / 事件 " + d.tracks.events + " 条",
     }),
   );
+  bar.appendChild(renderRunSummary(d));
 
   /**
    * 服务侧驱动这个 Run 时抛出的错误（多半来自 `resume()` 的闸门：端点不一致、
@@ -447,6 +442,169 @@ function renderRunbar() {
   if (d.serviceError) {
     bar.appendChild(el("div", { class: "err-banner", text: "服务侧错误：" + d.serviceError }));
   }
+}
+
+/**
+ * 顶部摘要只解释已有事实，不重新结算 Outcome。
+ *
+ * 【定】原始枚举必须保留：中文是给人读的，枚举是白盒追溯 Runtime 判定的锚点。
+ * `COMPLETED_WITH_LIMITS` 也不能笼统翻译成「预算受限」—— 它最常见的来源是
+ * recoveryItems / 未完成验证，而真正的预算终止有独立的 `BUDGET_EXHAUSTED`。
+ */
+function outcomePresentation(outcome) {
+  if (!outcome) return undefined;
+  const present = (value) => ({ ...value, code: outcome.kind });
+  const recovery = outcome.recoveryItems || [];
+  const incomplete = outcome.incompleteItems || [];
+  const firstRecovery = recovery[0];
+  const firstIncomplete = incomplete[0];
+
+  switch (outcome.kind) {
+    case "SUCCESS":
+      return present({
+        title: "任务已完成",
+        tone: "ok",
+        detail: "Runtime 已按现有交付与验证事实完成结算。",
+      });
+    case "COMPLETED_WITH_LIMITS":
+      if (firstRecovery) {
+        return present({
+          title: "任务已完成，但有待确认项",
+          tone: "warn",
+          detail:
+            "有 " + recovery.length + " 个操作的副作用状态待确认：" +
+            firstRecovery.what + "（" + firstRecovery.sideEffectState + "）" +
+            (recovery.length > 1 ? "，另有 " + (recovery.length - 1) + " 项" : ""),
+          note: "此结果不表示达到轮次或模型调用上限。",
+        });
+      }
+      return present({
+        title: "任务已完成，但仍有未达成项",
+        tone: "warn",
+        detail: firstIncomplete
+          ? "仍有 " + incomplete.length + " 项未完全达成或验证：" +
+            firstIncomplete.what + "（" + firstIncomplete.why + "）"
+          : "Runtime 完成了任务，但没有将本次结算判定为完全成功。",
+        note: "此结果不表示达到轮次或模型调用上限。",
+      });
+    case "USER_REJECTED":
+      return present({
+        title: "部分操作被用户拒绝",
+        tone: "warn",
+        detail: firstIncomplete ? firstIncomplete.what + "（" + firstIncomplete.why + "）" : "任务未完全执行。",
+      });
+    case "BUDGET_EXHAUSTED":
+      return present({
+        title: "执行因预算或资源保护停止",
+        tone: "warn",
+        detail: "请结合下方冻结预算和时间线中的终止事件确认具体原因。",
+      });
+    case "CONTEXT_EXHAUSTED":
+      return present({ title: "模型上下文容量已用尽", tone: "warn", detail: "任务未能继续执行。" });
+    case "QUOTA_EXHAUSTED":
+      return present({ title: "模型调用配额已用尽", tone: "warn", detail: "任务未能继续执行。" });
+    case "CANCELLED":
+      return present({ title: "任务已取消", tone: "neutral", detail: "本 Run 已停止，不会继续执行。" });
+    case "FAILED":
+      return present({
+        title: "任务执行失败",
+        tone: "bad",
+        detail: firstIncomplete ? firstIncomplete.what + "（" + firstIncomplete.why + "）" : "请查看时间线与 Trace 定位原因。",
+      });
+    default:
+      return present({ title: "任务已结算", tone: "neutral", detail: "请结合原始 Outcome 枚举查看结果。" });
+  }
+}
+
+/**
+ * 核心预算卡的纯展示模型。
+ *
+ * 【定】只读 detail.budgetAxes，不从 turn 表、timeline 或模型消息重新求和。
+ * `budgetAxes` 的 used 来自 inspect，limit 来自这个 Run 冻结的 RunSpec；重新算一份
+ * 会把白盒界面变成第二个预算事实源。
+ */
+function coreBudgetPresentation(budgetAxes) {
+  const core = ["turns", "modelCalls", "toolCalls", "activeWallClockMs"];
+  const byAxis = new Map((budgetAxes || []).map((a) => [a.axis, a]));
+  return core.map((axis) => {
+    const a = byAxis.get(axis);
+    if (!a) return { axis, label: AXIS_LABEL[axis] || axis, missing: true };
+    const limited = a.limit !== undefined;
+    const ratio = limited && a.limit > 0 ? a.used / a.limit : undefined;
+    return {
+      axis,
+      label: AXIS_LABEL[axis] || axis,
+      used: a.used,
+      limit: a.limit,
+      unit: a.unit,
+      value: fmt(a.used, a.unit) + " / " + (limited ? fmt(a.limit, a.unit) : "未设上限"),
+      percent: ratio === undefined ? "未设上限" : Math.round(ratio * 100) + "%",
+      ratio: ratio === undefined ? 0 : Math.min(1, ratio),
+      tone: ratio === undefined ? "unset" : ratio >= 1 ? "hard" : ratio >= 0.8 ? "soft" : "normal",
+    };
+  });
+}
+
+function renderRunSummary(d) {
+  const presentation = outcomePresentation(d.outcome);
+  const result = presentation
+    ? el("div", { class: "result-summary " + presentation.tone }, [
+        el("div", { class: "summary-heading" }, [
+          el("strong", { text: presentation.title }),
+          el("span", { class: "chip " + presentation.tone, text: presentation.code }),
+        ]),
+        el("div", { class: "summary-detail", text: presentation.detail }),
+        presentation.note ? el("div", { class: "summary-note", text: presentation.note }) : null,
+      ])
+    : el("div", { class: "result-summary neutral" }, [
+        el("div", { class: "summary-heading" }, [
+          el("strong", { text: d.liveInThisProcess ? "任务正在执行" : "任务尚未结算" }),
+          el("span", { class: "chip", text: d.status }),
+        ]),
+        el("div", { class: "summary-detail", text: "预算用量会随 Run 事实实时更新。" }),
+      ]);
+
+  const budget = el("div", { class: "budget-summary" }, []);
+  budget.appendChild(
+    el("div", { class: "budget-summary-head" }, [
+      el("span", {}, [
+        el("strong", { text: "本 Run 冻结预算" }),
+        " ",
+        el("span", { class: "mono muted", text: d.spec.runSpecId }),
+      ]),
+      el("button", {
+        class: "link",
+        type: "button",
+        text: "查看全部预算",
+        onclick: () => {
+          S.tab = "budget";
+          renderTabs();
+          renderView();
+        },
+      }),
+    ]),
+  );
+  budget.appendChild(
+    el(
+      "div",
+      { class: "core-budget-grid" },
+      coreBudgetPresentation(d.budgetAxes).map((m) =>
+        el("div", { class: "budget-metric " + (m.tone || "unset") }, [
+          el("span", { class: "metric-label", text: m.label }),
+          el("strong", { class: "mono metric-value", text: m.missing ? "暂无读数" : m.value }),
+          el("span", {
+            class: "metric-meta",
+            text: m.missing ? "budgetAxes 未返回该轴" : "已用 / 上限 · " + m.percent,
+          }),
+          el("div", { class: "bar" }, [
+            el("i", { class: m.tone || "unset", css: { width: (m.ratio || 0) * 100 + "%" } }),
+          ]),
+        ]),
+      ),
+    ),
+  );
+
+  return el("section", { class: "run-summary" }, [result, budget]);
 }
 
 function renderTabs() {

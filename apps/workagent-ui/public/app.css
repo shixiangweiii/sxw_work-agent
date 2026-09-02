@@ -54,8 +54,7 @@ body {
   flex: 0 0 auto;
   display: flex;
   align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
+  justify-content: flex-start;
   padding: 10px 16px;
   border-bottom: 1px solid var(--line);
   background: var(--bg-2);
@@ -78,21 +77,22 @@ body {
 }
 
 /*
- * 【定】品牌区**不参与收缩、不折行**。
+ * 【定】顶栏只承载服务事实，不再为品牌文案预留一列。
  *
- * 它是 flex 里默认可收缩的（`flex-shrink: 1`），而右边的 `.svcinfo` 很长 ——
- * 于是「白盒界面 · Layer 1」被挤成五行，每个词一行。
- * 这是个既有毛病，只是顶栏改成 flex 列之后更显眼了。
- *
- * 收缩该发生在 `.svcinfo` 那一侧：它本来就是 `flex-wrap: wrap`，
- * 换行是它的正常形态；而品牌区一共就两个词，折了只是难看。
+ * 端点、模型、工作空间等字段从顶栏左侧起排并占满可用宽度；长内容仍按字段
+ * 自然换行。额外套一个固定宽度的品牌块，会让每一行都浪费同一段水平空间。
  */
-.brand { display: flex; align-items: baseline; gap: 8px; flex: 0 0 auto; }
-.brand > span { white-space: nowrap; }
-.logo { font-weight: 700; letter-spacing: 0.14em; color: var(--accent); }
-.sub { color: var(--fg-faint); font-size: 12px; }
-
-.svcinfo { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: var(--fg-dim); }
+.svcinfo {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  gap: 14px;
+  font-size: 12px;
+  color: var(--fg-dim);
+}
 .svcinfo b { color: var(--fg); font-weight: 500; }
 .svcinfo .warn { color: var(--warn); }
 /*
@@ -252,6 +252,87 @@ button.link { background: none; border: none; color: var(--accent); padding: 0; 
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
 }
 #runbar .actions { display: flex; gap: 6px; flex-wrap: wrap; }
+
+/*
+ * Run 结果与核心预算摘要。
+ *
+ * 【定】它跟 runbar 一起留在滚动区外：长时间线里用户仍能看见「为什么结束」
+ * 以及「本次到底用了多少预算」。这里只放四条核心轴，八条权威读数仍在预算页，
+ * 避免固定区反过来吃掉主体内容。
+ */
+.run-summary {
+  flex: 1 0 100%;
+  display: grid;
+  grid-template-columns: minmax(220px, 0.8fr) minmax(0, 2fr);
+  gap: 10px;
+  width: 100%;
+}
+
+.result-summary, .budget-summary {
+  min-width: 0;
+  padding: 9px 10px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+}
+.result-summary.ok { border-color: color-mix(in srgb, var(--ok) 55%, var(--line)); }
+.result-summary.warn { border-color: color-mix(in srgb, var(--warn) 60%, var(--line)); }
+.result-summary.bad { border-color: color-mix(in srgb, var(--err) 65%, var(--line)); }
+.summary-heading, .budget-summary-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.result-summary .summary-heading { flex-wrap: wrap; justify-content: flex-start; }
+.result-summary .summary-heading strong { flex: 1 0 100%; }
+.summary-heading strong, .budget-summary-head strong { font-weight: 600; }
+.result-summary.ok .summary-heading strong { color: var(--ok); }
+.result-summary.warn .summary-heading strong { color: var(--warn); }
+.result-summary.bad .summary-heading strong { color: var(--err); }
+.summary-detail {
+  margin-top: 4px;
+  color: var(--fg-dim);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.summary-note { margin-top: 3px; color: var(--warn); font-size: 11px; }
+
+.budget-summary-head { margin-bottom: 7px; font-size: 12px; }
+.core-budget-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 7px; }
+.budget-metric {
+  min-width: 0;
+  padding: 6px 7px;
+  background: var(--bg-3);
+  border: 1px solid transparent;
+  border-radius: 4px;
+}
+.budget-metric.soft { border-color: color-mix(in srgb, var(--warn) 55%, transparent); }
+.budget-metric.hard { border-color: color-mix(in srgb, var(--err) 60%, transparent); }
+.metric-label, .metric-meta { display: block; color: var(--fg-dim); font-size: 10px; }
+.metric-value {
+  display: block;
+  margin: 1px 0;
+  color: var(--fg);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.budget-metric.soft .metric-value { color: var(--warn); }
+.budget-metric.hard .metric-value { color: var(--err); }
+.budget-metric .bar { height: 4px; margin-top: 4px; }
+.budget-metric .bar > i.normal { background: var(--accent); }
+.budget-metric .bar > i.unset { background: var(--fg-faint); }
+
+@media (max-width: 900px) {
+  .run-summary { grid-template-columns: 1fr; }
+  .core-budget-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 650px) {
+  .core-budget-grid { grid-template-columns: 1fr; }
+}
 
 #tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin-bottom: 14px; }
 #tabs button {

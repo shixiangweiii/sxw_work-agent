@@ -1666,6 +1666,173 @@ async function main(): Promise<void> {
       }
     }
 
+    // ══════════════════════════════════════ M. Run 顶部结果与核心预算摘要
+    section("M. Run 顶部摘要：中文解释不改写 Outcome，预算只读冻结轴");
+    {
+      /**
+       * 与 L3 一样，直接执行 app.js 里的真实纯函数，而不是在验收里抄一份映射。
+       * 两个锚点把 DOM 渲染函数排除在外，测试只需要 AXIS_LABEL 与 fmt 两个依赖。
+       */
+      const uiSrc = readFileSync(resolve(REPO_ROOT, "apps/workagent-ui/public/app.js"), "utf8");
+      const helperStart = uiSrc.indexOf("\nfunction outcomePresentation(");
+      const helperEnd = uiSrc.indexOf("\nfunction renderRunSummary(", helperStart);
+      const fmtMatch = uiSrc.match(/\nfunction fmt\([^)]*\) \{[\s\S]*?\n\}/);
+      if (helperStart < 0 || helperEnd <= helperStart || !fmtMatch) {
+        throw new Error("app.js 里找不到顶部摘要的纯展示 helper");
+      }
+      const helperSrc = uiSrc.slice(helperStart, helperEnd);
+      const presentation = new Function(
+        "AXIS_LABEL",
+        `${fmtMatch[0]}\n${helperSrc}\nreturn { outcomePresentation, coreBudgetPresentation };`,
+      )({
+        turns: "轮次",
+        modelCalls: "模型调用",
+        toolCalls: "工具调用",
+        activeWallClockMs: "活跃墙钟",
+      }) as {
+        outcomePresentation(outcome: Record<string, unknown>): {
+          title: string;
+          tone: string;
+          detail: string;
+          note?: string;
+          code: string;
+        };
+        coreBudgetPresentation(axes: Array<Record<string, unknown>>): Array<{
+          axis: string;
+          value: string;
+          percent: string;
+          tone: string;
+        }>;
+      };
+
+      const core = presentation.coreBudgetPresentation([
+        { axis: "turns", used: 20, limit: 40, unit: "count" },
+        { axis: "modelCalls", used: 20, limit: 80, unit: "count" },
+        { axis: "toolCalls", used: 19, limit: 100, unit: "count" },
+        { axis: "activeWallClockMs", used: 397_858, limit: 600_000, unit: "ms" },
+        // 核心摘要不应该因为完整八轴里还有别的项目就改变顺序或读错字段。
+        { axis: "billedInputTokens", used: 651_631, limit: 1_500_000, unit: "token" },
+      ]);
+      const turns = core.find((m) => m.axis === "turns");
+      const models = core.find((m) => m.axis === "modelCalls");
+      fact("轮次摘要", `${turns?.value} · ${turns?.percent}`);
+      fact("模型调用摘要", `${models?.value} · ${models?.percent}`);
+      const m1 =
+        core.length === 4 &&
+        turns?.value === "20 / 40" &&
+        turns.percent === "50%" &&
+        models?.value === "20 / 80" &&
+        models.percent === "25%";
+      verdict(
+        m1,
+        m1
+          ? "顶部四项从 `budgetAxes` 读取真实 used / 冻结 limit，20/40 与 20/80 的百分比正确"
+          : `摘要读数错误：${JSON.stringify(core)}`,
+      );
+
+      const unset = presentation
+        .coreBudgetPresentation([
+          { axis: "turns", used: 1, limit: 40, unit: "count" },
+          { axis: "modelCalls", used: 1, limit: 80, unit: "count" },
+          { axis: "toolCalls", used: 0, limit: 100, unit: "count" },
+          { axis: "activeWallClockMs", used: 12_000, unit: "ms" },
+        ])
+        .find((m) => m.axis === "activeWallClockMs");
+      fact("未设上限", `${unset?.value} · ${unset?.percent} · ${unset?.tone}`);
+      const m2 =
+        unset?.value === "12s / 未设上限" && unset.percent === "未设上限" && unset.tone === "unset";
+      verdict(
+        m2,
+        m2
+          ? "limit 缺席时如实显示「未设上限」，不伪造成 0、Infinity 或满格"
+          : `未设上限渲染错误：${JSON.stringify(unset)}`,
+      );
+
+      const withRecovery = presentation.outcomePresentation({
+        kind: "COMPLETED_WITH_LIMITS",
+        recoveryItems: [{ what: "run_shell → programs:find,head", sideEffectState: "UNKNOWN" }],
+        incompleteItems: [],
+      });
+      const withIncomplete = presentation.outcomePresentation({
+        kind: "COMPLETED_WITH_LIMITS",
+        recoveryItems: [],
+        incompleteItems: [{ what: "中间产物", why: "校验未通过" }],
+      });
+      const success = presentation.outcomePresentation({ kind: "SUCCESS", recoveryItems: [], incompleteItems: [] });
+      const failed = presentation.outcomePresentation({ kind: "FAILED", recoveryItems: [], incompleteItems: [] });
+      const budget = presentation.outcomePresentation({
+        kind: "BUDGET_EXHAUSTED",
+        recoveryItems: [],
+        incompleteItems: [],
+      });
+      fact("带恢复项的结论", `${withRecovery.title} / ${withRecovery.code} / ${withRecovery.tone}`);
+      fact("其他严重级别", `SUCCESS=${success.tone} FAILED=${failed.tone} BUDGET=${budget.tone}`);
+      const m3 =
+        withRecovery.title === "任务已完成，但有待确认项" &&
+        withRecovery.code === "COMPLETED_WITH_LIMITS" &&
+        withRecovery.tone === "warn" &&
+        withRecovery.detail.includes("run_shell → programs:find,head") &&
+        withRecovery.detail.includes("UNKNOWN") &&
+        withRecovery.note?.includes("不表示达到轮次或模型调用上限") === true &&
+        withIncomplete.title === "任务已完成，但仍有未达成项" &&
+        withIncomplete.detail.includes("中间产物") &&
+        success.title === "任务已完成" &&
+        success.tone === "ok" &&
+        failed.title === "任务执行失败" &&
+        failed.tone === "bad" &&
+        budget.title === "执行因预算或资源保护停止" &&
+        budget.tone === "warn";
+      verdict(
+        m3,
+        m3
+          ? "中文主结论、直接原因与严重级别正确，原始 Outcome 枚举仍作为白盒锚点保留"
+          : "Outcome 展示映射与约定不一致",
+      );
+
+      // 第二组故意换成互质数字：只测 20/40、20/80 的话，四个常量也能全绿。
+      const shifted = presentation.coreBudgetPresentation([
+        { axis: "turns", used: 7, limit: 11, unit: "count" },
+        { axis: "modelCalls", used: 9, limit: 13, unit: "count" },
+        { axis: "toolCalls", used: 5, limit: 17, unit: "count" },
+        { axis: "activeWallClockMs", used: 19_000, limit: 23_000, unit: "ms" },
+      ]);
+      const shiftedTurns = shifted.find((m) => m.axis === "turns");
+      const shiftedModels = shifted.find((m) => m.axis === "modelCalls");
+      const m4 =
+        shiftedTurns?.value === "7 / 11" &&
+        shiftedTurns.percent === "64%" &&
+        shiftedModels?.value === "9 / 13" &&
+        shiftedModels.percent === "69%";
+      verdict(
+        m4,
+        m4
+          ? "换一组 budgetAxes，四项摘要逐项跟着变化 —— 不是为 20/40、20/80 硬编码的展示"
+          : `第二组 budgetAxes 没有驱动摘要变化：${JSON.stringify(shifted)}`,
+      );
+
+      const uiHtml = readFileSync(resolve(REPO_ROOT, "apps/workagent-ui/public/index.html"), "utf8");
+      const uiCss = readFileSync(resolve(REPO_ROOT, "apps/workagent-ui/public/app.css"), "utf8");
+      const topbarStart = uiCss.indexOf("#topbar {");
+      const topbarEnd = uiCss.indexOf("\n}", topbarStart);
+      const svcStart = uiCss.indexOf(".svcinfo {");
+      const svcEnd = uiCss.indexOf("\n}", svcStart);
+      const topbarCss = uiCss.slice(topbarStart, topbarEnd);
+      const svcCss = uiCss.slice(svcStart, svcEnd);
+      const m5 =
+        !uiHtml.includes('class="brand"') &&
+        !uiHtml.includes("白盒界面 · Layer 1") &&
+        topbarCss.includes("justify-content: flex-start") &&
+        svcCss.includes("width: 100%") &&
+        svcCss.includes("justify-content: flex-start");
+      fact("顶栏左侧", m5 ? "品牌文案已移除，服务事实占满并左对齐" : "仍有品牌占位或对齐样式不正确");
+      verdict(
+        m5,
+        m5
+          ? "顶栏不再为品牌文案预留水平空间；端点、模型、工作空间等服务事实从左侧开始排列"
+          : "顶栏仍存在品牌占位，或 svcinfo 没有占满并左对齐",
+      );
+    }
+
     // ══════════════════════════════════════════════ B. 投影的确定性与 id 稳定
     section("B. 投影：确定性、id 稳定、前缀一致（§23.2 幂等）");
 

@@ -499,7 +499,9 @@ npm run ui                                        # 浏览器任务用这个入�
 >
 > 准确表述：**写入或选择 `mcp.json` 的人，已经向那条 command 授予了宿主用户级的
 > 代码执行权。** 逐次审批只约束「模型发起的**某一次** tool call」。
-> 示例配置因此**锁版本、不用 `@latest`**。
+> 当前示例选择使用 **`@latest`**，以便直接跟进 Playwright MCP 的最新能力与修复。
+> 代价是服务器代码及工具声明可能随重启变化；Atlas 会把 schema / description / 档位的
+> digest 纳入工具 version，并在 resume 时显式报告外部工具漂移。
 
 > ### 【定】声明的来源只能是**人**，不读 MCP 的 `annotations`
 >
