@@ -331,7 +331,8 @@ button.link { background: none; border: none; color: var(--accent); padding: 0; 
 }
 
 @media (max-width: 650px) {
-  .core-budget-grid { grid-template-columns: 1fr; }
+  /* 两列能在 360px 的详情栏内完整容纳，并给下方唯一滚动区留出可用高度。 */
+  .core-budget-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 #tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin-bottom: 14px; }
@@ -340,6 +341,253 @@ button.link { background: none; border: none; color: var(--accent); padding: 0; 
   background: none; color: var(--fg-dim); padding: 7px 12px;
 }
 #tabs button.active { color: var(--fg); border-bottom-color: var(--accent); }
+
+/* ── Trace Inspector */
+
+.trace-inspector { min-width: 0; }
+.trace-source {
+  margin: 0 0 8px;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg-2);
+  color: var(--fg-dim);
+  overflow-wrap: anywhere;
+}
+.trace-source > summary { font-size: 11px; }
+.trace-source > div { margin-top: 5px; font-size: 11px; }
+
+/*
+ * 工具栏粘在 #view 顶部；#view 仍是唯一纵向滚动容器。
+ * 不给 Trace 自己再套 overflow-y，否则长 Run 会出现第二条滚动条。
+ */
+.trace-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 8;
+  margin-bottom: 10px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--bg-2) 96%, transparent);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.24);
+}
+.trace-toolbar-main, .trace-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+.trace-toolbar-actions { margin-top: 7px; flex-wrap: wrap; }
+.trace-mode-group { display: flex; flex: 0 0 auto; }
+.trace-mode-group button {
+  border-radius: 0;
+  padding: 4px 9px;
+}
+.trace-mode-group button:first-child { border-radius: 4px 0 0 4px; }
+.trace-mode-group button:last-child { border-radius: 0 4px 4px 0; margin-left: -1px; }
+.trace-mode-group button.active,
+.trace-filters button.active {
+  color: #fff;
+  border-color: var(--accent);
+  background: #1d4a6b;
+}
+.trace-stats { display: flex; gap: 4px; flex-wrap: wrap; }
+.trace-search {
+  flex: 1 1 220px;
+  min-width: 150px;
+  width: auto;
+  padding: 4px 7px;
+}
+.trace-filters { display: flex; gap: 3px; flex-wrap: wrap; }
+.trace-filters button { padding: 3px 7px; font-size: 11px; }
+.trace-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--fg-dim);
+  white-space: nowrap;
+  font-size: 11px;
+}
+.trace-jump {
+  max-width: 145px;
+  background: var(--bg-3);
+  color: var(--fg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 4px 6px;
+  font: inherit;
+  font-size: 11px;
+}
+
+.trace-content { min-width: 0; }
+.trace-segment, .trace-raw-segment {
+  margin-bottom: 14px;
+  border-left: 2px solid color-mix(in srgb, var(--user) 65%, var(--line));
+  padding-left: 10px;
+}
+.trace-segment-head, .trace-segment-foot {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 8px;
+  color: var(--fg-dim);
+  background: color-mix(in srgb, var(--user) 8%, var(--bg-2));
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font-size: 11px;
+}
+.trace-segment-head strong { color: var(--fg); font-size: 12px; }
+.trace-segment-head.warn { color: var(--warn); }
+.trace-segment-foot { margin-top: 6px; border-style: dashed; }
+
+.trace-turn {
+  margin-top: 8px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--bg-2) 92%, transparent);
+  scroll-margin-top: 112px;
+}
+.trace-turn.trace-turn-warn { border-color: color-mix(in srgb, var(--warn) 62%, var(--line)); }
+.trace-turn.trace-turn-bad { border-color: color-mix(in srgb, var(--err) 68%, var(--line)); }
+.trace-turn > summary {
+  padding: 8px 10px;
+  list-style-position: inside;
+  color: var(--fg);
+}
+.trace-turn[open] > summary { border-bottom: 1px solid var(--line); }
+.trace-turn-title {
+  display: inline-flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 7px;
+  max-width: calc(100% - 18px);
+}
+.trace-turn-title strong { color: var(--accent); font-size: 13px; }
+.trace-turn-bad .trace-turn-title strong { color: var(--err); }
+.trace-turn-warn .trace-turn-title strong { color: var(--warn); }
+.trace-turn-badges { display: flex; flex-wrap: wrap; gap: 4px; margin: 5px 0 0 19px; }
+.trace-turn-body { padding: 8px 10px 10px; }
+.trace-phase-bar {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+  color: var(--fg-faint);
+}
+.trace-phase {
+  padding: 1px 6px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  font-size: 10px;
+}
+.trace-phase-arrow { font-size: 10px; }
+
+.trace-event-group {
+  margin: 7px 0;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.trace-group-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  padding: 5px 8px;
+  background: var(--bg-3);
+  font-size: 11px;
+}
+.trace-group-head strong { color: var(--fg); }
+.trace-event {
+  padding: 6px 8px;
+  border-left: 3px solid var(--line);
+  border-top: 1px solid var(--line);
+  min-width: 0;
+}
+.trace-event:first-child { border-top: none; }
+.trace-event-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+.trace-event-head strong { font-size: 11px; }
+.trace-event-summary {
+  flex: 1 1 280px;
+  min-width: 0;
+  color: var(--fg-dim);
+  overflow-wrap: anywhere;
+  font-size: 11px;
+}
+.trace-json { margin-top: 3px; }
+.trace-json > summary { font-size: 10px; color: var(--fg-faint); }
+.trace-json-actions { margin-top: 3px; }
+.trace-json-actions button { font-size: 10px; }
+.trace-json pre { max-height: 320px; margin-top: 4px; font-size: 11px; }
+.trace-progress {
+  padding: 5px 8px;
+  border-top: 1px solid var(--line);
+  color: var(--fg-dim);
+  font-size: 11px;
+}
+.trace-progress > summary { color: var(--fg-dim); overflow-wrap: anywhere; }
+.trace-progress[open] > summary { margin-bottom: 5px; }
+.trace-progress .trace-event { margin-left: 5px; }
+.trace-stream-summary, .trace-empty {
+  margin: 8px 0;
+  padding: 7px 9px;
+  border: 1px dashed var(--line);
+  border-radius: 4px;
+  color: var(--fg-faint);
+  font-size: 11px;
+}
+
+.trace-boundary {
+  margin: 5px 0;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--user);
+  border-radius: 4px;
+  background: var(--bg-2);
+}
+.trace-boundary.footer { border-left-color: var(--fg-faint); }
+
+.trace-tone-model { border-left-color: var(--accent); }
+.trace-tone-tool { border-left-color: #4d8cad; }
+.trace-tone-flow { border-left-color: var(--user); }
+.trace-tone-ok { border-left-color: var(--ok); }
+.trace-tone-warn { border-left-color: var(--warn); }
+.trace-tone-bad { border-left-color: var(--err); }
+.trace-tone-muted { border-left-color: var(--fg-faint); opacity: 0.82; }
+.trace-phase.trace-tone-model { color: var(--accent); border-color: var(--accent); }
+.trace-phase.trace-tone-tool { color: #8fd0f0; border-color: #47708c; }
+.trace-phase.trace-tone-flow { color: var(--user); border-color: var(--user); }
+.trace-phase.trace-tone-ok { color: var(--ok); border-color: var(--ok); }
+.trace-phase.trace-tone-warn { color: var(--warn); border-color: var(--warn); }
+
+@media (max-width: 900px) {
+  .trace-toolbar { position: static; }
+  .trace-toolbar-main { flex-wrap: wrap; }
+  .trace-search { flex-basis: 100%; }
+  .trace-stats { flex: 1 1 300px; }
+}
+
+@media (max-width: 650px) {
+  .trace-toolbar-main, .trace-toolbar-actions { align-items: stretch; }
+  .trace-mode-group { width: 100%; }
+  .trace-mode-group button { flex: 1 1 50%; }
+  .trace-filters { width: 100%; }
+  .trace-filters button { flex: 1 1 auto; }
+  .trace-jump { max-width: none; flex: 1 1 130px; }
+  .trace-turn-title { max-width: 100%; }
+  .trace-turn-badges { margin-left: 0; }
+  .trace-event-summary { flex-basis: 100%; }
+  .trace-segment, .trace-raw-segment { padding-left: 6px; }
+}
 
 /* ── 时间线 */
 

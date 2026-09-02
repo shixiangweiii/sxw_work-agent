@@ -1,14 +1,14 @@
 {
   "_读我_1_放哪": "复制到 .workagent-state/mcp.json（跨 workspace，与 workspaces.json 同目录）。--mcp-config <path> 可换位置。文件不存在不是错误。",
   "_读我_2_安全前提": "写入或选择这个文件的人，已经向下面每一条 command 授予了宿主用户级的代码执行权。MCP 进程在任何 Run、任何审批之前就已经跑起来了，它没有沙箱、能读凭证文件、能联网、能任意写盘。逐次审批只约束「模型发起的某一次 tool call」，不是这个进程的安全边界。",
-  "_读我_3_版本策略": "命令使用 @latest，启动时会解析并执行 Playwright MCP 的当前最新版，便于直接获得最新能力与修复。代价是服务器代码及工具声明可能随重启变化；Atlas 会把 schema/description/档位的 digest 纳入工具 version，并在 resume 时显式报告外部工具漂移。",
+  "_读我_3_版本策略": "命令使用 @latest，并为 npx 显式指定公共 npm registry，避免内部镜像缺包导致启动失败。启动时会解析并执行 Playwright MCP 的当前最新版；服务器代码及工具声明可能随重启变化，Atlas 会把 schema/description/档位的 digest 纳入工具 version，并在 resume 时显式报告外部工具漂移。",
   "_读我_4_输出目录": "MCP 进程绑 Atlas 会话、跨 workspace 复用（为了保住浏览器登录态），所以它的工作目录在服务启动那一刻就固化了。在界面上切到另一个 workspace 之后，MCP 写出的相对路径文件仍然落在启动时那个目录里 —— 那边的 Run 用相对路径读不到它们。",
   "_读我_5_登录态": "浏览器任务请用 npm run ui（service 常驻）。npm run dev 是单次命令，进程结束浏览器就关，每个 Run 都要重新登录。",
 
   "servers": {
     "playwright": {
       "type": "local",
-      "command": ["npx", "-y", "@playwright/mcp@latest"],
+      "command": ["npx", "-y", "--registry=https://registry.npmjs.org", "@playwright/mcp@latest"],
       "environment": {
         "PLAYWRIGHT_HEADLESS": "false"
       },

@@ -54,6 +54,16 @@ const S = {
   stream: "",
   sse: null,
   refreshTimer: 0,
+  /** Trace Inspector 的交互状态。换 Run 时重置，同一 Run 刷新时保留。 */
+  traceUi: {
+    runId: "",
+    mode: "turns",
+    filter: "all",
+    query: "",
+    showStream: false,
+    expanded: new Set(),
+    touched: new Set(),
+  },
 };
 
 // ═══════════════════════════════════════════════════════════════ DOM
@@ -1112,11 +1122,801 @@ function renderArtifacts(view, d) {
 
 // ── Trace
 
+/**
+ * Trace 页的展示词典。
+ *
+ * 【定】这里只定义「怎么读」，不定义「发生了什么」。事件枚举、payload 与顺序
+ * 原样来自 JSONL；遇到未来新增的事件时回退到中性卡片并保留原文，绝不丢行。
+ */
+const TRACE_EVENT_META = {
+  RunStarted: { label: "Run 开始", category: "lifecycle", tone: "neutral", important: true },
+  TurnStarted: { label: "轮次开始", category: "lifecycle", tone: "neutral" },
+  LoopContinued: { label: "进入下一轮", category: "lifecycle", tone: "flow", important: true },
+  LoopTerminated: { label: "循环终止", category: "lifecycle", tone: "flow", important: true },
+  ResumeStarted: { label: "恢复执行", category: "lifecycle", tone: "flow", important: true },
+  ContextFrameCompiled: { label: "上下文帧已编译", category: "model", tone: "model" },
+  ContextCompacted: { label: "上下文已压缩", category: "model", tone: "warn", important: true },
+  ModelStreamDelta: { label: "模型流式增量", category: "model", tone: "muted" },
+  ModelInvocationCompleted: { label: "模型调用完成", category: "model", tone: "model" },
+  ActionBatchPlanned: { label: "操作批次已规划", category: "tool", tone: "tool" },
+  ActionProposed: { label: "操作已提议", category: "tool", tone: "tool" },
+  ActionRejected: { label: "操作被拒绝", category: "tool", tone: "bad", important: true },
+  ApprovalRequested: { label: "请求审批", category: "human", tone: "warn" },
+  ApprovalDecided: { label: "审批已决定", category: "human", tone: "warn" },
+  AttemptStarted: { label: "工具执行开始", category: "tool", tone: "tool" },
+  ToolProgress: { label: "工具执行进度", category: "tool", tone: "tool" },
+  AttemptCompleted: { label: "工具执行完成", category: "tool", tone: "ok" },
+  InteractionRequested: { label: "请求人工接管", category: "human", tone: "warn", important: true },
+  InteractionCompleted: { label: "人工接管结束", category: "human", tone: "warn", important: true },
+  InterjectionAccepted: { label: "插话已接收", category: "human", tone: "warn", important: true },
+  ToolResultExternalized: { label: "工具结果已外置", category: "tool", tone: "tool", important: true },
+  VerificationCompleted: { label: "操作验证完成", category: "verify", tone: "ok" },
+  ArtifactRegistered: { label: "产物已登记", category: "verify", tone: "ok", important: true },
+  ArtifactVerified: { label: "产物验证完成", category: "verify", tone: "ok", important: true },
+  ActionBatchSettled: { label: "操作批次已结算", category: "tool", tone: "tool" },
+  BudgetSoftLimitReached: { label: "预算接近上限", category: "diagnostic", tone: "warn", important: true },
+  BudgetHardLimitReached: { label: "预算达到上限", category: "diagnostic", tone: "bad", important: true },
+  RecoveryRequired: { label: "需要恢复确认", category: "diagnostic", tone: "warn", important: true },
+  RecoveryResolved: { label: "恢复项已决定", category: "diagnostic", tone: "flow", important: true },
+  NoProgressDetected: { label: "检测到无进展", category: "diagnostic", tone: "warn", important: true },
+  RuntimeErrorOccurred: { label: "Runtime 错误", category: "diagnostic", tone: "bad", important: true },
+  EndpointBehaviorDrift: { label: "端点行为漂移", category: "diagnostic", tone: "bad", important: true },
+  InteractionResumed: { label: "人工接管已恢复", category: "diagnostic", tone: "flow", important: true },
+  ResumeUnpairedToolUse: { label: "恢复时发现未配对工具调用", category: "diagnostic", tone: "warn", important: true },
+  ResumeExternalToolsUnverifiable: { label: "外部工具状态无法核对", category: "diagnostic", tone: "warn", important: true },
+};
+
+const TRACE_FILTERS = [
+  ["all", "全部"],
+  ["important", "重点"],
+  ["abnormal", "异常"],
+  ["model", "模型"],
+  ["tool", "工具"],
+  ["human", "审批/交互"],
+  ["verify", "验证/产物"],
+  ["diagnostic", "预算/恢复"],
+];
+
+function traceJson(value, pretty) {
+  try {
+    return JSON.stringify(value, null, pretty ? 2 : 0);
+  } catch {
+    return String(value);
+  }
+}
+
+function traceClip(value, max) {
+  const text = value === undefined || value === null ? "" : String(value);
+  return text.length > max ? text.slice(0, max) + "…" : text;
+}
+
+function traceDuration(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return "—";
+  if (ms < 1000) return Math.round(ms) + "ms";
+  if (ms < 60_000) return (ms / 1000).toFixed(ms < 10_000 ? 1 : 0) + "s";
+  const minutes = Math.floor(ms / 60_000);
+  const seconds = Math.round((ms % 60_000) / 1000);
+  return minutes + "m " + seconds + "s";
+}
+
+function traceEventPresentation(line) {
+  const type = line && typeof line.type === "string" ? line.type : "UnknownEvent";
+  const payload = line && line.payload && typeof line.payload === "object" ? line.payload : {};
+  const base = TRACE_EVENT_META[type] || {
+    label: "未识别事件",
+    category: "other",
+    tone: "neutral",
+  };
+  let tone = base.tone;
+  let abnormal = false;
+  let important = base.important === true;
+  let diagnostic = base.category === "diagnostic";
+  let summary = "查看原始 payload";
+
+  switch (type) {
+    case "RunStarted":
+      summary = [payload.endpointId, payload.modelId, payload.executionPrivilege].filter(Boolean).join(" · ");
+      break;
+    case "TurnStarted":
+      summary = "第 " + (payload.turn ?? "?") + " 轮开始";
+      break;
+    case "LoopContinued":
+      summary = "迁移：" + (payload.transition && payload.transition.reason || "UNKNOWN");
+      break;
+    case "LoopTerminated": {
+      const reason = payload.terminal && payload.terminal.reason || "UNKNOWN";
+      const outcome = payload.outcome && payload.outcome.kind;
+      summary = "终止：" + reason + (outcome ? " · " + outcome : "");
+      if (reason !== "COMPLETED" || (outcome && outcome !== "SUCCESS")) {
+        tone = reason === "MODEL_ERROR" ? "bad" : "warn";
+        abnormal = true;
+        diagnostic = true;
+      } else tone = "ok";
+      break;
+    }
+    case "ResumeStarted":
+      summary = "从 #" + (payload.fromSequence ?? "?") + " 恢复 · 重建 " +
+        (payload.rebuiltMessages ?? "?") + " 条消息";
+      break;
+    case "ContextFrameCompiled":
+      summary = (payload.items ?? "?") + " 项 · " + (payload.totalTokens ?? "?") + " token" +
+        (payload.compacted ? " · 已压缩" : "") +
+        (payload.trust && payload.trust.hasExternalUntrusted
+          ? " · 外部不可信项 " + payload.trust.untrustedItems
+          : "");
+      break;
+    case "ContextCompacted":
+      summary = "释放 " + (payload.freedTokens ?? "?") + " token · " + (payload.reason || "未给出原因");
+      break;
+    case "ModelStreamDelta":
+      summary = "流式片段 · " + String(payload.text || "").length + " 字符";
+      break;
+    case "ModelInvocationCompleted": {
+      const usage = payload.usage && typeof payload.usage === "object" ? payload.usage : {};
+      summary = (payload.stopReason || "UNKNOWN") + " · tool call " + (payload.toolCallCount ?? "?") +
+        " · billed " + (usage.billedInputTokens ?? "?") + " / out " + (usage.outputTokens ?? "?") +
+        " · " + traceDuration(Number(payload.durationMs));
+      break;
+    }
+    case "ActionBatchPlanned":
+      summary = (payload.callCount ?? "?") + " 个调用 · " + (payload.mode || "UNKNOWN") +
+        " · " + (payload.batchId || "无 batchId");
+      break;
+    case "ActionBatchSettled":
+      summary = (payload.resultCount ?? "?") + " / " + (payload.callCount ?? "?") + " 个结果 · " +
+        (payload.batchId || "无 batchId");
+      break;
+    case "ActionProposed":
+      summary = (payload.toolName || "未知工具") + " · " + traceClip(payload.effect || "未声明 effect", 180) +
+        (Array.isArray(payload.riskFacts) && payload.riskFacts.length ? " · 风险事实 " + payload.riskFacts.length : "");
+      break;
+    case "ActionRejected":
+      summary = (payload.stage || "UNKNOWN") + " · " + traceClip(payload.reason || "未给出原因", 180);
+      abnormal = true;
+      diagnostic = true;
+      break;
+    case "ApprovalRequested":
+      summary = traceClip(payload.effect || "未声明 effect", 150) + " · " + (payload.reason || "未给出原因");
+      break;
+    case "ApprovalDecided":
+      summary = (payload.approved ? "已批准" : "已拒绝") + " · " + (payload.decidedBy || "UNDECLARED") +
+        (payload.reason ? " · " + payload.reason : "");
+      if (!payload.approved) {
+        abnormal = true;
+        important = true;
+      }
+      break;
+    case "AttemptStarted":
+      summary = payload.toolName || "未知工具";
+      break;
+    case "ToolProgress":
+      summary = traceClip(payload.note || "（没有进度说明）", 200);
+      break;
+    case "AttemptCompleted":
+      summary = (payload.status || "UNKNOWN") + " · " + (payload.sideEffectState || "UNKNOWN") +
+        " · " + traceDuration(Number(payload.durationMs));
+      if (payload.status !== "SUCCEEDED") {
+        tone = "bad";
+        abnormal = true;
+        important = true;
+        diagnostic = true;
+      }
+      if (String(payload.sideEffectState || "").startsWith("UNKNOWN")) diagnostic = true;
+      break;
+    case "InteractionRequested":
+      summary = (payload.toolName || "未知工具") + " · " + traceClip(payload.detail || "", 180);
+      break;
+    case "InteractionCompleted":
+      summary = (payload.toolName || "未知工具") + " · " + (payload.answered ? "已应答" : "未应答");
+      if (!payload.answered) abnormal = true;
+      break;
+    case "InterjectionAccepted":
+      summary = traceClip(payload.content || "", 180);
+      break;
+    case "ToolResultExternalized":
+      summary = (payload.toolName || "未知工具") + " · " + (payload.sizeBytes ?? "?") + " 字节 ≈ " +
+        (payload.approxTokens ?? "?") + " token · " + (payload.ref || "无引用");
+      break;
+    case "VerificationCompleted":
+      summary = (payload.required ? "必需验证" : "可选验证") + " · " + (payload.status || "UNKNOWN") +
+        " · " + traceClip(payload.detail || "", 180);
+      tone = payload.status === "PASSED" ? "ok" : "warn";
+      if (payload.required && payload.status !== "PASSED") {
+        abnormal = true;
+        important = true;
+        diagnostic = true;
+      }
+      break;
+    case "ArtifactRegistered":
+      summary = (payload.logicalId || payload.artifactId || "未知产物") + " · v" + (payload.version ?? "?") +
+        " · " + (payload.role || "UNKNOWN") + " · " + (payload.kind || "UNKNOWN");
+      break;
+    case "ArtifactVerified":
+      summary = (payload.ok ? "通过" : "未通过") + " · " + (payload.role || "UNKNOWN") + " · " +
+        traceClip(payload.detail || "", 180);
+      if (!payload.ok) {
+        tone = "bad";
+        abnormal = true;
+        diagnostic = true;
+      }
+      break;
+    case "BudgetSoftLimitReached":
+      summary = (payload.axis || "未知预算轴") + " · " + (payload.used ?? "?") + " / " +
+        (payload.limit ?? "?") + " · " + Math.round(Number(payload.ratio || 0) * 100) + "%";
+      abnormal = true;
+      break;
+    case "BudgetHardLimitReached":
+      summary = (payload.axis || "未知预算轴") + " · " + (payload.used ?? "?") + " / " + (payload.limit ?? "?");
+      abnormal = true;
+      break;
+    case "RecoveryRequired":
+      summary = "待确认项 " + (payload.items ?? "?") + " 个";
+      abnormal = true;
+      break;
+    case "RecoveryResolved":
+      summary = (payload.decision || "UNKNOWN") + " · " + (payload.items ?? "?") + " 项" +
+        (payload.note ? " · " + payload.note : "");
+      break;
+    case "NoProgressDetected":
+      summary = (payload.toolName || "未知工具") + " · 重复 " + (payload.repeats ?? "?") + " 次";
+      abnormal = true;
+      break;
+    case "RuntimeErrorOccurred": {
+      const error = payload.error && typeof payload.error === "object" ? payload.error : {};
+      summary = traceClip(error.message || error.code || traceJson(error, false), 220);
+      abnormal = true;
+      break;
+    }
+    case "EndpointBehaviorDrift":
+      summary = (payload.field || "未知字段") + " · 声明 " + (payload.declared || "?") +
+        " → 实际 " + (payload.observed || "?") + " · " + (payload.disposition || "UNKNOWN");
+      abnormal = true;
+      break;
+    case "InteractionResumed":
+      summary = "待接续工具 " + (Array.isArray(payload.pendingToolUses) ? payload.pendingToolUses.length : "?") + " 个";
+      break;
+    case "ResumeUnpairedToolUse":
+      summary = (payload.toolName || "未知工具") + " · " + (payload.branch || "UNKNOWN") +
+        " · pre-fingerprint " + Boolean(payload.hasPreFingerprint);
+      abnormal = true;
+      break;
+    case "ResumeExternalToolsUnverifiable":
+      summary = "外部工具 " + (Array.isArray(payload.toolNames) ? payload.toolNames.length : "?") +
+        " 个 · 漂移 " + (Array.isArray(payload.drifted) ? payload.drifted.length : "?") + " 个";
+      abnormal = true;
+      break;
+  }
+
+  const sequence = Number(line && line.sequence);
+  const searchText = [
+    type,
+    base.label,
+    Number.isFinite(sequence) ? "#" + sequence : "",
+    summary,
+    traceJson(payload, false),
+  ].join(" ").toLowerCase();
+  return {
+    line,
+    type,
+    payload,
+    sequence: Number.isFinite(sequence) ? sequence : undefined,
+    occurredAt: Number(line && line.occurredAt),
+    label: base.label,
+    category: base.category,
+    tone,
+    summary: summary || "查看原始 payload",
+    important,
+    abnormal,
+    diagnostic,
+    searchText,
+  };
+}
+
+function traceGroupBy(events, key) {
+  const groups = [];
+  const byId = new Map();
+  for (const event of events) {
+    const id = event.payload && event.payload[key];
+    if (id === undefined || id === null || id === "") continue;
+    const sid = String(id);
+    let group = byId.get(sid);
+    if (!group) {
+      group = { id: sid, events: [] };
+      byId.set(sid, group);
+      groups.push(group);
+    }
+    group.events.push(event);
+  }
+  return groups;
+}
+
+function finalizeTraceTurn(turn) {
+  const events = turn.events;
+  const sequences = events.map((e) => e.sequence).filter(Number.isFinite);
+  const times = events.map((e) => e.occurredAt).filter(Number.isFinite);
+  const models = events.filter((e) => e.type === "ModelInvocationCompleted");
+  turn.firstSequence = sequences.length ? Math.min(...sequences) : undefined;
+  turn.lastSequence = sequences.length ? Math.max(...sequences) : undefined;
+  turn.spanMs = times.length > 1 ? Math.max(...times) - Math.min(...times) : 0;
+  turn.modelCalls = models.length;
+  turn.modelDurationMs = models.reduce((n, e) => n + (Number(e.payload.durationMs) || 0), 0);
+  turn.streamCount = events.filter((e) => e.type === "ModelStreamDelta").length;
+  turn.streamChars = events
+    .filter((e) => e.type === "ModelStreamDelta")
+    .reduce((n, e) => n + String(e.payload.text || "").length, 0);
+  turn.actions = traceGroupBy(events, "actionId");
+  turn.batches = traceGroupBy(events, "batchId");
+  turn.artifacts = traceGroupBy(events, "artifactId");
+  const grouped = new Set([
+    ...turn.actions.flatMap((g) => g.events),
+    ...turn.batches.flatMap((g) => g.events),
+    ...turn.artifacts.flatMap((g) => g.events),
+  ]);
+  turn.ungrouped = events.filter((e) => !grouped.has(e));
+  turn.toolNames = [...new Set(turn.actions.flatMap((g) =>
+    g.events.map((e) => e.payload.toolName).filter(Boolean)))];
+  turn.abnormal = events.some((e) => e.abnormal);
+  turn.completed = events.some((e) => e.type === "LoopContinued" || e.type === "LoopTerminated");
+  const transition = [...events].reverse().find((e) => e.type === "LoopContinued" || e.type === "LoopTerminated");
+  turn.transition = transition
+    ? transition.type === "LoopContinued"
+      ? transition.payload.transition && transition.payload.transition.reason
+      : transition.payload.terminal && transition.payload.terminal.reason
+    : undefined;
+  turn.searchText = events.map((e) => e.searchText).join(" ");
+  return turn;
+}
+
+function buildTracePresentation(rawLines) {
+  const lines = Array.isArray(rawLines) ? rawLines : [];
+  const segments = [];
+  const events = [];
+  let segment;
+  let turn;
+  let synthetic = 0;
+  const stats = {
+    rawLines: lines.length,
+    eventLines: 0,
+    businessEvents: 0,
+    streamEvents: 0,
+    streamChars: 0,
+    boundaryLines: 0,
+    unknownLines: 0,
+    segments: 0,
+    turns: 0,
+  };
+
+  const startSegment = (header) => {
+    const ordinal = segments.length;
+    const declared = header && Number(header.segmentIndex);
+    const index = Number.isFinite(declared) ? declared : ordinal;
+    const created = {
+      id: "trace-segment-" + index + "-" + ordinal,
+      index,
+      header,
+      footer: undefined,
+      rawLines: [],
+      events: [],
+      prelude: [],
+      turns: [],
+      unknownLines: [],
+      synthetic: !header,
+    };
+    segments.push(created);
+    return created;
+  };
+
+  for (const raw of lines) {
+    const line = raw && typeof raw === "object" ? raw : { kind: "unknown", value: raw };
+    if (line.kind === "header") {
+      segment = startSegment(line);
+      segment.rawLines.push(line);
+      stats.boundaryLines += 1;
+      turn = undefined;
+      continue;
+    }
+    if (!segment) segment = startSegment(undefined);
+    segment.rawLines.push(line);
+    if (line.kind === "footer") {
+      segment.footer = line;
+      stats.boundaryLines += 1;
+      turn = undefined;
+      continue;
+    }
+    if (line.kind !== "event") {
+      segment.unknownLines.push(line);
+      stats.unknownLines += 1;
+      continue;
+    }
+
+    const event = traceEventPresentation(line);
+    events.push(event);
+    segment.events.push(event);
+    stats.eventLines += 1;
+    if (event.type === "ModelStreamDelta") {
+      stats.streamEvents += 1;
+      stats.streamChars += String(event.payload.text || "").length;
+    } else stats.businessEvents += 1;
+
+    if (event.type === "TurnStarted") {
+      const number = Number(event.payload.turn);
+      turn = {
+        id: "trace-turn-" + segment.index + "-" + (Number.isFinite(number) ? number : "unknown") + "-" +
+          (event.sequence ?? "synthetic-" + synthetic++),
+        number: Number.isFinite(number) ? number : undefined,
+        segmentId: segment.id,
+        events: [],
+      };
+      segment.turns.push(turn);
+    }
+    if (turn) turn.events.push(event);
+    else segment.prelude.push(event);
+  }
+
+  const turns = segments.flatMap((s) => s.turns.map(finalizeTraceTurn));
+  if (turns.length) {
+    turns[turns.length - 1].isLast = true;
+    const completed = turns.filter((t) => t.completed);
+    if (completed.length) {
+      completed.reduce((a, b) => b.spanMs > a.spanMs ? b : a).isLongest = true;
+    }
+    for (const item of turns) item.important = item.abnormal || item.isLast === true || item.isLongest === true;
+  }
+  stats.segments = segments.length;
+  stats.turns = turns.length;
+  return { lines, segments, turns, events, stats };
+}
+
+function traceEventMatches(event, options) {
+  if (!event) return false;
+  const filter = options && options.filter || "all";
+  const query = String(options && options.query || "").trim().toLowerCase();
+  if (event.type === "ModelStreamDelta" && !(options && options.showStream)) return false;
+  if (query && !event.searchText.includes(query)) return false;
+  if (filter === "all") return true;
+  if (filter === "important") return event.important;
+  if (filter === "abnormal") return event.abnormal;
+  if (filter === "diagnostic") return event.diagnostic;
+  return event.category === filter;
+}
+
+function traceTurnMatches(turn, options) {
+  const filter = options && options.filter || "all";
+  const query = String(options && options.query || "").trim().toLowerCase();
+  if (filter === "important") {
+    if (!turn.important) return false;
+    if (!query) return true;
+    return turn.events.some((e) => traceEventMatches(e, { ...options, filter: "all" }));
+  }
+  if (filter === "abnormal" && !turn.abnormal) return false;
+  return turn.events.some((e) => traceEventMatches(e, options));
+}
+
+function traceGroupMatches(group, turn, options) {
+  if (options.filter === "important" && turn.important && !options.query) return true;
+  return group.events.some((e) => traceEventMatches(e, options));
+}
+
+function traceBoundarySummary(line, prefix) {
+  const parts = [prefix];
+  if (line.entry) parts.push(String(line.entry));
+  if (line.modelId) parts.push(String(line.modelId));
+  if (line.executionPrivilege) parts.push(String(line.executionPrivilege));
+  if (line.terminal && line.terminal.reason) parts.push(String(line.terminal.reason));
+  if (line.outcome && line.outcome.kind) parts.push(String(line.outcome.kind));
+  return parts.join(" · ");
+}
+
+async function copyTraceJson(value) {
+  const text = traceJson(value, true);
+  try {
+    if (!navigator.clipboard || !navigator.clipboard.writeText) throw new Error("Clipboard API unavailable");
+    await navigator.clipboard.writeText(text);
+    toast("已复制 JSON");
+  } catch {
+    toast("浏览器未允许复制，请在原始 JSON 中手动选择", true);
+  }
+}
+
+function renderTraceJsonDetails(label, value) {
+  return el("details", { class: "trace-json" }, [
+    el("summary", { text: label }),
+    el("div", { class: "trace-json-actions" }, [
+      el("button", { class: "link", type: "button", text: "复制 JSON", onclick: () => void copyTraceJson(value) }),
+    ]),
+    el("pre", { text: traceJson(value, true) }),
+  ]);
+}
+
+function renderTraceEvent(event) {
+  return el("article", { class: "trace-event trace-tone-" + event.tone }, [
+    el("div", { class: "trace-event-head" }, [
+      el("span", { class: "seq", text: event.sequence === undefined ? "#?" : "#" + event.sequence }),
+      el("strong", { text: event.label }),
+      el("span", { class: "tag mono", text: event.type }),
+      el("span", { class: "trace-event-summary", text: event.summary }),
+    ]),
+    renderTraceJsonDetails("原始 payload", event.payload),
+  ]);
+}
+
+function renderTraceBoundary(line, kind) {
+  const isHeader = kind === "header";
+  const index = Number.isFinite(Number(line.segmentIndex)) ? Number(line.segmentIndex) : "?";
+  return el("article", { class: "trace-boundary " + kind }, [
+    el("div", { class: "trace-event-head" }, [
+      el("strong", { text: isHeader ? "执行段 " + index + " 开始" : "执行段 " + index + " 结束" }),
+      line.entry ? el("span", { class: "chip", text: line.entry }) : null,
+      line.modelId ? el("span", { class: "chip", text: line.modelId }) : null,
+      line.executionPrivilege
+        ? el("span", { class: "chip " + (line.executionPrivilege === "UNRESTRICTED" ? "warn" : ""), text: line.executionPrivilege })
+        : null,
+      line.commit ? el("span", { class: "chip mono", text: "commit " + String(line.commit).slice(0, 10) }) : null,
+      line.gitDirty === true ? el("span", { class: "chip warn", text: "gitDirty true" }) : null,
+      line.terminal && line.terminal.reason ? el("span", { class: "chip", text: line.terminal.reason }) : null,
+      line.outcome && line.outcome.kind ? el("span", { class: "chip", text: line.outcome.kind }) : null,
+    ]),
+    el("div", {
+      class: "kv",
+      text: [line.startedAt || line.finishedAt, line.endpointProfile].filter(Boolean).join(" · "),
+    }),
+    renderTraceJsonDetails(isHeader ? "原始 header" : "原始 footer", line),
+  ]);
+}
+
+function traceTurnTone(turn) {
+  if (turn.events.some((e) => e.abnormal && e.tone === "bad")) return "bad";
+  if (turn.abnormal) return "warn";
+  return "neutral";
+}
+
+function tracePhaseBar(turn) {
+  const phases = [];
+  const has = (fn) => turn.events.some(fn);
+  if (has((e) => e.type === "ContextFrameCompiled" || e.type === "ContextCompacted")) phases.push(["上下文", "model"]);
+  if (has((e) => e.type === "ModelInvocationCompleted" || e.type === "ModelStreamDelta")) phases.push(["模型", "model"]);
+  if (has((e) => e.category === "human")) phases.push(["审批/交互", "warn"]);
+  if (turn.actions.length || turn.batches.length) phases.push(["工具执行", "tool"]);
+  if (has((e) => e.type === "VerificationCompleted")) phases.push(["验证", "ok"]);
+  if (turn.artifacts.length) phases.push(["产物", "ok"]);
+  if (has((e) => e.category === "diagnostic")) phases.push(["预算/恢复", turn.abnormal ? "warn" : "flow"]);
+  if (turn.transition) phases.push([turn.transition, "flow"]);
+  return el("div", { class: "trace-phase-bar" }, phases.flatMap((phase, index) => [
+    index ? el("span", { class: "trace-phase-arrow", text: "→" }) : null,
+    el("span", { class: "trace-phase trace-tone-" + phase[1], text: phase[0] }),
+  ]));
+}
+
+function renderTraceEventGroup(title, subtitle, events, cls, expandProgress) {
+  const box = el("section", { class: "trace-event-group " + (cls || "") }, [
+    el("div", { class: "trace-group-head" }, [
+      el("strong", { text: title }),
+      subtitle ? el("span", { class: "mono muted", text: subtitle }) : null,
+      el("span", { class: "chip", text: events.length + " 条" }),
+    ]),
+  ]);
+  for (let index = 0; index < events.length;) {
+    if (events[index].type !== "ToolProgress") {
+      box.appendChild(renderTraceEvent(events[index]));
+      index += 1;
+      continue;
+    }
+    const progress = [];
+    while (index < events.length && events[index].type === "ToolProgress") {
+      progress.push(events[index]);
+      index += 1;
+    }
+    if (progress.length < 3) {
+      for (const event of progress) box.appendChild(renderTraceEvent(event));
+      continue;
+    }
+    const first = progress[0].summary;
+    const last = progress[progress.length - 1].summary;
+    box.appendChild(
+      el("details", { class: "trace-progress", open: expandProgress === true }, [
+        el("summary", {
+          text: "工具进度 × " + progress.length + " · " + traceClip(first, 90) +
+            (last !== first ? " → " + traceClip(last, 90) : ""),
+        }),
+        ...progress.map(renderTraceEvent),
+      ]),
+    );
+  }
+  return box;
+}
+
+function renderTraceTurnBody(turn, options) {
+  const body = el("div", { class: "trace-turn-body" }, [tracePhaseBar(turn)]);
+  const importantWholeTurn = options.filter === "important" && turn.important && !options.query;
+  const eventMatches = (event) => importantWholeTurn
+    ? event.type !== "ModelStreamDelta" || options.showStream
+    : traceEventMatches(event, options);
+  const groupMatches = (group) => importantWholeTurn || traceGroupMatches(group, turn, options);
+  const grouped = new Set([
+    ...turn.actions.flatMap((g) => g.events),
+    ...turn.batches.flatMap((g) => g.events),
+    ...turn.artifacts.flatMap((g) => g.events),
+  ]);
+  const plain = turn.events.filter((e) => !grouped.has(e) && e.type !== "TurnStarted");
+  const appendPlainPhases = (phaseDefs) => {
+    for (const [label, cls, categories] of phaseDefs) {
+      const matched = plain.filter((e) => categories.includes(e.category) && eventMatches(e));
+      if (matched.length) body.appendChild(renderTraceEventGroup(label, "", matched, cls));
+    }
+  };
+
+  appendPlainPhases([
+    ["上下文与模型", "model", ["model"]],
+    ["审批与人工交互", "human", ["human"]],
+  ]);
+  for (const batch of turn.batches) {
+    if (!groupMatches(batch)) continue;
+    body.appendChild(renderTraceEventGroup("操作批次", batch.id, batch.events.filter((e) =>
+      e.type !== "ModelStreamDelta" || options.showStream), "tool"));
+  }
+  for (const action of turn.actions) {
+    if (!groupMatches(action)) continue;
+    const tool = action.events.map((e) => e.payload.toolName).find(Boolean) || "未知工具";
+    body.appendChild(renderTraceEventGroup("操作生命周期 · " + tool, action.id, action.events.filter((e) =>
+      e.type !== "ModelStreamDelta" || options.showStream), "action", Boolean(options.query)));
+  }
+  for (const artifact of turn.artifacts) {
+    if (!groupMatches(artifact)) continue;
+    body.appendChild(renderTraceEventGroup("产物生命周期", artifact.id, artifact.events, "verify"));
+  }
+  appendPlainPhases([
+    ["预算、恢复与诊断", "diagnostic", ["diagnostic"]],
+    ["循环迁移", "lifecycle", ["lifecycle"]],
+    ["其他事件", "other", ["other"]],
+  ]);
+  if (turn.streamCount && !options.showStream && (options.filter === "all" || options.filter === "model" || importantWholeTurn)) {
+    body.appendChild(
+      el("div", {
+        class: "trace-stream-summary",
+        text: "已折叠 ModelStreamDelta × " + turn.streamCount + "（" + turn.streamChars + " 字符）；可在顶部打开“显示流式增量”。",
+      }),
+    );
+  }
+  if (body.childNodes.length === 1) {
+    body.appendChild(el("p", { class: "muted", text: "（本轮没有符合当前筛选条件的阶段）" }));
+  }
+  return body;
+}
+
+function renderTraceTurn(turn, options, ui) {
+  const isOpen = ui.expanded.has(turn.id);
+  const badges = [
+    el("span", { class: "chip", text: "模型 " + turn.modelCalls + " 次 / " + traceDuration(turn.modelDurationMs) }),
+    el("span", { class: "chip", text: "工具 " + turn.actions.length + " 次" }),
+    turn.streamCount ? el("span", { class: "chip", text: "流式 " + turn.streamCount + " 条" }) : null,
+    turn.abnormal ? el("span", { class: "chip " + traceTurnTone(turn), text: "需关注" }) : null,
+    turn.isLongest ? el("span", { class: "chip", text: "最长已完成轮" }) : null,
+    turn.transition ? el("span", { class: "chip", text: turn.transition }) : null,
+  ];
+  const details = el("details", { class: "trace-turn trace-turn-" + traceTurnTone(turn), id: turn.id, open: isOpen }, [
+    el("summary", {}, [
+      el("div", { class: "trace-turn-title" }, [
+        el("strong", { text: turn.number === undefined ? "未知轮次" : "T" + turn.number }),
+        el("span", {
+          class: "mono muted",
+          text: "#" + (turn.firstSequence ?? "?") + "–#" + (turn.lastSequence ?? "?") +
+            " · 事件跨度 " + traceDuration(turn.spanMs),
+        }),
+        turn.toolNames.length ? el("span", { class: "toolname", text: turn.toolNames.join("、") }) : null,
+      ]),
+      el("div", { class: "trace-turn-badges" }, badges),
+    ]),
+    renderTraceTurnBody(turn, options),
+  ]);
+  details.addEventListener("toggle", () => {
+    ui.touched.add(turn.id);
+    if (details.open) ui.expanded.add(turn.id);
+    else ui.expanded.delete(turn.id);
+  });
+  return details;
+}
+
+function renderTraceSegmentHeader(segment) {
+  if (!segment.header) {
+    return el("div", { class: "trace-segment-head warn", text: "执行段信息缺失（Trace 中没有 header，事件仍按原顺序保留）" });
+  }
+  const h = segment.header;
+  return el("div", { class: "trace-segment-head" }, [
+    el("strong", { text: "执行段 " + segment.index }),
+    h.entry ? el("span", { class: "chip", text: h.entry }) : null,
+    h.modelId ? el("span", { class: "chip", text: h.modelId }) : null,
+    h.executionPrivilege
+      ? el("span", { class: "chip " + (h.executionPrivilege === "UNRESTRICTED" ? "warn" : ""), text: h.executionPrivilege })
+      : null,
+    h.commit ? el("span", { class: "chip mono", text: "commit " + String(h.commit).slice(0, 10) }) : null,
+    h.gitDirty === true ? el("span", { class: "chip warn", text: "gitDirty true" }) : null,
+    el("span", { class: "muted", text: [h.startedAt, h.endpointProfile].filter(Boolean).join(" · ") }),
+  ]);
+}
+
+function renderTraceTurns(container, presentation, options, ui) {
+  let visibleTurns = 0;
+  for (const segment of presentation.segments) {
+    const turns = segment.turns.filter((turn) => traceTurnMatches(turn, options));
+    const prelude = segment.prelude.filter((event) => traceEventMatches(event, options));
+    if (!turns.length && !prelude.length &&
+        !(options.filter === "all" && !options.query && (segment.header || segment.unknownLines.length))) continue;
+    const section = el("section", { class: "trace-segment" }, [renderTraceSegmentHeader(segment)]);
+    if (prelude.length) section.appendChild(renderTraceEventGroup("段首事件", "首轮开始之前", prelude, "lifecycle"));
+    for (const turn of turns) {
+      section.appendChild(renderTraceTurn(turn, options, ui));
+      visibleTurns += 1;
+    }
+    if (segment.footer) {
+      section.appendChild(
+        el("div", {
+          class: "trace-segment-foot",
+          text: traceBoundarySummary(segment.footer, "段尾") +
+            (segment.footer.finishedAt ? " · " + segment.footer.finishedAt : ""),
+        }),
+      );
+    }
+    section.appendChild(renderTraceJsonDetails("执行段原始信息", {
+      header: segment.header || null,
+      footer: segment.footer || null,
+    }));
+    container.appendChild(section);
+  }
+  if (!visibleTurns) {
+    container.appendChild(
+      el("div", { class: "trace-empty", text: presentation.stats.turns ? "没有符合当前条件的轮次。" : "Trace 中还没有 TurnStarted 事件。" }),
+    );
+  }
+}
+
+function renderTraceRaw(container, presentation, options) {
+  const byLine = new Map(presentation.events.map((event) => [event.line, event]));
+  let visible = 0;
+  for (const segment of presentation.segments) {
+    const matched = segment.events.filter((event) => traceEventMatches(event, options));
+    const unknownMatched = options.filter === "all" && segment.unknownLines.filter((line) => {
+      const query = String(options.query || "").trim().toLowerCase();
+      return !query || traceJson(line, false).toLowerCase().includes(query);
+    });
+    if (!matched.length && !unknownMatched.length && !(options.filter === "all" && !options.query && !segment.events.length)) continue;
+    const matchedSet = new Set(matched.map((event) => event.line));
+    const unknownSet = new Set(unknownMatched);
+    const section = el("section", { class: "trace-raw-segment" }, []);
+    for (const line of segment.rawLines) {
+      if (line.kind === "header") section.appendChild(renderTraceBoundary(line, "header"));
+      else if (line.kind === "footer") section.appendChild(renderTraceBoundary(line, "footer"));
+      else if (line.kind === "event" && matchedSet.has(line)) {
+        section.appendChild(renderTraceEvent(byLine.get(line)));
+        visible += 1;
+      } else if (line.kind !== "event" && unknownSet.has(line)) {
+        section.appendChild(
+          el("article", { class: "trace-event trace-tone-neutral" }, [
+            el("div", { class: "trace-event-head" }, [el("strong", { text: "未识别 Trace 行" })]),
+            renderTraceJsonDetails("原始行", line),
+          ]),
+        );
+      }
+    }
+    container.appendChild(section);
+  }
+  if (!visible && presentation.stats.eventLines) {
+    container.appendChild(el("div", { class: "trace-empty", text: "没有符合当前条件的原始事件。" }));
+  }
+}
+
 async function renderTrace(view, d) {
-  view.appendChild(
-    el("p", { class: "kv", text: d.tracks.traceFile ? "文件：" + d.tracks.traceFile : "（没有 trace 文件）" }),
-  );
-  const body = el("div", {}, [el("p", { class: "muted", text: "读取中……" })]);
+  if (S.traceUi.runId !== d.runId) {
+    S.traceUi = {
+      runId: d.runId,
+      mode: "turns",
+      filter: "all",
+      query: "",
+      showStream: false,
+      expanded: new Set(),
+      touched: new Set(),
+    };
+  }
+  const body = el("section", { class: "trace-inspector" }, [el("p", { class: "muted", text: "正在读取 Trace……" })]);
   view.appendChild(body);
   let lines = [];
   try {
@@ -1126,47 +1926,126 @@ async function renderTrace(view, d) {
     body.appendChild(el("p", { class: "muted", text: "读不到：" + err.message }));
     return;
   }
+  // 切 Run / 切 Tab 后旧请求可能晚回来。它可以完成，但不能把旧内容画进新页面。
+  if (S.runId !== d.runId || S.tab !== "trace" || !body.isConnected) return;
   clear(body);
-  const counts = {};
-  for (const l of lines) if (l.kind === "event") counts[l.type] = (counts[l.type] || 0) + 1;
-  body.appendChild(
-    el("p", { class: "kv", text: "共 " + lines.length + " 行；事件类型：" +
-      Object.keys(counts).sort().map((k) => k + " × " + counts[k]).join("、") }),
-  );
-  for (const l of lines) {
-    if (l.kind === "header") {
-      // header 的段号是 N-1 的落点：一个 Run 跨三个进程仍是同一个文件，
-      // 三段 header 并排着看才知道每段用的是哪个 commit / 工作树是否 dirty。
-      body.appendChild(
-        el("div", { class: "entry SYSTEM_NOTICE" }, [
-          el("div", { class: "head" }, [
-            el("span", { class: "tag", text: "段 " + (l.segmentIndex ?? 0) }),
-            el("span", { class: "chip", text: "commit " + String(l.commit).slice(0, 10) }),
-            el("span", { class: "chip " + (l.gitDirty === true ? "warn" : ""), text: "gitDirty " + l.gitDirty }),
-            el("span", { class: "chip", text: l.modelId }),
-          ]),
-          el("div", { class: "kv", text: l.startedAt + "｜" + l.endpointProfile }),
-        ]),
-      );
-    } else if (l.kind === "footer") {
-      body.appendChild(
-        el("div", { class: "entry SYSTEM_NOTICE WARN" }, [
-          el("div", { class: "head" }, [el("span", { class: "tag", text: "段尾" })]),
-          el("pre", { text: JSON.stringify(l, null, 2) }),
-        ]),
-      );
-    } else {
-      body.appendChild(
-        el("div", { class: "entry" }, [
-          el("div", { class: "head" }, [
-            el("span", { class: "seq", text: "#" + l.sequence }),
-            el("span", { class: "tag", text: l.type }),
-          ]),
-          el("pre", { text: JSON.stringify(l.payload) }),
-        ]),
-      );
-    }
+  const presentation = buildTracePresentation(lines);
+  const ui = S.traceUi;
+  for (const turn of presentation.turns) {
+    if (turn.important && !ui.touched.has(turn.id)) ui.expanded.add(turn.id);
   }
+
+  const source = el("details", { class: "trace-source" }, [
+    el("summary", { text: d.tracks.traceFile ? "Trace 来源与统计口径" : "没有 trace 文件" }),
+    el("div", { class: "mono", text: d.tracks.traceFile || "（该 Run 没有可读取的 Trace 文件）" }),
+    el("p", {
+      class: "hint",
+      text: "业务事件不含 ModelStreamDelta；原始行还包含每个执行段的 header / footer。",
+    }),
+  ]);
+  body.appendChild(source);
+
+  const toolbar = el("div", { class: "trace-toolbar" }, []);
+  const modeTurns = el("button", { type: "button", text: "逐轮检查器" });
+  const modeRaw = el("button", { type: "button", text: "原始事件" });
+  const modeGroup = el("div", { class: "trace-mode-group" }, [modeTurns, modeRaw]);
+  const stats = el("div", { class: "trace-stats" }, [
+    el("span", { class: "chip", text: "业务事件 " + presentation.stats.businessEvents }),
+    el("span", { class: "chip", text: "流式增量 " + presentation.stats.streamEvents }),
+    el("span", { class: "chip", text: "轮次 " + presentation.stats.turns }),
+    el("span", { class: "chip", text: "执行段 " + presentation.stats.segments }),
+    el("span", { class: "chip", text: "原始行 " + presentation.stats.rawLines }),
+  ]);
+  const search = el("input", {
+    class: "trace-search",
+    type: "text",
+    value: ui.query,
+    placeholder: "搜索事件、工具、序号或 ID…",
+    "aria-label": "搜索 Trace",
+  });
+  const showStream = el("input", { type: "checkbox" });
+  showStream.checked = ui.showStream;
+  const showStreamLabel = el("label", { class: "trace-check" }, [showStream, "显示流式增量"]);
+  const jump = el("select", { class: "trace-jump", "aria-label": "跳到轮次" }, [
+    el("option", { value: "", text: "跳到轮次…" }),
+    ...presentation.turns.map((turn) => el("option", {
+      value: turn.id,
+      text: (turn.number === undefined ? "未知轮次" : "T" + turn.number) +
+        (turn.abnormal ? " · 需关注" : turn.isLongest ? " · 最长" : ""),
+    })),
+  ]);
+  const expandAll = el("button", { type: "button", text: "全部展开" });
+  const collapseAll = el("button", { type: "button", text: "全部折叠" });
+  const filterButtons = new Map();
+  const filters = el("div", { class: "trace-filters", "aria-label": "Trace 分类筛选" },
+    TRACE_FILTERS.map(([key, label]) => {
+      const button = el("button", { type: "button", text: label });
+      filterButtons.set(key, button);
+      return button;
+    }));
+  const content = el("div", { class: "trace-content" }, []);
+
+  toolbar.appendChild(el("div", { class: "trace-toolbar-main" }, [modeGroup, stats, search]));
+  toolbar.appendChild(el("div", { class: "trace-toolbar-actions" }, [
+    filters,
+    showStreamLabel,
+    jump,
+    expandAll,
+    collapseAll,
+  ]));
+  body.appendChild(toolbar);
+  body.appendChild(content);
+
+  const options = () => ({
+    filter: ui.filter,
+    query: ui.query,
+    showStream: ui.showStream,
+  });
+  const updateControls = () => {
+    modeTurns.className = ui.mode === "turns" ? "active" : "";
+    modeRaw.className = ui.mode === "raw" ? "active" : "";
+    for (const [key, button] of filterButtons) button.className = ui.filter === key ? "active" : "";
+    jump.hidden = ui.mode !== "turns";
+    expandAll.hidden = ui.mode !== "turns";
+    collapseAll.hidden = ui.mode !== "turns";
+  };
+  const paint = () => {
+    clear(content);
+    updateControls();
+    if (!presentation.stats.rawLines) {
+      content.appendChild(el("div", { class: "trace-empty", text: "（没有可展示的 Trace 行）" }));
+      return;
+    }
+    if (ui.mode === "raw") renderTraceRaw(content, presentation, options());
+    else renderTraceTurns(content, presentation, options(), ui);
+  };
+
+  modeTurns.addEventListener("click", () => { ui.mode = "turns"; paint(); });
+  modeRaw.addEventListener("click", () => { ui.mode = "raw"; paint(); });
+  for (const [key, button] of filterButtons) {
+    button.addEventListener("click", () => { ui.filter = key; paint(); });
+  }
+  search.addEventListener("input", () => { ui.query = search.value; paint(); });
+  showStream.addEventListener("change", () => { ui.showStream = showStream.checked; paint(); });
+  jump.addEventListener("change", () => {
+    if (!jump.value) return;
+    const target = document.getElementById(jump.value);
+    if (target) target.scrollIntoView({ block: "start", behavior: "smooth" });
+    jump.value = "";
+  });
+  expandAll.addEventListener("click", () => {
+    for (const turn of presentation.turns) {
+      ui.touched.add(turn.id);
+      ui.expanded.add(turn.id);
+    }
+    paint();
+  });
+  collapseAll.addEventListener("click", () => {
+    for (const turn of presentation.turns) ui.touched.add(turn.id);
+    ui.expanded.clear();
+    paint();
+  });
+  paint();
 }
 
 // ── 恢复
@@ -1505,6 +2384,15 @@ function selectRun(runId) {
   S.detail = null;
   S.stream = "";
   S.expanded.clear();
+  S.traceUi = {
+    runId,
+    mode: "turns",
+    filter: "all",
+    query: "",
+    showStream: false,
+    expanded: new Set(),
+    touched: new Set(),
+  };
   renderRuns();
   void refresh();
   connectSSE(runId);

@@ -52,7 +52,8 @@ npm run ui
 
 默认路径是 `.workagent-state/mcp.json`（跨 workspace）；文件不存在不是错误，
 `--mcp-config <path>` 可以指定其他位置。示例命令使用
-`["npx", "-y", "@playwright/mcp@latest"]`，启动时直接获得 Playwright MCP 的最新能力与修复。
+`["npx", "-y", "--registry=https://registry.npmjs.org", "@playwright/mcp@latest"]`，
+显式使用公共 npm registry，并在启动时直接获得 Playwright MCP 的最新能力与修复。
 代价是服务器代码及工具声明可能随重启变化；Atlas 会把 schema、description 和档位摘要纳入
 工具 version，并在 resume 时显式报告外部工具漂移。
 

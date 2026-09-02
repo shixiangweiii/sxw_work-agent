@@ -1833,6 +1833,297 @@ async function main(): Promise<void> {
       );
     }
 
+    // ══════════════════════════════════════ N. Trace Inspector 的只读展示投影
+    section("N. Trace Inspector：逐轮聚合不改写原始 Trace");
+    {
+      /**
+       * 与预算摘要同一条验法：直接执行浏览器真正使用的纯 helper。
+       * 如果测试自己再写一份分轮/关联逻辑，两份代码一起错时仍会全绿。
+       */
+      const uiSrc = readFileSync(resolve(REPO_ROOT, "apps/workagent-ui/public/app.js"), "utf8");
+      const helperStart = uiSrc.indexOf("\nconst TRACE_EVENT_META =");
+      const helperEnd = uiSrc.indexOf("\nasync function copyTraceJson(", helperStart);
+      if (helperStart < 0 || helperEnd <= helperStart) {
+        throw new Error("app.js 里找不到 Trace Inspector 的纯展示 helper");
+      }
+      const helperSrc = uiSrc.slice(helperStart, helperEnd);
+      const traceHelpers = new Function(
+        `${helperSrc}\nreturn { buildTracePresentation, traceEventPresentation, traceEventMatches, traceTurnMatches };`,
+      )() as {
+        buildTracePresentation(lines: Array<Record<string, unknown>>): {
+          stats: Record<string, number>;
+          segments: Array<{
+            prelude: Array<Record<string, unknown>>;
+            turns: Array<Record<string, unknown>>;
+            footer?: Record<string, unknown>;
+          }>;
+          turns: Array<{
+            id: string;
+            number: number;
+            actions: Array<{ id: string; events: Array<{ type: string }> }>;
+            artifacts: Array<{ id: string; events: Array<{ type: string }> }>;
+            events: Array<Record<string, unknown>>;
+            abnormal: boolean;
+            important: boolean;
+            isLast?: boolean;
+            isLongest?: boolean;
+          }>;
+          events: Array<Record<string, unknown>>;
+        };
+        traceEventPresentation(line: Record<string, unknown>): Record<string, unknown>;
+        traceEventMatches(event: Record<string, unknown>, options: Record<string, unknown>): boolean;
+        traceTurnMatches(turn: Record<string, unknown>, options: Record<string, unknown>): boolean;
+      };
+
+      let sequence = 1;
+      let occurredAt = 1_000;
+      const event = (type: string, payload: Record<string, unknown>): Record<string, unknown> => ({
+        kind: "event",
+        runId: "run_trace_fixture",
+        sequence: sequence++,
+        occurredAt: occurredAt += 10,
+        type,
+        payload,
+      });
+      const lines: Array<Record<string, unknown>> = [{
+        kind: "header",
+        segmentIndex: 0,
+        entry: "web",
+        commit: "0123456789abcdef",
+        modelId: "fixture-model",
+        executionPrivilege: "SANDBOXED",
+        startedAt: "2026-09-02T00:00:00.000Z",
+      }];
+      lines.push(event("RunStarted", {
+        endpointId: "fixture",
+        modelId: "fixture-model",
+        executionPrivilege: "SANDBOXED",
+      }));
+      for (let turn = 1; turn <= 10; turn += 1) {
+        lines.push(event("TurnStarted", { turn }));
+        lines.push(event("ContextFrameCompiled", {
+          items: turn,
+          totalTokens: 1_000 + turn,
+          fixedOverheadTokens: 100,
+          compacted: false,
+          trust: { hasExternalUntrusted: false, untrustedItems: 0 },
+        }));
+        if (turn === 1) {
+          lines.push(event("ActionProposed", {
+            actionId: "act_one",
+            toolCallId: "call_one",
+            toolName: "read_file",
+            effect: "READ fixture.txt",
+            riskFacts: [],
+          }));
+          lines.push(event("ApprovalRequested", { actionId: "act_one", effect: "READ fixture.txt", reason: "fixture" }));
+          lines.push(event("ApprovalDecided", { actionId: "act_one", approved: true, decidedBy: "AUTO" }));
+          lines.push(event("AttemptStarted", { actionId: "act_one", toolName: "read_file" }));
+          lines.push(event("AttemptCompleted", {
+            actionId: "act_one",
+            status: "SUCCEEDED",
+            sideEffectState: "NO_EFFECT",
+            durationMs: 4,
+          }));
+          lines.push(event("VerificationCompleted", {
+            actionId: "act_one",
+            status: "PASSED",
+            required: true,
+            detail: "fixture passed",
+          }));
+          lines.push(event("ActionProposed", {
+            actionId: "act_two",
+            toolCallId: "call_two",
+            toolName: "run_shell",
+            effect: "EXECUTE fixture",
+            riskFacts: [],
+          }));
+          lines.push(event("AttemptCompleted", {
+            actionId: "act_two",
+            status: "FAILED",
+            sideEffectState: "UNKNOWN",
+            durationMs: 5,
+          }));
+          lines.push(event("ArtifactRegistered", {
+            artifactId: "art_one",
+            logicalId: "fixture",
+            version: 1,
+            role: "DELIVERABLE",
+            kind: "FILE",
+          }));
+          lines.push(event("ArtifactVerified", {
+            artifactId: "art_one",
+            role: "DELIVERABLE",
+            ok: true,
+            checksRun: ["fixture"],
+            detail: "ok",
+          }));
+        }
+        if (turn === 2) {
+          lines.push(event("FutureEvent", { text: "<img src=x onerror=alert(1)>", toolName: "future_tool" }));
+        }
+        if (turn < 10) lines.push(event("LoopContinued", { transition: { reason: "NEXT_TURN" } }));
+      }
+      // 先补到 115 条业务事件，最后一条 LoopTerminated 让口径精确落在 116。
+      const businessCount = () => lines.filter((line) =>
+        line.kind === "event" && line.type !== "ModelStreamDelta").length;
+      while (businessCount() < 115) {
+        lines.push(event("InterjectionAccepted", { content: "fixture filler " + businessCount() }));
+      }
+      for (let i = 0; i < 91; i += 1) {
+        lines.push(event("ModelStreamDelta", { text: i === 0 ? "stream-only-canary" : "x" }));
+      }
+      lines.push(event("LoopTerminated", {
+        terminal: { reason: "COMPLETED" },
+        outcome: { kind: "SUCCESS", incompleteItems: [], recoveryItems: [] },
+      }));
+      lines.push({
+        kind: "footer",
+        segmentIndex: 0,
+        eventCount: 207,
+        terminal: { reason: "COMPLETED" },
+        outcome: { kind: "SUCCESS" },
+        finishedAt: "2026-09-02T00:01:00.000Z",
+      });
+
+      const projected = traceHelpers.buildTracePresentation(lines);
+      fact(
+        "209 行口径",
+        `${projected.stats.businessEvents} 业务事件 + ${projected.stats.streamEvents} 流式增量 + ` +
+          `${projected.stats.boundaryLines} 段边界 = ${projected.stats.rawLines} 行`,
+      );
+      const n1 =
+        projected.stats.rawLines === 209 &&
+        projected.stats.businessEvents === 116 &&
+        projected.stats.streamEvents === 91 &&
+        projected.stats.boundaryLines === 2 &&
+        projected.stats.turns === 10;
+      verdict(
+        n1,
+        n1
+          ? "业务事件、流式增量、轮次与 JSONL 行数分开统计，解释了 116 与 209 为什么同时成立"
+          : `Trace 统计口径错误：${JSON.stringify(projected.stats)}`,
+      );
+
+      const turnOne = projected.turns.find((turn) => turn.number === 1)!;
+      const actionOne = turnOne.actions.find((action) => action.id === "act_one");
+      const actionTwo = turnOne.actions.find((action) => action.id === "act_two");
+      const artifact = turnOne.artifacts.find((item) => item.id === "art_one");
+      const n2 =
+        actionOne?.events.map((item) => item.type).join(",") ===
+          "ActionProposed,ApprovalRequested,ApprovalDecided,AttemptStarted,AttemptCompleted,VerificationCompleted" &&
+        actionTwo?.events.map((item) => item.type).join(",") === "ActionProposed,AttemptCompleted" &&
+        artifact?.events.map((item) => item.type).join(",") === "ArtifactRegistered,ArtifactVerified" &&
+        !actionOne?.events.some((item) => item.type.startsWith("Artifact"));
+      fact("act_one 生命周期", actionOne?.events.map((item) => item.type).join(" → ") ?? "缺失");
+      fact("art_one 生命周期", artifact?.events.map((item) => item.type).join(" → ") ?? "缺失");
+      verdict(
+        n2,
+        n2
+          ? "actionId 只聚合自己的审批/执行/验证；artifactId 独立聚合，没有臆造 action → artifact 关系"
+          : "actionId 或 artifactId 的展示关联发生串线",
+      );
+
+      const unknown = projected.events.find((item) => item.type === "FutureEvent")!;
+      const hiddenStream = projected.turns.flatMap((turn) => turn.events).filter((item) =>
+        traceHelpers.traceEventMatches(item, { filter: "all", query: "", showStream: false })).length;
+      const shownStream = projected.turns.flatMap((turn) => turn.events).filter((item) =>
+        traceHelpers.traceEventMatches(item, { filter: "all", query: "", showStream: true })).length;
+      const n3 =
+        unknown.label === "未识别事件" &&
+        String(unknown.searchText).includes("<img src=x onerror=alert(1)>") &&
+        shownStream - hiddenStream === 91 &&
+        !traceHelpers.traceTurnMatches(projected.turns[9]!, {
+          filter: "important",
+          query: "stream-only-canary",
+          showStream: false,
+        }) &&
+        traceHelpers.traceTurnMatches(projected.turns[9]!, {
+          filter: "important",
+          query: "stream-only-canary",
+          showStream: true,
+        });
+      fact("未来事件回退", `${unknown.label} / ${unknown.type}`);
+      fact("流式开关前后", `${hiddenStream} → ${shownStream}`);
+      verdict(
+        n3,
+        n3
+          ? "未来事件与风险文本按原文保留；ModelStreamDelta 默认隐藏、打开后 91 条全部可见"
+          : "未知事件被丢弃、改写，或流式开关没有控制完整集合",
+      );
+
+      const searchHit = projected.turns.filter((turn) => traceHelpers.traceTurnMatches(turn, {
+        filter: "all",
+        query: "read_file",
+        showStream: false,
+      }));
+      const abnormal = projected.turns.filter((turn) => traceHelpers.traceTurnMatches(turn, {
+        filter: "abnormal",
+        query: "",
+        showStream: false,
+      }));
+      const diagnostic = projected.turns.filter((turn) => traceHelpers.traceTurnMatches(turn, {
+        filter: "diagnostic",
+        query: "",
+        showStream: false,
+      }));
+      const last = projected.turns[projected.turns.length - 1];
+      const n4 =
+        searchHit.length === 1 && searchHit[0]?.number === 1 &&
+        abnormal.length === 1 && abnormal[0]?.number === 1 &&
+        diagnostic.length === 1 && diagnostic[0]?.number === 1 &&
+        turnOne.important && turnOne.abnormal && last?.isLast === true && last?.isLongest === true && last.important;
+      fact("搜索 read_file", searchHit.map((turn) => `T${turn.number}`).join(", "));
+      fact("重点轮", projected.turns.filter((turn) => turn.important).map((turn) => `T${turn.number}`).join(", "));
+      verdict(
+        n4,
+        n4
+          ? "搜索、异常筛选与默认重点轮规则可区分：异常 T1，最后且最长的 T10"
+          : "搜索、异常分类或重点轮规则没有按真实事件工作",
+      );
+
+      const multi = traceHelpers.buildTracePresentation([
+        { kind: "header", segmentIndex: 0, modelId: "m1" },
+        { kind: "event", sequence: 1, occurredAt: 1, type: "RunStarted", payload: {} },
+        { kind: "footer", segmentIndex: 0, terminal: null },
+        { kind: "header", segmentIndex: 1, modelId: "m2", resumedFrom: 1 },
+        { kind: "event", sequence: 2, occurredAt: 2, type: "ResumeStarted", payload: { fromSequence: 1, rebuiltMessages: 1 } },
+        { kind: "event", sequence: 3, occurredAt: 3, type: "TurnStarted", payload: { turn: 2 } },
+      ]);
+      const headerOnly = traceHelpers.buildTracePresentation([{ kind: "header", segmentIndex: 0 }]);
+      const n5 =
+        multi.stats.segments === 2 &&
+        multi.segments[1]?.prelude.some((item) => item.type === "ResumeStarted") === true &&
+        multi.segments[1]?.turns.length === 1 &&
+        multi.segments[1]?.footer === undefined &&
+        headerOnly.stats.segments === 1 && headerOnly.stats.turns === 0;
+      verdict(
+        n5,
+        n5
+          ? "多执行段、resume 段首事件、缺 footer 与只有 header 的运行中形态都能投影"
+          : "执行段边界或不完整 Trace 被误删",
+      );
+
+      const uiCss = readFileSync(resolve(REPO_ROOT, "apps/workagent-ui/public/app.css"), "utf8");
+      const traceCss = uiCss
+        .slice(uiCss.indexOf("/* ── Trace Inspector */"), uiCss.indexOf("/* ── 时间线 */"))
+        .replace(/\/\*[\s\S]*?\*\//g, "");
+      const n6 =
+        uiSrc.includes("逐轮检查器") &&
+        uiSrc.includes("原始事件") &&
+        uiSrc.includes("显示流式增量") &&
+        uiSrc.includes("S.runId !== d.runId || S.tab !== \"trace\"") &&
+        uiCss.includes(".trace-toolbar") &&
+        uiCss.includes("position: sticky") &&
+        !traceCss.includes("overflow-y");
+      verdict(
+        n6,
+        n6
+          ? "双模式、筛选工具栏、旧请求防串页与唯一纵向滚动容器均有机械锚点"
+          : "Trace 交互控件、异步防串页或滚动边界缺失",
+      );
+    }
+
     // ══════════════════════════════════════════════ B. 投影的确定性与 id 稳定
     section("B. 投影：确定性、id 稳定、前缀一致（§23.2 幂等）");
 
