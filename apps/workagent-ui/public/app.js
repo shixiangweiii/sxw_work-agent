@@ -55,16 +55,40 @@ const S = {
   sse: null,
   refreshTimer: 0,
   /** Trace Inspector 的交互状态。换 Run 时重置，同一 Run 刷新时保留。 */
-  traceUi: {
-    runId: "",
+  traceUi: createTraceUi(""),
+};
+
+function createTraceUi(runId) {
+  return {
+    runId,
     mode: "turns",
     filter: "all",
     query: "",
     showStream: false,
     expanded: new Set(),
     touched: new Set(),
-  },
-};
+    presentation: null,
+    dom: null,
+    loadRevision: 0,
+    paintRevision: 0,
+    searchTimer: 0,
+    composing: false,
+  };
+}
+
+/**
+ * 离开 Trace 或切换 Run 时只释放瞬时资源，保留同一 Run 的筛选与展开选择。
+ * revision 同时作废仍在飞行的请求，避免旧响应落到之后重新挂载的外壳上。
+ */
+function disposeTraceInspector() {
+  const ui = S.traceUi;
+  clearTimeout(ui.searchTimer);
+  ui.searchTimer = 0;
+  ui.composing = false;
+  ui.loadRevision += 1;
+  ui.paintRevision += 1;
+  ui.dom = null;
+}
 
 // ═══════════════════════════════════════════════════════════════ DOM
 
@@ -626,6 +650,8 @@ function renderTabs() {
         class: S.tab === key ? "active" : "",
         text: label,
         onclick: () => {
+          if (S.tab === key) return;
+          if (S.tab === "trace") disposeTraceInspector();
           S.tab = key;
           renderTabs();
           renderView();
@@ -637,6 +663,8 @@ function renderTabs() {
 
 function renderView() {
   const view = document.getElementById("view");
+  // 完整渲染只发生在进入 Tab、切换 Run 等场景；后台 Trace 刷新走局部更新。
+  if (S.traceUi.dom) disposeTraceInspector();
   clear(view);
   const d = S.detail;
   if (!d) return;
@@ -1592,6 +1620,41 @@ function traceTurnMatches(turn, options) {
   return turn.events.some((e) => traceEventMatches(e, options));
 }
 
+/** 未知 kind 不冒充业务事件，只在「全部」里按完整原始 JSON 参与搜索。 */
+function traceUnknownLineMatches(line, options) {
+  const filter = options && options.filter || "all";
+  if (filter !== "all") return false;
+  const query = String(options && options.query || "").trim().toLowerCase();
+  return !query || traceJson(line, false).toLowerCase().includes(query);
+}
+
+function traceStatsEquation(stats) {
+  return "原始行 " + stats.rawLines + " = 业务事件 " + stats.businessEvents +
+    " + 流式增量 " + stats.streamEvents + " + 段边界 " + stats.boundaryLines +
+    " + 未知行 " + stats.unknownLines;
+}
+
+/** 这个纯判断被 refresh() 与验收共同使用，避免“看似局部、实际重建”的回归。 */
+function traceRefreshInPlaceAllowed(tab, selectedRunId, traceRunId, rootConnected) {
+  return tab === "trace" && Boolean(selectedRunId) && selectedRunId === traceRunId && rootConnected === true;
+}
+
+function traceResponseCanCommit(requestRevision, currentRevision, requestedRunId, selectedRunId, tab, rootConnected) {
+  return requestRevision === currentRevision &&
+    traceRefreshInPlaceAllowed(tab, selectedRunId, requestedRunId, rootConnected);
+}
+
+/**
+ * 后台刷新前在底部附近就继续跟随；查看历史时保持原位置并裁到新的合法范围。
+ * 返回值只用于实时数据更新，搜索、筛选等主动操作不调用它。
+ */
+function traceScrollAfterRefresh(scrollTop, clientHeight, previousScrollHeight, nextScrollHeight) {
+  const previousMax = Math.max(0, Number(previousScrollHeight) - Number(clientHeight));
+  const nextMax = Math.max(0, Number(nextScrollHeight) - Number(clientHeight));
+  const previousTop = Math.max(0, Math.min(Number(scrollTop) || 0, previousMax));
+  return previousMax - previousTop <= 48 ? nextMax : Math.min(previousTop, nextMax);
+}
+
 function traceGroupMatches(group, turn, options) {
   if (options.filter === "important" && turn.important && !options.query) return true;
   return group.events.some((e) => traceEventMatches(e, options));
@@ -1834,18 +1897,43 @@ function renderTraceSegmentHeader(segment) {
   ]);
 }
 
+function renderTraceUnknownLines(lines) {
+  return el("details", { class: "trace-unknown-lines" }, [
+    el("summary", { text: "未识别 Trace 行 × " + lines.length }),
+    ...lines.map((line) =>
+      el("article", { class: "trace-unknown-line" }, [
+        el("div", { class: "trace-event-head" }, [
+          el("strong", { text: "未知 kind" }),
+          line && line.kind !== undefined
+            ? el("span", { class: "tag mono", text: String(line.kind) })
+            : null,
+        ]),
+        renderTraceJsonDetails("原始行", line),
+      ])),
+  ]);
+}
+
 function renderTraceTurns(container, presentation, options, ui) {
-  let visibleTurns = 0;
+  let visibleItems = 0;
   for (const segment of presentation.segments) {
     const turns = segment.turns.filter((turn) => traceTurnMatches(turn, options));
     const prelude = segment.prelude.filter((event) => traceEventMatches(event, options));
-    if (!turns.length && !prelude.length &&
-        !(options.filter === "all" && !options.query && (segment.header || segment.unknownLines.length))) continue;
+    const unknownLines = segment.unknownLines.filter((line) => traceUnknownLineMatches(line, options));
+    const boundaryOnly = options.filter === "all" && !options.query &&
+      Boolean(segment.header || segment.footer) && !segment.events.length && !segment.unknownLines.length;
+    if (!turns.length && !prelude.length && !unknownLines.length && !boundaryOnly) continue;
     const section = el("section", { class: "trace-segment" }, [renderTraceSegmentHeader(segment)]);
-    if (prelude.length) section.appendChild(renderTraceEventGroup("段首事件", "首轮开始之前", prelude, "lifecycle"));
+    if (prelude.length) {
+      section.appendChild(renderTraceEventGroup("段首事件", "首轮开始之前", prelude, "lifecycle"));
+      visibleItems += prelude.length;
+    }
+    if (unknownLines.length) {
+      section.appendChild(renderTraceUnknownLines(unknownLines));
+      visibleItems += unknownLines.length;
+    }
     for (const turn of turns) {
       section.appendChild(renderTraceTurn(turn, options, ui));
-      visibleTurns += 1;
+      visibleItems += 1;
     }
     if (segment.footer) {
       section.appendChild(
@@ -1861,8 +1949,9 @@ function renderTraceTurns(container, presentation, options, ui) {
       footer: segment.footer || null,
     }));
     container.appendChild(section);
+    if (boundaryOnly) visibleItems += 1;
   }
-  if (!visibleTurns) {
+  if (!visibleItems) {
     container.appendChild(
       el("div", { class: "trace-empty", text: presentation.stats.turns ? "没有符合当前条件的轮次。" : "Trace 中还没有 TurnStarted 事件。" }),
     );
@@ -1874,87 +1963,216 @@ function renderTraceRaw(container, presentation, options) {
   let visible = 0;
   for (const segment of presentation.segments) {
     const matched = segment.events.filter((event) => traceEventMatches(event, options));
-    const unknownMatched = options.filter === "all" && segment.unknownLines.filter((line) => {
-      const query = String(options.query || "").trim().toLowerCase();
-      return !query || traceJson(line, false).toLowerCase().includes(query);
-    });
+    const unknownMatched = segment.unknownLines.filter((line) => traceUnknownLineMatches(line, options));
     if (!matched.length && !unknownMatched.length && !(options.filter === "all" && !options.query && !segment.events.length)) continue;
     const matchedSet = new Set(matched.map((event) => event.line));
     const unknownSet = new Set(unknownMatched);
     const section = el("section", { class: "trace-raw-segment" }, []);
     for (const line of segment.rawLines) {
-      if (line.kind === "header") section.appendChild(renderTraceBoundary(line, "header"));
-      else if (line.kind === "footer") section.appendChild(renderTraceBoundary(line, "footer"));
-      else if (line.kind === "event" && matchedSet.has(line)) {
+      if (line.kind === "header") {
+        section.appendChild(renderTraceBoundary(line, "header"));
+        visible += 1;
+      } else if (line.kind === "footer") {
+        section.appendChild(renderTraceBoundary(line, "footer"));
+        visible += 1;
+      } else if (line.kind === "event" && matchedSet.has(line)) {
         section.appendChild(renderTraceEvent(byLine.get(line)));
         visible += 1;
       } else if (line.kind !== "event" && unknownSet.has(line)) {
-        section.appendChild(
-          el("article", { class: "trace-event trace-tone-neutral" }, [
-            el("div", { class: "trace-event-head" }, [el("strong", { text: "未识别 Trace 行" })]),
-            renderTraceJsonDetails("原始行", line),
+        section.appendChild(el("article", { class: "trace-event trace-unknown-line" }, [
+          el("div", { class: "trace-event-head" }, [
+            el("strong", { text: "未识别 Trace 行" }),
+            line && line.kind !== undefined ? el("span", { class: "tag mono", text: String(line.kind) }) : null,
           ]),
-        );
+          renderTraceJsonDetails("原始行", line),
+        ]));
+        visible += 1;
       }
     }
     container.appendChild(section);
   }
-  if (!visible && presentation.stats.eventLines) {
+  if (!visible && presentation.stats.rawLines) {
     container.appendChild(el("div", { class: "trace-empty", text: "没有符合当前条件的原始事件。" }));
   }
 }
 
-async function renderTrace(view, d) {
-  if (S.traceUi.runId !== d.runId) {
-    S.traceUi = {
-      runId: d.runId,
-      mode: "turns",
-      filter: "all",
-      query: "",
-      showStream: false,
-      expanded: new Set(),
-      touched: new Set(),
-    };
+function traceInspectorRootConnected(ui) {
+  const root = ui && ui.dom && ui.dom.root;
+  const view = document.getElementById("view");
+  return Boolean(root && root.isConnected && view && view.contains(root));
+}
+
+function canRefreshTraceInspectorInPlace() {
+  return traceRefreshInPlaceAllowed(
+    S.tab,
+    S.runId,
+    S.traceUi.runId,
+    traceInspectorRootConnected(S.traceUi),
+  );
+}
+
+function traceOptions(ui) {
+  return { filter: ui.filter, query: ui.query, showStream: ui.showStream };
+}
+
+function updateTraceControls(ui) {
+  const dom = ui.dom;
+  if (!dom) return;
+  dom.modeTurns.className = ui.mode === "turns" ? "active" : "";
+  dom.modeRaw.className = ui.mode === "raw" ? "active" : "";
+  for (const [key, button] of dom.filterButtons) button.className = ui.filter === key ? "active" : "";
+  dom.showStream.checked = ui.showStream;
+  dom.jump.hidden = ui.mode !== "turns";
+  dom.expandAll.hidden = ui.mode !== "turns";
+  dom.collapseAll.hidden = ui.mode !== "turns";
+}
+
+function updateTraceFacts(ui, d, presentation) {
+  const dom = ui.dom;
+  if (!dom) return;
+  dom.sourceSummary.textContent = d.tracks.traceFile ? "Trace 来源与统计口径" : "没有 trace 文件";
+  dom.sourcePath.textContent = d.tracks.traceFile || "（该 Run 没有可读取的 Trace 文件）";
+  dom.sourceFormula.textContent = traceStatsEquation(presentation.stats);
+  dom.businessStat.textContent = "业务事件 " + presentation.stats.businessEvents;
+  dom.streamStat.textContent = "流式增量 " + presentation.stats.streamEvents;
+  dom.turnStat.textContent = "轮次 " + presentation.stats.turns;
+  dom.segmentStat.textContent = "执行段 " + presentation.stats.segments;
+  dom.rawStat.textContent = "原始行 " + presentation.stats.rawLines;
+  dom.unknownStat.textContent = "未知行 " + presentation.stats.unknownLines;
+  dom.unknownStat.hidden = presentation.stats.unknownLines === 0;
+
+  const jumpOptions = document.createDocumentFragment();
+  jumpOptions.appendChild(el("option", { value: "", text: "跳到轮次…" }));
+  for (const turn of presentation.turns) {
+    jumpOptions.appendChild(el("option", {
+      value: turn.id,
+      text: (turn.number === undefined ? "未知轮次" : "T" + turn.number) +
+        (turn.abnormal ? " · 需关注" : turn.isLongest ? " · 最长" : ""),
+    }));
   }
-  const body = el("section", { class: "trace-inspector" }, [el("p", { class: "muted", text: "正在读取 Trace……" })]);
-  view.appendChild(body);
-  let lines = [];
+  dom.jump.replaceChildren(jumpOptions);
+}
+
+function setTraceRefreshStatus(ui, text, bad) {
+  if (!ui.dom) return;
+  ui.dom.status.textContent = text || "";
+  ui.dom.status.className = "trace-refresh-status" + (bad ? " bad" : "");
+  ui.dom.status.hidden = !text;
+}
+
+function paintTraceInspector(ui, previousScroll) {
+  const dom = ui.dom;
+  const presentation = ui.presentation;
+  if (!dom || !presentation) return;
+  updateTraceControls(ui);
+
+  const view = document.getElementById("view");
+  const fragment = document.createDocumentFragment();
+  if (!presentation.stats.rawLines) {
+    fragment.appendChild(el("div", { class: "trace-empty", text: "（没有可展示的 Trace 行）" }));
+  } else if (ui.mode === "raw") {
+    renderTraceRaw(fragment, presentation, traceOptions(ui));
+  } else {
+    renderTraceTurns(fragment, presentation, traceOptions(ui), ui);
+  }
+  dom.content.replaceChildren(fragment);
+
+  const paintRevision = ++ui.paintRevision;
+  if (previousScroll && view) {
+    requestAnimationFrame(() => {
+      if (S.traceUi !== ui || paintRevision !== ui.paintRevision || !traceInspectorRootConnected(ui)) return;
+      view.scrollTop = traceScrollAfterRefresh(
+        previousScroll.top,
+        previousScroll.height,
+        previousScroll.scrollHeight,
+        view.scrollHeight,
+      );
+    });
+  }
+}
+
+async function refreshTraceInspector(d, options) {
+  const ui = S.traceUi;
+  if (!canRefreshTraceInspectorInPlace() || ui.runId !== d.runId) return false;
+  const revision = ++ui.loadRevision;
+  const hadPresentation = Boolean(ui.presentation);
+  ui.dom.root.setAttribute("aria-busy", "true");
+  if (!hadPresentation) setTraceRefreshStatus(ui, "正在读取 Trace……", false);
+
+  let lines;
   try {
     lines = (await api("/api/runs/" + encodeURIComponent(d.runId) + "/trace")).lines || [];
   } catch (err) {
-    clear(body);
-    body.appendChild(el("p", { class: "muted", text: "读不到：" + err.message }));
-    return;
+    const canCommit = S.traceUi === ui && ui.runId === d.runId && traceResponseCanCommit(
+      revision,
+      ui.loadRevision,
+      d.runId,
+      S.runId,
+      S.tab,
+      traceInspectorRootConnected(ui),
+    );
+    if (!canCommit) return false;
+    ui.dom.root.setAttribute("aria-busy", "false");
+    const message = err && err.message ? err.message : String(err);
+    if (hadPresentation) {
+      setTraceRefreshStatus(ui, "刷新失败，保留上次结果：" + message, true);
+    } else {
+      const fragment = document.createDocumentFragment();
+      fragment.appendChild(el("div", { class: "trace-empty bad", text: "Trace 初次读取失败：" + message }));
+      ui.dom.content.replaceChildren(fragment);
+      setTraceRefreshStatus(ui, "Trace 初次读取失败", true);
+    }
+    return false;
   }
-  // 切 Run / 切 Tab 后旧请求可能晚回来。它可以完成，但不能把旧内容画进新页面。
-  if (S.runId !== d.runId || S.tab !== "trace" || !body.isConnected) return;
-  clear(body);
+
+  const canCommit = S.traceUi === ui && ui.runId === d.runId && traceResponseCanCommit(
+    revision,
+    ui.loadRevision,
+    d.runId,
+    S.runId,
+    S.tab,
+    traceInspectorRootConnected(ui),
+  );
+  if (!canCommit) return false;
+
+  // 统计 chip 也可能在窄屏换行，因此必须在更新任何 Trace DOM 前记录位置。
+  const view = document.getElementById("view");
+  const previousScroll = options && options.preserveScroll && view
+    ? { top: view.scrollTop, height: view.clientHeight, scrollHeight: view.scrollHeight }
+    : null;
   const presentation = buildTracePresentation(lines);
-  const ui = S.traceUi;
+  ui.presentation = presentation;
   for (const turn of presentation.turns) {
     if (turn.important && !ui.touched.has(turn.id)) ui.expanded.add(turn.id);
   }
+  updateTraceFacts(ui, d, presentation);
+  setTraceRefreshStatus(ui, "", false);
+  ui.dom.root.setAttribute("aria-busy", "false");
+  paintTraceInspector(ui, previousScroll);
+  return true;
+}
 
-  const source = el("details", { class: "trace-source" }, [
-    el("summary", { text: d.tracks.traceFile ? "Trace 来源与统计口径" : "没有 trace 文件" }),
-    el("div", { class: "mono", text: d.tracks.traceFile || "（该 Run 没有可读取的 Trace 文件）" }),
-    el("p", {
-      class: "hint",
-      text: "业务事件不含 ModelStreamDelta；原始行还包含每个执行段的 header / footer。",
-    }),
-  ]);
-  body.appendChild(source);
+function renderTrace(view, d) {
+  if (S.traceUi.runId !== d.runId) {
+    disposeTraceInspector();
+    S.traceUi = createTraceUi(d.runId);
+  }
+  const ui = S.traceUi;
+  const sourceSummary = el("summary", { text: d.tracks.traceFile ? "Trace 来源与统计口径" : "没有 trace 文件" });
+  const sourcePath = el("div", { class: "mono", text: d.tracks.traceFile || "（该 Run 没有可读取的 Trace 文件）" });
+  const sourceFormula = el("p", { class: "hint", text: "等待 Trace 统计……" });
+  const source = el("details", { class: "trace-source" }, [sourceSummary, sourcePath, sourceFormula]);
 
-  const toolbar = el("div", { class: "trace-toolbar" }, []);
   const modeTurns = el("button", { type: "button", text: "逐轮检查器" });
   const modeRaw = el("button", { type: "button", text: "原始事件" });
-  const modeGroup = el("div", { class: "trace-mode-group" }, [modeTurns, modeRaw]);
+  const businessStat = el("span", { class: "chip", text: "业务事件 —" });
+  const streamStat = el("span", { class: "chip", text: "流式增量 —" });
+  const turnStat = el("span", { class: "chip", text: "轮次 —" });
+  const segmentStat = el("span", { class: "chip", text: "执行段 —" });
+  const rawStat = el("span", { class: "chip", text: "原始行 —" });
+  const unknownStat = el("span", { class: "chip warn", text: "未知行 —", hidden: true });
   const stats = el("div", { class: "trace-stats" }, [
-    el("span", { class: "chip", text: "业务事件 " + presentation.stats.businessEvents }),
-    el("span", { class: "chip", text: "流式增量 " + presentation.stats.streamEvents }),
-    el("span", { class: "chip", text: "轮次 " + presentation.stats.turns }),
-    el("span", { class: "chip", text: "执行段 " + presentation.stats.segments }),
-    el("span", { class: "chip", text: "原始行 " + presentation.stats.rawLines }),
+    businessStat, streamStat, turnStat, segmentStat, rawStat, unknownStat,
   ]);
   const search = el("input", {
     class: "trace-search",
@@ -1965,14 +2183,8 @@ async function renderTrace(view, d) {
   });
   const showStream = el("input", { type: "checkbox" });
   showStream.checked = ui.showStream;
-  const showStreamLabel = el("label", { class: "trace-check" }, [showStream, "显示流式增量"]);
   const jump = el("select", { class: "trace-jump", "aria-label": "跳到轮次" }, [
     el("option", { value: "", text: "跳到轮次…" }),
-    ...presentation.turns.map((turn) => el("option", {
-      value: turn.id,
-      text: (turn.number === undefined ? "未知轮次" : "T" + turn.number) +
-        (turn.abnormal ? " · 需关注" : turn.isLongest ? " · 最长" : ""),
-    })),
   ]);
   const expandAll = el("button", { type: "button", text: "全部展开" });
   const collapseAll = el("button", { type: "button", text: "全部折叠" });
@@ -1983,50 +2195,79 @@ async function renderTrace(view, d) {
       filterButtons.set(key, button);
       return button;
     }));
+  const toolbar = el("div", { class: "trace-toolbar" }, [
+    el("div", { class: "trace-toolbar-main" }, [
+      el("div", { class: "trace-mode-group" }, [modeTurns, modeRaw]),
+      stats,
+      search,
+    ]),
+    el("div", { class: "trace-toolbar-actions" }, [
+      filters,
+      el("label", { class: "trace-check" }, [showStream, "显示流式增量"]),
+      jump,
+      expandAll,
+      collapseAll,
+    ]),
+  ]);
+  const status = el("p", { class: "trace-refresh-status", text: "正在读取 Trace……" });
   const content = el("div", { class: "trace-content" }, []);
-
-  toolbar.appendChild(el("div", { class: "trace-toolbar-main" }, [modeGroup, stats, search]));
-  toolbar.appendChild(el("div", { class: "trace-toolbar-actions" }, [
-    filters,
-    showStreamLabel,
+  const root = el("section", { class: "trace-inspector", "aria-busy": "true" }, [
+    source, toolbar, status, content,
+  ]);
+  ui.dom = {
+    root,
+    sourceSummary,
+    sourcePath,
+    sourceFormula,
+    modeTurns,
+    modeRaw,
+    businessStat,
+    streamStat,
+    turnStat,
+    segmentStat,
+    rawStat,
+    unknownStat,
+    search,
+    showStream,
     jump,
     expandAll,
     collapseAll,
-  ]));
-  body.appendChild(toolbar);
-  body.appendChild(content);
-
-  const options = () => ({
-    filter: ui.filter,
-    query: ui.query,
-    showStream: ui.showStream,
-  });
-  const updateControls = () => {
-    modeTurns.className = ui.mode === "turns" ? "active" : "";
-    modeRaw.className = ui.mode === "raw" ? "active" : "";
-    for (const [key, button] of filterButtons) button.className = ui.filter === key ? "active" : "";
-    jump.hidden = ui.mode !== "turns";
-    expandAll.hidden = ui.mode !== "turns";
-    collapseAll.hidden = ui.mode !== "turns";
+    filterButtons,
+    status,
+    content,
   };
-  const paint = () => {
-    clear(content);
-    updateControls();
-    if (!presentation.stats.rawLines) {
-      content.appendChild(el("div", { class: "trace-empty", text: "（没有可展示的 Trace 行）" }));
-      return;
-    }
-    if (ui.mode === "raw") renderTraceRaw(content, presentation, options());
-    else renderTraceTurns(content, presentation, options(), ui);
-  };
+  view.appendChild(root);
 
-  modeTurns.addEventListener("click", () => { ui.mode = "turns"; paint(); });
-  modeRaw.addEventListener("click", () => { ui.mode = "raw"; paint(); });
+  const paintNow = () => {
+    clearTimeout(ui.searchTimer);
+    ui.searchTimer = 0;
+    paintTraceInspector(ui, false);
+  };
+  modeTurns.addEventListener("click", () => { ui.mode = "turns"; paintNow(); });
+  modeRaw.addEventListener("click", () => { ui.mode = "raw"; paintNow(); });
   for (const [key, button] of filterButtons) {
-    button.addEventListener("click", () => { ui.filter = key; paint(); });
+    button.addEventListener("click", () => { ui.filter = key; paintNow(); });
   }
-  search.addEventListener("input", () => { ui.query = search.value; paint(); });
-  showStream.addEventListener("change", () => { ui.showStream = showStream.checked; paint(); });
+  search.addEventListener("compositionstart", () => {
+    ui.composing = true;
+    clearTimeout(ui.searchTimer);
+    ui.searchTimer = 0;
+  });
+  search.addEventListener("input", () => {
+    ui.query = search.value;
+    if (ui.composing) return;
+    clearTimeout(ui.searchTimer);
+    ui.searchTimer = setTimeout(() => {
+      ui.searchTimer = 0;
+      if (S.traceUi === ui && traceInspectorRootConnected(ui)) paintTraceInspector(ui, false);
+    }, 150);
+  });
+  search.addEventListener("compositionend", () => {
+    ui.composing = false;
+    ui.query = search.value;
+    paintNow();
+  });
+  showStream.addEventListener("change", () => { ui.showStream = showStream.checked; paintNow(); });
   jump.addEventListener("change", () => {
     if (!jump.value) return;
     const target = document.getElementById(jump.value);
@@ -2034,18 +2275,27 @@ async function renderTrace(view, d) {
     jump.value = "";
   });
   expandAll.addEventListener("click", () => {
-    for (const turn of presentation.turns) {
+    if (!ui.presentation) return;
+    for (const turn of ui.presentation.turns) {
       ui.touched.add(turn.id);
       ui.expanded.add(turn.id);
     }
-    paint();
+    paintNow();
   });
   collapseAll.addEventListener("click", () => {
-    for (const turn of presentation.turns) ui.touched.add(turn.id);
+    if (!ui.presentation) return;
+    for (const turn of ui.presentation.turns) ui.touched.add(turn.id);
     ui.expanded.clear();
-    paint();
+    paintNow();
   });
-  paint();
+
+  updateTraceControls(ui);
+  if (ui.presentation) {
+    updateTraceFacts(ui, d, ui.presentation);
+    setTraceRefreshStatus(ui, "正在刷新 Trace……", false);
+    paintTraceInspector(ui, false);
+  }
+  void refreshTraceInspector(d, { preserveScroll: false });
 }
 
 // ── 恢复
@@ -2361,7 +2611,11 @@ async function refresh() {
     document.getElementById("runview").hidden = false;
     renderRunbar();
     renderTabs();
-    renderView();
+    if (canRefreshTraceInspectorInPlace()) {
+      await refreshTraceInspector(d, { preserveScroll: true });
+    } else {
+      renderView();
+    }
     renderPending();
   }
 }
@@ -2380,19 +2634,12 @@ function scheduleRefresh() {
 }
 
 function selectRun(runId) {
+  disposeTraceInspector();
   S.runId = runId;
   S.detail = null;
   S.stream = "";
   S.expanded.clear();
-  S.traceUi = {
-    runId,
-    mode: "turns",
-    filter: "all",
-    query: "",
-    showStream: false,
-    expanded: new Set(),
-    touched: new Set(),
-  };
+  S.traceUi = createTraceUi(runId);
   renderRuns();
   void refresh();
   connectSSE(runId);

@@ -1848,7 +1848,9 @@ async function main(): Promise<void> {
       }
       const helperSrc = uiSrc.slice(helperStart, helperEnd);
       const traceHelpers = new Function(
-        `${helperSrc}\nreturn { buildTracePresentation, traceEventPresentation, traceEventMatches, traceTurnMatches };`,
+        `${helperSrc}\nreturn { buildTracePresentation, traceEventPresentation, traceEventMatches, ` +
+          `traceTurnMatches, traceUnknownLineMatches, traceStatsEquation, traceRefreshInPlaceAllowed, ` +
+          `traceResponseCanCommit, traceScrollAfterRefresh };`,
       )() as {
         buildTracePresentation(lines: Array<Record<string, unknown>>): {
           stats: Record<string, number>;
@@ -1856,6 +1858,7 @@ async function main(): Promise<void> {
             prelude: Array<Record<string, unknown>>;
             turns: Array<Record<string, unknown>>;
             footer?: Record<string, unknown>;
+            unknownLines: Array<Record<string, unknown>>;
           }>;
           turns: Array<{
             id: string;
@@ -1873,6 +1876,28 @@ async function main(): Promise<void> {
         traceEventPresentation(line: Record<string, unknown>): Record<string, unknown>;
         traceEventMatches(event: Record<string, unknown>, options: Record<string, unknown>): boolean;
         traceTurnMatches(turn: Record<string, unknown>, options: Record<string, unknown>): boolean;
+        traceUnknownLineMatches(line: Record<string, unknown>, options: Record<string, unknown>): boolean;
+        traceStatsEquation(stats: Record<string, number>): string;
+        traceRefreshInPlaceAllowed(
+          tab: string,
+          selectedRunId: string,
+          traceRunId: string,
+          rootConnected: boolean,
+        ): boolean;
+        traceResponseCanCommit(
+          requestRevision: number,
+          currentRevision: number,
+          requestedRunId: string,
+          selectedRunId: string,
+          tab: string,
+          rootConnected: boolean,
+        ): boolean;
+        traceScrollAfterRefresh(
+          scrollTop: number,
+          clientHeight: number,
+          previousScrollHeight: number,
+          nextScrollHeight: number,
+        ): number;
       };
 
       let sequence = 1;
@@ -1990,13 +2015,17 @@ async function main(): Promise<void> {
       fact(
         "209 行口径",
         `${projected.stats.businessEvents} 业务事件 + ${projected.stats.streamEvents} 流式增量 + ` +
-          `${projected.stats.boundaryLines} 段边界 = ${projected.stats.rawLines} 行`,
+          `${projected.stats.boundaryLines} 段边界 + ${projected.stats.unknownLines} 未知行 = ` +
+          `${projected.stats.rawLines} 行`,
       );
       const n1 =
         projected.stats.rawLines === 209 &&
         projected.stats.businessEvents === 116 &&
         projected.stats.streamEvents === 91 &&
         projected.stats.boundaryLines === 2 &&
+        projected.stats.unknownLines === 0 &&
+        traceHelpers.traceStatsEquation(projected.stats) ===
+          "原始行 209 = 业务事件 116 + 流式增量 91 + 段边界 2 + 未知行 0" &&
         projected.stats.turns === 10;
       verdict(
         n1,
@@ -2104,23 +2133,106 @@ async function main(): Promise<void> {
           : "执行段边界或不完整 Trace 被误删",
       );
 
+      const unknownLine = {
+        kind: "future-trace-row",
+        payload: { marker: "unknown-payload-canary", html: "<svg onload=alert(1)>" },
+      };
+      const withUnknown = traceHelpers.buildTracePresentation([
+        ...lines.slice(0, -1),
+        unknownLine,
+        lines[lines.length - 1]!,
+      ]);
+      const unknownOnly = traceHelpers.buildTracePresentation([unknownLine]);
+      const mixedWithoutFooter = traceHelpers.buildTracePresentation([
+        { kind: "header", segmentIndex: 0 },
+        event("TurnStarted", { turn: 99 }),
+        unknownLine,
+      ]);
+      const unknownAll = traceHelpers.traceUnknownLineMatches(unknownLine, {
+        filter: "all",
+        query: "unknown-payload-canary",
+      });
+      const unknownOtherFilter = traceHelpers.traceUnknownLineMatches(unknownLine, {
+        filter: "diagnostic",
+        query: "unknown-payload-canary",
+      });
+      const unknownMiss = traceHelpers.traceUnknownLineMatches(unknownLine, {
+        filter: "all",
+        query: "does-not-exist",
+      });
+      const n6 =
+        withUnknown.stats.rawLines === 210 &&
+        withUnknown.stats.businessEvents === 116 &&
+        withUnknown.stats.streamEvents === 91 &&
+        withUnknown.stats.boundaryLines === 2 &&
+        withUnknown.stats.unknownLines === 1 &&
+        traceHelpers.traceStatsEquation(withUnknown.stats) ===
+          "原始行 210 = 业务事件 116 + 流式增量 91 + 段边界 2 + 未知行 1" &&
+        unknownAll && !unknownOtherFilter && !unknownMiss &&
+        unknownOnly.stats.rawLines === 1 && unknownOnly.stats.unknownLines === 1 &&
+        unknownOnly.segments[0]?.unknownLines.length === 1 &&
+        mixedWithoutFooter.segments[0]?.unknownLines.length === 1 &&
+        mixedWithoutFooter.segments[0]?.footer === undefined;
+      fact("未知行口径", traceHelpers.traceStatsEquation(withUnknown.stats));
+      verdict(
+        n6,
+        n6
+          ? "未知 kind 行计入等式，只在“全部”分类按完整原始 JSON 搜索；独立、混合和缺 footer 形态都不丢失"
+          : "未知 kind 行的统计、搜索或不完整 Trace 投影不自洽",
+      );
+
+      const localRefresh = traceHelpers.traceRefreshInPlaceAllowed("trace", "run_a", "run_a", true);
+      const switchedRun = traceHelpers.traceRefreshInPlaceAllowed("trace", "run_b", "run_a", true);
+      const switchedTab = traceHelpers.traceRefreshInPlaceAllowed("budget", "run_a", "run_a", true);
+      const detachedRoot = traceHelpers.traceRefreshInPlaceAllowed("trace", "run_a", "run_a", false);
+      const newestCanCommit = traceHelpers.traceResponseCanCommit(4, 4, "run_a", "run_a", "trace", true);
+      const staleCannotCommit = traceHelpers.traceResponseCanCommit(3, 4, "run_a", "run_a", "trace", true);
+      const n7 = localRefresh && !switchedRun && !switchedTab && !detachedRoot &&
+        newestCanCommit && !staleCannotCommit;
+      verdict(
+        n7,
+        n7
+          ? "仅同 Run、Trace Tab、已连接外壳走局部刷新，且只有最新 revision 可以落页面"
+          : "局部刷新资格或并发响应 revision guard 失效",
+      );
+
+      const followsBottom = traceHelpers.traceScrollAfterRefresh(452, 500, 1_000, 2_000);
+      const keepsHistory = traceHelpers.traceScrollAfterRefresh(451, 500, 1_000, 2_000);
+      const clampsHistory = traceHelpers.traceScrollAfterRefresh(1_000, 500, 2_000, 800);
+      const n8 = followsBottom === 1_500 && keepsHistory === 451 && clampsHistory === 300;
+      fact("实时刷新滚动", `底部附近 → ${followsBottom}；历史位置 → ${keepsHistory}；缩短后 → ${clampsHistory}`);
+      verdict(
+        n8,
+        n8
+          ? "距底部 48px 内跟随新内容，历史位置保持并在内容缩短时裁到合法范围"
+          : "Trace 实时刷新滚动策略的阈值或裁剪行为错误",
+      );
+
       const uiCss = readFileSync(resolve(REPO_ROOT, "apps/workagent-ui/public/app.css"), "utf8");
       const traceCss = uiCss
         .slice(uiCss.indexOf("/* ── Trace Inspector */"), uiCss.indexOf("/* ── 时间线 */"))
         .replace(/\/\*[\s\S]*?\*\//g, "");
-      const n6 =
+      const n9 =
         uiSrc.includes("逐轮检查器") &&
         uiSrc.includes("原始事件") &&
         uiSrc.includes("显示流式增量") &&
-        uiSrc.includes("S.runId !== d.runId || S.tab !== \"trace\"") &&
+        uiSrc.includes("refreshTraceInspector(d, { preserveScroll: true })") &&
+        uiSrc.includes("compositionstart") &&
+        uiSrc.includes("compositionend") &&
+        uiSrc.includes("}, 150)") &&
+        uiSrc.includes("document.createDocumentFragment()") &&
+        uiSrc.includes("刷新失败，保留上次结果") &&
+        uiSrc.includes("未识别 Trace 行 × ") &&
+        uiSrc.includes("ui.dom.content.replaceChildren(fragment)") &&
         uiCss.includes(".trace-toolbar") &&
         uiCss.includes("position: sticky") &&
+        uiCss.includes(".trace-unknown-lines") &&
         !traceCss.includes("overflow-y");
       verdict(
-        n6,
-        n6
-          ? "双模式、筛选工具栏、旧请求防串页与唯一纵向滚动容器均有机械锚点"
-          : "Trace 交互控件、异步防串页或滚动边界缺失",
+        n9,
+        n9
+          ? "稳定外壳、IME 防抖、DocumentFragment、失败保留与唯一纵向滚动容器均有机械锚点"
+          : "Trace 实时交互连续性、未知行入口或滚动边界缺失",
       );
     }
 

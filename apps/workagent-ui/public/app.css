@@ -356,6 +356,12 @@ button.link { background: none; border: none; color: var(--accent); padding: 0; 
 }
 .trace-source > summary { font-size: 11px; }
 .trace-source > div { margin-top: 5px; font-size: 11px; }
+.trace-refresh-status {
+  margin: -3px 0 8px;
+  color: var(--fg-faint);
+  font-size: 11px;
+}
+.trace-refresh-status.bad { color: var(--err); }
 
 /*
  * 工具栏粘在 #view 顶部；#view 仍是唯一纵向滚动容器。
@@ -544,6 +550,23 @@ button.link { background: none; border: none; color: var(--accent); padding: 0; 
   border-radius: 4px;
   color: var(--fg-faint);
   font-size: 11px;
+}
+.trace-empty.bad { color: var(--err); border-color: color-mix(in srgb, var(--err) 58%, var(--line)); }
+
+.trace-unknown-lines {
+  margin: 8px 0;
+  padding: 6px 8px;
+  border: 1px solid color-mix(in srgb, var(--warn) 58%, var(--line));
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--warn) 5%, var(--bg-2));
+}
+.trace-unknown-lines > summary { color: var(--warn); font-size: 11px; }
+.trace-unknown-line {
+  margin-top: 6px;
+  padding: 6px 8px;
+  border-left: 3px solid var(--warn);
+  background: var(--bg-2);
+  min-width: 0;
 }
 
 .trace-boundary {
