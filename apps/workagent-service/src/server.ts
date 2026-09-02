@@ -50,7 +50,7 @@ const UI_DIR = resolve(
   "../../workagent-ui/public",
 );
 
-export interface ServiceOptions extends Omit<RunHostOptions, "dbPath" | "traceDir"> {
+export interface ServiceOptions extends Omit<RunHostOptions, "dbPath" | "traceDir" | "modelAuditDir"> {
   /**
    * 覆盖 bootstrap workspace 的存储位置。**只给验收脚本用。**
    *
@@ -62,7 +62,7 @@ export interface ServiceOptions extends Omit<RunHostOptions, "dbPath" | "traceDi
    * 留给脚本是因为它们要 `:memory:` 与临时目录 —— 与 `ComposeOptions.dbPath`
    * 同一个性质：**旋钮长在测量装置这边**。
    */
-  storageOverride?: { dbPath: string; traceDir: string };
+  storageOverride?: { dbPath: string; traceDir: string; modelAuditDir?: string };
   /** 0 = 随机端口（§22.6 的「随机端口」）。 */
   port?: number;
   /** 固定 Token。**只给验收脚本用** —— 生产一律随机。 */
@@ -308,6 +308,24 @@ async function handle(
 
     if (req.method === "GET" && rest === "/trace") {
       sendJson(res, 200, { lines: host().traceLines(runId) });
+      return;
+    }
+
+    const modelInvocationMatch = /^\/model-invocations\/([^/]+)$/.exec(rest);
+    if (req.method === "GET" && modelInvocationMatch) {
+      const invocationId = decodeURIComponent(modelInvocationMatch[1]!);
+      // sidecar writer 的文件名白名单比通用资源 id 更窄；读取必须使用同一规则。
+      if (!isSafeModelAuditId(invocationId)) {
+        sendJson(res, 400, { error: `invocationId 形状不合法：${invocationId.slice(0, 40)}` });
+        return;
+      }
+      const audit = await host().modelInvocationAudit(runId, invocationId);
+      if (!audit) {
+        sendJson(res, 404, { error: `调用 ${invocationId} 不属于 Run ${runId}` });
+        return;
+      }
+      // 未脱敏的上下文与 Provider 事件不得进入浏览器缓存。
+      sendJson(res, 200, audit, { "Cache-Control": "no-store" });
       return;
     }
 
@@ -624,6 +642,10 @@ function isSafeId(raw: string): boolean {
   return raw.length > 0 && raw.length <= 128 && /^[A-Za-z0-9_.-]+$/.test(raw);
 }
 
+function isSafeModelAuditId(raw: string): boolean {
+  return raw.length > 0 && raw.length <= 128 && /^[A-Za-z0-9_-]+$/.test(raw);
+}
+
 /**
  * SSE 的重连游标。
  *
@@ -645,10 +667,16 @@ function readCursor(req: IncomingMessage, url: URL): number {
   return Number.isFinite(n) && n >= 0 ? n : 0;
 }
 
-function sendJson(res: ServerResponse, status: number, body: unknown): void {
+function sendJson(
+  res: ServerResponse,
+  status: number,
+  body: unknown,
+  headers: Record<string, string> = {},
+): void {
   const text = JSON.stringify(body);
   res.writeHead(status, {
     ...SECURITY_HEADERS,
+    ...headers,
     "Content-Type": "application/json; charset=utf-8",
     "Content-Length": Buffer.byteLength(text),
   });

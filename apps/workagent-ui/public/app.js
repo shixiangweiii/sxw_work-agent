@@ -56,7 +56,24 @@ const S = {
   refreshTimer: 0,
   /** Trace Inspector 的交互状态。换 Run 时重置，同一 Run 刷新时保留。 */
   traceUi: createTraceUi(""),
+  /** 模型审计正文只放内存；换 Run/workspace 时连同在途请求一起清掉。 */
+  modelAuditUi: createModelAuditUi(""),
 };
+
+function createModelAuditUi(runId) {
+  return { runId, revision: 0, expanded: new Set(), entries: new Map() };
+}
+
+function disposeModelAuditViewer() {
+  const ui = S.modelAuditUi;
+  ui.revision += 1;
+  for (const entry of ui.entries.values()) {
+    if (entry.controller) entry.controller.abort();
+    entry.view = null;
+  }
+  ui.entries.clear();
+  ui.expanded.clear();
+}
 
 function createTraceUi(runId) {
   return {
@@ -142,6 +159,8 @@ function toast(msg, bad) {
 async function api(path, opts) {
   const res = await fetch(path, {
     method: (opts && opts.method) || "GET",
+    cache: opts && opts.cache,
+    signal: opts && opts.signal,
     headers: Object.assign(
       { Authorization: "Bearer " + TOKEN },
       opts && opts.body ? { "Content-Type": "application/json" } : {},
@@ -336,6 +355,7 @@ async function switchWorkspace(id) {
     const r = await api("/api/workspaces/" + encodeURIComponent(id) + "/activate", { method: "POST" });
     // 【定】切换之后必须把当前选中的 Run 清掉 —— 另一个 workspace 有它自己的库，
     // 旧 runId 在那边根本不存在，留着会让详情区停在一个查不到的 Run 上。
+    disposeModelAuditViewer();
     S.runId = "";
     S.detail = null;
     if (S.sse) S.sse.close();
@@ -910,6 +930,8 @@ function renderTurns(view, d) {
     // 与「轮末累计」对不上，而那正是白盒要解释的东西。
     const m = calls.length > 0 ? calls[calls.length - 1] : null;
     const b = t.budgetAfter;
+    const hasUsage = m && m.inputTokens !== undefined && m.billedInputTokens !== undefined &&
+      m.outputTokens !== undefined;
     tb.appendChild(
       el("tr", {}, [
         el("td", { class: "num", text: t.turn }),
@@ -917,30 +939,15 @@ function renderTurns(view, d) {
         // 【定】不可信内容流入是审计事实（事件类型的注释原话）。
         // 它是 fetch_url 之后审计外泄链路的起点，必须在界面上有一列。
         el("td", { text: f ? (f.hasExternalUntrusted ? "是（" + f.untrustedItems + " 条）" : "否") : "—" }),
-        el("td", { class: "num", text: m ? m.inputTokens + " / " + m.billedInputTokens + " / " + m.outputTokens : "—" }),
-        el("td", { text: m ? m.stopReason : "—" }),
-        el("td", { class: "num", text: m ? m.durationMs + "ms" : "—" }),
+        el("td", { class: "num", text: hasUsage ? m.inputTokens + " / " + m.billedInputTokens + " / " + m.outputTokens : "—" }),
+        el("td", { text: m && m.stopReason !== undefined ? m.stopReason : "—" }),
+        el("td", { class: "num", text: m && m.durationMs !== undefined ? m.durationMs + "ms" : "—" }),
         el("td", { text: t.toolNames.join(", ") || "—" }),
         el("td", { text: t.transition || "—" }),
         el("td", { class: "num", text: b ? b.billedInputTokens + " / " + b.toolCalls + " / " + Math.round(b.activeWallClockMs / 1000) + "s" : "—" }),
       ]),
     );
-    if (calls.length > 1) {
-      tb.appendChild(
-        el("tr", {}, [
-          el("td", {}),
-          el("td", {
-            colspan: 8,
-            class: "muted",
-            text:
-              "本轮共 " + calls.length + " 次模型调用（输出预算恢复 / 重试）：" +
-              calls
-                .map((c, i) => "#" + (i + 1) + " " + c.billedInputTokens + "→" + c.outputTokens + " " + c.stopReason)
-                .join("；"),
-          }),
-        ]),
-      );
-    }
+    for (const call of calls) tb.appendChild(renderModelCallRow(t, call));
     for (const c of t.compaction) {
       tb.appendChild(
         el("tr", {}, [
@@ -959,6 +966,355 @@ function renderTurns(view, d) {
   }
   view.appendChild(el("h4", { text: "冻结的 system prompt" }));
   view.appendChild(el("pre", { text: d.spec.systemPrompt }));
+}
+
+function modelCallSummary(call) {
+  const parts = [
+    "模型调用 #" + call.ordinal,
+    call.invocationId ? traceClip(call.invocationId, 30) : "旧 Trace（无 invocationId）",
+    call.traceStatus || "STARTED",
+  ];
+  if (call.billedInputTokens !== undefined || call.outputTokens !== undefined) {
+    parts.push((call.billedInputTokens ?? "?") + "→" + (call.outputTokens ?? "?"));
+  }
+  if (call.stopReason) parts.push(call.stopReason);
+  if (call.durationMs !== undefined) parts.push(call.durationMs + "ms");
+  return parts.join(" · ");
+}
+
+function modelAuditTime(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return String(value ?? "—");
+  try {
+    return new Date(n).toLocaleString();
+  } catch {
+    return String(value);
+  }
+}
+
+function renderModelCallRow(turn, call) {
+  const cell = el("td", { colspan: 8, class: "model-call-cell" }, []);
+  if (!call.invocationId) {
+    cell.appendChild(el("div", { class: "model-call-legacy", text: modelCallSummary(call) }));
+    cell.appendChild(el("div", {
+      class: "muted",
+      text: "这条历史事件没有调用标识，保留统计但不能安全关联审计文件。",
+    }));
+    return el("tr", { class: "model-call-row" }, [el("td", {}), cell]);
+  }
+
+  const ui = S.modelAuditUi;
+  const key = S.runId + ":" + call.invocationId;
+  let entry = ui.entries.get(key);
+  if (!entry) {
+    entry = {
+      key,
+      runId: S.runId,
+      invocationId: call.invocationId,
+      status: "idle",
+      revision: 0,
+      controller: null,
+      data: null,
+      error: "",
+      view: null,
+    };
+    ui.entries.set(key, entry);
+  }
+
+  const panel = el("div", { class: "model-audit-panel" }, []);
+  const open = ui.expanded.has(key);
+  const details = el("details", { class: "model-call", open }, [
+    el("summary", {}, [
+      el("span", { class: "model-call-summary", text: modelCallSummary(call) }),
+      ...(call.auditFailure
+        ? [el("span", { class: "chip bad", text: "审计写入失败 " + call.auditFailure.stage })]
+        : []),
+    ]),
+    panel,
+  ]);
+  details.addEventListener("toggle", () => {
+    if (details.open) {
+      ui.expanded.add(key);
+      if (entry.status === "idle") void loadModelInvocationAudit(entry, false);
+    } else {
+      ui.expanded.delete(key);
+    }
+  });
+  bindModelAuditView(entry, call, panel);
+  if (open && entry.status === "idle") void loadModelInvocationAudit(entry, false);
+  cell.appendChild(details);
+  return el("tr", { class: "model-call-row", "data-turn": turn.turn }, [el("td", {}), cell]);
+}
+
+function bindModelAuditView(entry, call, panel) {
+  entry.view = { call, panel };
+  // 构造行时 panel 还没有接进 document，初次内容必须在这里直接画。
+  renderModelAuditPanel(panel, call, entry);
+}
+
+function renderCurrentModelAuditEntry(entry) {
+  const view = entry.view;
+  if (!view || !view.panel.isConnected) return false;
+  renderModelAuditPanel(view.panel, view.call, entry);
+  return true;
+}
+
+function modelAuditResponseCanCommit(owner, entry, requestRevision) {
+  return S.modelAuditUi === owner &&
+    S.runId === entry.runId &&
+    owner.entries.get(entry.key) === entry &&
+    entry.revision === requestRevision;
+}
+
+async function loadModelInvocationAudit(entry, force) {
+  if (!force && entry.status === "loaded") {
+    renderCurrentModelAuditEntry(entry);
+    return;
+  }
+  if (entry.controller) entry.controller.abort();
+  const controller = new AbortController();
+  const owner = S.modelAuditUi;
+  const requestRevision = entry.revision + 1;
+  entry.revision = requestRevision;
+  entry.controller = controller;
+  entry.status = "loading";
+  entry.error = "";
+  renderCurrentModelAuditEntry(entry);
+  let committed = false;
+  try {
+    const data = await api(
+      "/api/runs/" + encodeURIComponent(entry.runId) +
+        "/model-invocations/" + encodeURIComponent(entry.invocationId),
+      { cache: "no-store", signal: controller.signal },
+    );
+    if (!modelAuditResponseCanCommit(owner, entry, requestRevision)) return;
+    entry.status = "loaded";
+    entry.data = data;
+    committed = true;
+  } catch (error) {
+    if (controller.signal.aborted) return;
+    if (!modelAuditResponseCanCommit(owner, entry, requestRevision)) return;
+    entry.status = "error";
+    entry.error = error instanceof Error ? error.message : String(error);
+    committed = true;
+  } finally {
+    if (entry.revision === requestRevision && entry.controller === controller) {
+      entry.controller = null;
+    }
+  }
+  // Run 刷新可能已经替换 DOM；只画 entry 当前登记的挂载点，不碰请求开始时的旧节点。
+  if (committed) renderCurrentModelAuditEntry(entry);
+}
+
+function renderModelAuditPanel(panel, call, entry) {
+  clear(panel);
+  if (entry.status === "idle") {
+    panel.appendChild(el("p", { class: "muted", text: "展开后按 invocationId 懒加载审计文件。" }));
+    return;
+  }
+  if (entry.status === "loading") {
+    panel.appendChild(el("p", { class: "muted", text: "正在读取这次模型调用的审计事实……" }));
+    return;
+  }
+  if (entry.status === "error") {
+    panel.appendChild(el("p", { class: "bad", text: "读取失败：" + entry.error }));
+    panel.appendChild(el("button", {
+      type: "button",
+      text: "重新读取",
+      onclick: () => void loadModelInvocationAudit(entry, true),
+    }));
+    return;
+  }
+
+  const data = entry.data || { state: "NOT_CAPTURED", errors: [], providerEvents: [] };
+  const stateTone = data.state === "COMPLETE" ? "ok" : data.state === "CORRUPT" ? "bad" : "warn";
+  const request = data.request;
+  const metadata = data.responseMetadata;
+  const end = data.invocationEnd;
+  panel.appendChild(el("div", { class: "model-audit-facts" }, [
+    el("span", { class: "chip " + stateTone, text: data.state }),
+    el("span", { class: "mono", text: call.invocationId }),
+    ...(request ? [
+      el("span", { text: request.modelId }),
+      el("span", { text: request.endpointProfileVersion }),
+      el("span", { text: "开始 " + modelAuditTime(request.startedAt) }),
+    ] : []),
+    ...(call.frame ? [
+      el("span", {
+        text: "帧 " + call.frame.items + " 条 / " + call.frame.totalTokens + " token / 固定 " +
+          call.frame.fixedOverheadTokens,
+      }),
+    ] : []),
+    ...(metadata ? [
+      el("span", { text: "HTTP " + metadata.status }),
+      ...(metadata.requestId ? [el("span", { class: "mono", text: metadata.requestId })] : []),
+    ] : []),
+    ...(end ? [
+      el("span", { class: "chip " + (end.outcome === "COMPLETED" ? "ok" : end.outcome === "FAILED" ? "bad" : "warn"), text: end.outcome }),
+      el("span", { text: end.durationMs + "ms" }),
+      el("span", { text: "结束 " + modelAuditTime(end.finishedAt) }),
+    ] : []),
+  ]));
+
+  if (call.auditFailure) {
+    panel.appendChild(el("p", {
+      class: "model-audit-warning",
+      text: "审计写入失败（" + call.auditFailure.stage + "）：" + call.auditFailure.message,
+    }));
+  }
+  for (const error of data.errors || []) {
+    panel.appendChild(el("p", {
+      class: "model-audit-warning",
+      text: "第 " + error.line + " 行：" + error.message,
+    }));
+  }
+  for (const error of call.runtimeErrors || []) {
+    panel.appendChild(el("p", {
+      class: "model-audit-warning",
+      text: "Runtime：" + error.code + " / " + error.category + " / " +
+        error.retryability + "\n" + error.safeMessage,
+    }));
+  }
+  if (data.contentWithheld) {
+    panel.appendChild(el("p", { class: "bad", text: "调用身份冲突，敏感正文未返回。" }));
+    return;
+  }
+  if (data.state === "NOT_CAPTURED") {
+    panel.appendChild(el("p", {
+      class: "muted",
+      text: "没有审计文件：可能是旧 Run、未采集，或本次调用在打开审计文件时失败。",
+    }));
+    return;
+  }
+  if (data.state === "INCOMPLETE") {
+    panel.appendChild(el("button", {
+      type: "button",
+      text: "重新读取",
+      onclick: () => void loadModelInvocationAudit(entry, true),
+    }));
+  }
+  if (request) {
+    panel.appendChild(renderLazyJsonDetails("实际请求体", request.body));
+    panel.appendChild(renderReadableModelContext(request.body));
+  }
+  panel.appendChild(renderProviderAudit(data));
+  if (end) panel.appendChild(renderLazyJsonDetails("Runtime 结果", end));
+}
+
+function renderLazyJsonDetails(label, value, className) {
+  const details = el("details", { class: className || "model-audit-json" }, [
+    el("summary", { text: label }),
+  ]);
+  let rendered = false;
+  details.addEventListener("toggle", () => {
+    if (!details.open || rendered) return;
+    rendered = true;
+    details.appendChild(el("div", { class: "model-audit-json-actions" }, [
+      el("button", {
+        class: "link",
+        type: "button",
+        text: "复制 JSON",
+        onclick: () => void copyTraceJson(value),
+      }),
+    ]));
+    details.appendChild(el("pre", { text: traceJson(value, true) }));
+  });
+  return details;
+}
+
+function renderReadableModelContext(body) {
+  const details = el("details", { class: "model-context" }, [
+    el("summary", { text: "拼接后的上下文（便于阅读）" }),
+  ]);
+  let rendered = false;
+  details.addEventListener("toggle", () => {
+    if (!details.open || rendered) return;
+    rendered = true;
+    details.appendChild(el("p", {
+      class: "muted",
+      text: "这是从实际 request.body 派生的阅读视图；字段原值以上方“实际请求体”为准。",
+    }));
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      details.appendChild(el("p", { class: "muted", text: "无法识别对象形状，使用原始 JSON。" }));
+      details.appendChild(renderLazyJsonDetails("原始上下文", body));
+      return;
+    }
+    if (Object.prototype.hasOwnProperty.call(body, "system")) {
+      details.appendChild(renderLazyJsonDetails("System", body.system));
+    }
+    if (Array.isArray(body.messages)) {
+      const messages = el("section", { class: "model-context-group" }, [
+        el("strong", { text: "Messages × " + body.messages.length }),
+      ]);
+      body.messages.forEach((message, index) => {
+        const role = message && typeof message === "object" && !Array.isArray(message)
+          ? message.role
+          : undefined;
+        messages.appendChild(renderLazyJsonDetails(
+          "#" + (index + 1) + " · " + (role || "unknown"),
+          message,
+          "model-context-item",
+        ));
+      });
+      details.appendChild(messages);
+    } else {
+      details.appendChild(el("p", { class: "muted", text: "请求体没有可识别的 messages 数组。" }));
+    }
+    if (Array.isArray(body.tools)) {
+      const tools = el("section", { class: "model-context-group" }, [
+        el("strong", { text: "Tools × " + body.tools.length }),
+      ]);
+      body.tools.forEach((tool, index) => {
+        const name = tool && typeof tool === "object" && !Array.isArray(tool) ? tool.name : undefined;
+        tools.appendChild(renderLazyJsonDetails(
+          "#" + (index + 1) + " · " + (name || "unknown"),
+          tool,
+          "model-context-item",
+        ));
+      });
+      details.appendChild(tools);
+    }
+    const parameters = {};
+    for (const key of Object.keys(body)) {
+      if (key !== "system" && key !== "messages" && key !== "tools") parameters[key] = body[key];
+    }
+    if (Object.keys(parameters).length > 0) {
+      details.appendChild(renderLazyJsonDetails("其他生成参数", parameters));
+    }
+  });
+  return details;
+}
+
+function renderProviderAudit(data) {
+  const events = data.providerEvents || [];
+  const details = el("details", { class: "model-provider-events" }, [
+    el("summary", { text: "Provider 原始事件（SDK 解码）× " + events.length }),
+  ]);
+  let rendered = false;
+  details.addEventListener("toggle", () => {
+    if (!details.open || rendered) return;
+    rendered = true;
+    if (data.responseMetadata) {
+      details.appendChild(renderLazyJsonDetails("Response metadata", data.responseMetadata));
+    }
+    events.forEach((providerEvent) => {
+      const type = providerEvent.event && typeof providerEvent.event === "object" &&
+        !Array.isArray(providerEvent.event) ? providerEvent.event.type : undefined;
+      details.appendChild(renderLazyJsonDetails(
+        "#" + providerEvent.index + " · " + (type || "未知事件") + " · " +
+          modelAuditTime(providerEvent.observedAt),
+        providerEvent.event,
+        "model-provider-event",
+      ));
+    });
+    if (data.providerError) {
+      details.appendChild(renderLazyJsonDetails("Provider error", data.providerError));
+    }
+    if (!data.responseMetadata && events.length === 0 && !data.providerError) {
+      details.appendChild(el("p", { class: "muted", text: "没有已验证的 Provider 响应记录。" }));
+    }
+  });
+  return details;
 }
 
 // ── 预算
@@ -2644,11 +3000,13 @@ function scheduleRefresh() {
 
 function selectRun(runId) {
   disposeTraceInspector();
+  disposeModelAuditViewer();
   S.runId = runId;
   S.detail = null;
   S.stream = "";
   S.expanded.clear();
   S.traceUi = createTraceUi(runId);
+  S.modelAuditUi = createModelAuditUi(runId);
   renderRuns();
   void refresh();
   connectSSE(runId);

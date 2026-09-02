@@ -1392,7 +1392,7 @@ npm run verify:mcp                 # ★ADR-0011：通用 MCP 客户端。边界
                                    #   ＋ resume 说出「外部工具核对不了」＋ 示例配置必须真能解析
                                    #   用**手写的假 MCP 服务器**，不依赖 Playwright、不联网、不弹窗口
 npm run verify:model-audit         # 调用级实际请求、SDK 解码 Provider 事件/错误与 fail-open 独立审计
-npm run verify:all                 # 16 条脚本 / 253 条判据
+npm run verify:all                 # 16 条脚本 / 263 条判据
 ```
 
 > **【定】`verify:ui` 必须真的起 HTTP 服务**，不能直接调 `PendingHub` 的方法测。

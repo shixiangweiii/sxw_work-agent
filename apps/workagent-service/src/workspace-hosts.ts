@@ -59,7 +59,7 @@ export interface WorkspaceHostsOptions {
   bootstrap: {
     path: string;
     /** 【定】只给验收脚本。见 `ServiceOptions.storageOverride`。 */
-    storage?: { dbPath: string; traceDir: string };
+    storage?: { dbPath: string; traceDir: string; modelAuditDir?: string };
   };
 }
 
@@ -185,14 +185,19 @@ export class WorkspaceHosts {
    * `storageOverride` 只服务验收脚本，且只对 bootstrap 那一个 workspace 生效。
    */
   private spawn(entry: WorkspaceEntry): RunHost {
+    const defaultStorage = workspaceStorage(entry.realPath);
     const storage =
       this.opts.bootstrap.storage && entry.realPath === this.bootstrapRealPath
-        ? this.opts.bootstrap.storage
-        : workspaceStorage(entry.realPath);
+        ? {
+            ...this.opts.bootstrap.storage,
+            modelAuditDir: this.opts.bootstrap.storage.modelAuditDir ?? defaultStorage.modelAuditDir,
+          }
+        : defaultStorage;
     return new RunHost({
       workspaceRoot: entry.realPath,
       dbPath: storage.dbPath,
       traceDir: storage.traceDir,
+      modelAuditDir: storage.modelAuditDir,
       endpoint: this.opts.endpoint,
       ...(this.opts.approvalMode ? { approvalMode: this.opts.approvalMode } : {}),
       ...(this.opts.executionPrivilege ? { executionPrivilege: this.opts.executionPrivilege } : {}),

@@ -41,6 +41,8 @@ import type {
   UiAssistantMessage,
   UiBudgetUsage,
   UiInteraction,
+  UiModelCall,
+  UiModelFrame,
   UiSystemNotice,
   UiToolActivity,
   UiTranscriptEntry,
@@ -485,6 +487,7 @@ function byAction(
  */
 export function projectTurns(input: ProjectionInput): UiTurn[] {
   const turns: UiTurn[] = [];
+  const callsByInvocation = new Map<string, UiModelCall>();
   let current: UiTurn | undefined;
 
   const ensure = (turn: number, seq: number): UiTurn => {
@@ -493,6 +496,29 @@ export function projectTurns(input: ProjectionInput): UiTurn[] {
     turns.push(current);
     return current;
   };
+
+  const appendCall = (
+    turn: UiTurn,
+    sequence: number,
+    invocationId?: string,
+  ): UiModelCall => {
+    const call: UiModelCall = {
+      id: invocationId ? `model:${invocationId}` : `model-event:${sequence}`,
+      ordinal: turn.modelCalls.length + 1,
+      startedAtSequence: sequence,
+      ...(invocationId ? { invocationId } : {}),
+      traceStatus: "STARTED",
+      runtimeErrors: [],
+    };
+    turn.modelCalls.push(call);
+    if (invocationId) callsByInvocation.set(invocationId, call);
+    return call;
+  };
+
+  const callFor = (turn: UiTurn, sequence: number, invocationId?: string): UiModelCall =>
+    invocationId
+      ? (callsByInvocation.get(invocationId) ?? appendCall(turn, sequence, invocationId))
+      : appendCall(turn, sequence);
 
   // 两条轨道按同一条序列合并（决 5）。这里只需要 RUN_META 那一种条目。
   const facts = sorted(input.entries)
@@ -517,7 +543,7 @@ export function projectTurns(input: ProjectionInput): UiTurn[] {
         break;
       case "ContextFrameCompiled": {
         const t = ensure(current?.turn ?? 0, ev.sequence);
-        t.frame = {
+        const frame: UiModelFrame = {
           items: ev.payload.items,
           totalTokens: ev.payload.totalTokens,
           fixedOverheadTokens: ev.payload.fixedOverheadTokens,
@@ -525,6 +551,16 @@ export function projectTurns(input: ProjectionInput): UiTurn[] {
           hasExternalUntrusted: ev.payload.trust.hasExternalUntrusted,
           untrustedItems: ev.payload.trust.untrustedItems,
         };
+        t.frame = frame;
+        // 旧 Trace 没有这两个字段：保留轮级 frame，等 completed 事件创建兼容调用。
+        const invocationId = typeof ev.payload.invocationId === "string"
+          ? String(ev.payload.invocationId)
+          : undefined;
+        if (invocationId) {
+          const call = callFor(t, ev.sequence, invocationId);
+          call.frame = frame;
+          if (typeof ev.payload.frameId === "string") call.frameId = String(ev.payload.frameId);
+        }
         break;
       }
       case "ContextCompacted":
@@ -537,7 +573,7 @@ export function projectTurns(input: ProjectionInput): UiTurn[] {
         const t = ensure(current?.turn ?? 0, ev.sequence);
         const u = ev.payload.usage;
         /**
-         * 【定】**追加**，不是覆盖。
+         * 【定】按 invocation 补全，不能按 turn 覆盖或重复追加。
          *
          * 一个 turn 里可以有**多次**模型调用：输出预算恢复
          * （`OUTPUT_LIMIT_RECOVERY`）与模型错误重试（`MODEL_ERROR_RETRY`）
@@ -549,17 +585,44 @@ export function projectTurns(input: ProjectionInput): UiTurn[] {
          * 于是这一行自己对不上自己，而「这一轮为什么花了这么多」恰恰是
          * 白盒要回答的问题。
          */
-        t.modelCalls.push({
-          inputTokens: u.inputTokens,
-          outputTokens: u.outputTokens,
-          billedInputTokens: u.billedInputTokens,
-          ...(u.cacheReadInputTokens !== undefined
-            ? { cacheReadInputTokens: u.cacheReadInputTokens }
-            : {}),
-          stopReason: ev.payload.stopReason,
-          durationMs: ev.payload.durationMs,
-          toolCallCount: ev.payload.toolCallCount,
+        const invocationId = typeof ev.payload.invocationId === "string"
+          ? String(ev.payload.invocationId)
+          : undefined;
+        const call = callFor(t, ev.sequence, invocationId);
+        call.traceStatus = "RETURNED";
+        call.inputTokens = u.inputTokens;
+        call.outputTokens = u.outputTokens;
+        call.billedInputTokens = u.billedInputTokens;
+        if (u.cacheReadInputTokens !== undefined) call.cacheReadInputTokens = u.cacheReadInputTokens;
+        call.stopReason = ev.payload.stopReason;
+        call.durationMs = ev.payload.durationMs;
+        call.toolCallCount = ev.payload.toolCallCount;
+        break;
+      }
+      case "RuntimeErrorOccurred": {
+        if (typeof ev.payload.invocationId !== "string") break;
+        const t = ensure(current?.turn ?? 0, ev.sequence);
+        const call = callFor(t, ev.sequence, String(ev.payload.invocationId));
+        call.traceStatus = "FAILED";
+        call.runtimeErrors.push({
+          code: ev.payload.error.code,
+          category: ev.payload.error.category,
+          retryability: ev.payload.error.retryability,
+          safeMessage: ev.payload.error.safeMessage,
         });
+        break;
+      }
+      case "ModelInvocationAuditFailed": {
+        // 事件由本地 JSONL 读回后只做了类型断言；损坏或未来旧形状不能被
+        // String(undefined) 投影成一个可点击的 `model:undefined` 假调用。
+        if (typeof ev.payload.invocationId !== "string") break;
+        const t = ensure(current?.turn ?? 0, ev.sequence);
+        const invocationId = String(ev.payload.invocationId);
+        const call = callFor(t, ev.sequence, invocationId);
+        call.auditFailure = {
+          stage: ev.payload.stage,
+          message: ev.payload.message,
+        };
         break;
       }
       case "ActionProposed":

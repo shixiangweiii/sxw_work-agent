@@ -700,6 +700,15 @@ JSONL；把完整模型上下文与每条 Provider SSE 混进去，会同时污�
 - 审计 I/O fail-open，但以 `ModelInvocationAuditFailed` 响亮暴露；
 - 第一阶段不提供 HTTP/API/UI 读取，后续界面只能按单次 invocation 懒加载。
 
+#### 6.1.2 逐轮调用审计查看器 ✅（2026-09-02）
+
+- `ContextFrameCompiled` 即登记调用，失败、进行中与同轮重试不会因缺少 completed 事件而消失；
+- 逐轮解剖按 invocation 展开，实际请求、派生上下文、SDK 解码 Provider 事件与 Runtime 结果分区展示；
+- 单调用 HTTP 接口校验当前 workspace、Run 归属、文件名白名单与 request 身份，身份冲突隐藏正文；
+- `COMPLETE / INCOMPLETE / CORRUPT / NOT_CAPTURED` 四态原样到达界面，敏感响应不缓存；
+- Run 详情与 `/trace` 不含审计正文，大 JSON 与单条 Provider 事件只在用户展开时格式化。
+- 刷新竞态收口：调用缓存项持有当前面板挂载点，旧 DOM、旧 viewer 与旧 revision 的延迟响应均不能覆盖当前视图。
+
 #### 退出门槛（结构性，不依赖评测）
 
 > ⚠️ **这张表 2026-08-30 有六行标了 ✅ 而实际不成立**，四份评审各自独立报出来，

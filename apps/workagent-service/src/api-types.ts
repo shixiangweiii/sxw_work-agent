@@ -184,14 +184,8 @@ export type UiTranscriptEntry =
 export interface UiTurn {
   turn: number;
   startedAtSequence: number;
-  frame?: {
-    items: number;
-    totalTokens: number;
-    fixedOverheadTokens: number;
-    compacted: boolean;
-    hasExternalUntrusted: boolean;
-    untrustedItems: number;
-  };
+  /** 兼容主行：同一轮有重试时是最后一次编译帧；精确帧在 modelCalls[].frame。 */
+  frame?: UiModelFrame;
   /**
    * 这一轮里的**每一次**模型调用。
    *
@@ -209,13 +203,78 @@ export interface UiTurn {
 }
 
 export interface UiModelCall {
-  inputTokens: number;
-  outputTokens: number;
-  billedInputTokens: number;
+  /** 只用于投影与 DOM 的稳定 id；旧 Trace 没有 invocationId 时由事件 sequence 推出。 */
+  id: string;
+  ordinal: number;
+  startedAtSequence: number;
+  invocationId?: string;
+  frameId?: string;
+  frame?: UiModelFrame;
+  /** 只是事件轨道观察结果；调用真实 outcome 以 sidecar invocation_end 为准。 */
+  traceStatus: "STARTED" | "RETURNED" | "FAILED";
+  inputTokens?: number;
+  outputTokens?: number;
+  billedInputTokens?: number;
   cacheReadInputTokens?: number;
-  stopReason: string;
-  durationMs: number;
-  toolCallCount: number;
+  stopReason?: string;
+  durationMs?: number;
+  toolCallCount?: number;
+  runtimeErrors: Array<{
+    code: string;
+    category: string;
+    retryability: string;
+    safeMessage: string;
+  }>;
+  auditFailure?: { stage: string; message: string };
+}
+
+export interface UiModelFrame {
+  items: number;
+  totalTokens: number;
+  fixedOverheadTokens: number;
+  compacted: boolean;
+  hasExternalUntrusted: boolean;
+  untrustedItems: number;
+}
+
+export interface UiModelInvocationAudit {
+  state: "COMPLETE" | "INCOMPLETE" | "CORRUPT" | "NOT_CAPTURED";
+  errors: Array<{ line: number; message: string }>;
+  request?: {
+    schemaVersion: 1;
+    runId: string;
+    invocationId: string;
+    frameId: string;
+    turn: number;
+    endpointProfileVersion: string;
+    modelId: string;
+    startedAt: number;
+    body: unknown;
+  };
+  responseMetadata?: {
+    status: number;
+    requestId?: string;
+    observedAt: number;
+  };
+  providerEvents: Array<{
+    index: number;
+    observedAt: number;
+    event: unknown;
+  }>;
+  providerError?: {
+    observedAt: number;
+    failure: unknown;
+  };
+  invocationEnd?: {
+    outcome: "COMPLETED" | "INTERRUPTED" | "FAILED";
+    finishedAt: number;
+    durationMs: number;
+    result?: unknown;
+    error?: unknown;
+    interruptionReason?: string;
+  };
+  /** 路径身份与 request 身份冲突时不把任何敏感正文送进浏览器。 */
+  contentWithheld?: boolean;
 }
 
 export interface UiBudgetUsage {

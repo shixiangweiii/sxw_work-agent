@@ -651,6 +651,47 @@ th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--line
 th { color: var(--fg-dim); font-weight: 500; position: sticky; top: 0; background: var(--bg); }
 td.num { font-family: var(--mono); text-align: right; }
 
+/* ── 逐轮模型调用审计 */
+
+.model-call-row > td { background: color-mix(in srgb, var(--bg-2) 74%, transparent); }
+.model-call-cell { padding: 4px 8px 8px; }
+.model-call {
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg-2);
+}
+.model-call > summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  padding: 7px 9px;
+  color: var(--fg);
+}
+.model-call[open] > summary { border-bottom: 1px solid var(--line); }
+.model-call-summary, .model-call-legacy { font-family: var(--mono); overflow-wrap: anywhere; }
+.model-audit-panel { padding: 9px; min-width: 0; }
+.model-audit-facts { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; font-size: 11px; }
+.model-audit-warning {
+  color: var(--err);
+  border-left: 2px solid var(--err);
+  padding-left: 7px;
+  white-space: pre-wrap;
+}
+.model-audit-panel > .bad { color: var(--err); }
+.model-audit-json, .model-context, .model-provider-events {
+  margin-top: 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 6px 8px;
+  min-width: 0;
+}
+.model-audit-json-actions { margin-top: 5px; }
+.model-context-group { margin-top: 8px; padding-left: 8px; border-left: 2px solid var(--line); }
+.model-context-group > strong { display: block; margin-bottom: 4px; color: var(--fg-dim); }
+.model-context-item, .model-provider-event { margin: 4px 0 0 8px; }
+.model-provider-events > .model-audit-json { margin-left: 8px; }
+
 /* ── 预算条 */
 
 .axis { margin-bottom: 10px; }

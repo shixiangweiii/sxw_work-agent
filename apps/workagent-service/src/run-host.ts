@@ -54,9 +54,11 @@ import {
   type ComposeOptions,
   type EndpointChoice,
 } from "../../cli/src/compose.js";
+import { readModelInvocationAudit } from "../../cli/src/model-audit/file-store.js";
 import { FileTraceSink } from "../../cli/src/trace/file-sink.js";
 import type {
   UiArtifactRecord,
+  UiModelInvocationAudit,
   UiPending,
   UiRunDetail,
   UiRunListItem,
@@ -71,6 +73,8 @@ export interface RunHostOptions {
   endpoint: EndpointChoice;
   /** trace JSONL 的目录。与 CLI 同一个约定（`.workagent-runs/<runId>.jsonl`）。 */
   traceDir: string;
+  /** 模型调用审计目录；writer 与 Layer 2 reader 必须共用这一份绝对路径。 */
+  modelAuditDir: string;
   /**
    * 服务启动时的审批档位（ADR-0012）。默认 `DEFAULT`。
    *
@@ -219,6 +223,7 @@ export class RunHost {
     this.composed = compose({
       workspaceRoot: opts.workspaceRoot,
       dbPath: opts.dbPath,
+      modelAuditDir: opts.modelAuditDir,
       endpoint: opts.endpoint,
       // ADR-0012：随 RunSpec 冻结的那一档。服务这一层视为不可变配置。
       executionPrivilege: opts.executionPrivilege ?? "SANDBOXED",
@@ -619,6 +624,106 @@ export class RunHost {
     const path = this.traceFileFor(runId);
     if (!existsSync(path)) return [];
     return readJsonl(path);
+  }
+
+  /**
+   * 单次模型调用的敏感审计事实。
+   *
+   * 【定】先以事件轨道证明 invocation 属于这个 Run，再碰 sidecar。只凭两个
+   * 路径片段去读虽然也困在 run 目录内，却会把本接口变成一个文件名 oracle；
+   * 更重要的是，界面会把一份无法与轮次对齐的文件冒充成这次调用的事实。
+   */
+  async modelInvocationAudit(
+    runId: string,
+    invocationId: string,
+  ): Promise<UiModelInvocationAudit | undefined> {
+    if (!SAFE_MODEL_AUDIT_ID.test(runId) || !SAFE_MODEL_AUDIT_ID.test(invocationId)) return undefined;
+    const spec = await this.composed.ports.runs.getRunSpec(asId<RunId>(runId));
+    if (!spec) return undefined;
+
+    const belongsToRun = this.eventsFor(runId).some((event) =>
+      invocationIdOf(event) === invocationId
+    );
+    if (!belongsToRun) return undefined;
+
+    const path = resolve(this.opts.modelAuditDir, runId, `${invocationId}.jsonl`);
+    const read = readModelInvocationAudit(path);
+    const request = read.records.find((record) => record.kind === "request");
+    if (
+      request?.kind === "request" &&
+      (String(request.runId) !== runId || String(request.invocationId) !== invocationId)
+    ) {
+      return {
+        state: "CORRUPT",
+        errors: [{ line: 1, message: "审计 request 身份与请求路径不一致，敏感正文已隐藏" }],
+        providerEvents: [],
+        contentWithheld: true,
+      };
+    }
+
+    const out: UiModelInvocationAudit = {
+      state: read.state,
+      errors: read.errors,
+      providerEvents: [],
+    };
+    for (const record of read.records) {
+      switch (record.kind) {
+        case "request":
+          out.request = {
+            schemaVersion: record.schemaVersion,
+            runId: String(record.runId),
+            invocationId: String(record.invocationId),
+            frameId: String(record.frameId),
+            turn: record.turn,
+            endpointProfileVersion: record.endpointProfileVersion,
+            modelId: record.modelId,
+            startedAt: record.startedAt,
+            body: record.request.body,
+          };
+          break;
+        case "response_metadata":
+          out.responseMetadata = {
+            status: record.status,
+            observedAt: record.observedAt,
+            ...(record.requestId !== undefined ? { requestId: record.requestId } : {}),
+          };
+          break;
+        case "provider_event":
+          out.providerEvents.push({
+            index: record.index,
+            observedAt: record.observedAt,
+            event: record.event,
+          });
+          break;
+        case "provider_error":
+          out.providerError = {
+            observedAt: record.observedAt,
+            failure: record.failure,
+          };
+          break;
+        case "invocation_end":
+          if (record.outcome === "FAILED") {
+            out.invocationEnd = {
+              outcome: record.outcome,
+              finishedAt: record.finishedAt,
+              durationMs: record.durationMs,
+              error: record.error,
+            };
+            break;
+          }
+          out.invocationEnd = {
+            outcome: record.outcome,
+            finishedAt: record.finishedAt,
+            durationMs: record.durationMs,
+            ...(record.result !== undefined ? { result: record.result } : {}),
+            ...(record.interruptionReason !== undefined
+              ? { interruptionReason: record.interruptionReason }
+              : {}),
+          };
+          break;
+      }
+    }
+    return out;
   }
 
   /**
@@ -1274,6 +1379,25 @@ function readJsonl(path: string): unknown[] {
     }
   }
   return out;
+}
+
+const SAFE_MODEL_AUDIT_ID = /^[A-Za-z0-9_-]+$/;
+
+function invocationIdOf(event: RunEvent): string | undefined {
+  switch (event.type) {
+    case "ContextFrameCompiled":
+    case "ModelInvocationCompleted":
+    case "ModelInvocationAuditFailed":
+      return typeof event.payload.invocationId === "string"
+        ? String(event.payload.invocationId)
+        : undefined;
+    case "RuntimeErrorOccurred":
+      return typeof event.payload.invocationId === "string"
+        ? String(event.payload.invocationId)
+        : undefined;
+    default:
+      return undefined;
+  }
 }
 
 

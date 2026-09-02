@@ -89,6 +89,66 @@ class AuditedFixtureModelPort implements ModelPort {
   }
 }
 
+/** 阶段 2：同一轮第一次 Provider 失败、Runtime 退避后第二次返回。 */
+class RetryAuditFixtureModelPort implements ModelPort {
+  private calls = 0;
+
+  constructor(
+    private readonly providerCanary: string,
+    private readonly htmlCanary: string,
+  ) {}
+
+  async *invoke(
+    _request: ModelRequest,
+    _signal: AbortSignal,
+    observer: ModelInvocationObserver,
+  ): AsyncGenerator<ModelStreamEvent, ModelInvocationResult> {
+    this.calls += 1;
+    observer.responseMetadata({ status: this.calls === 1 ? 503 : 200, requestId: `req-stage2-${this.calls}` });
+    observer.providerEvent({
+      type: "message_start",
+      call: this.calls,
+      providerCanary: this.providerCanary,
+      htmlCanary: this.htmlCanary,
+      ...(this.calls === 2 ? { largePayload: `${this.providerCanary}:${"x".repeat(256 * 1024)}` } : {}),
+    });
+    if (this.calls === 1) {
+      const errorBody = { type: "overloaded_error", message: "stage2 retry" };
+      observer.providerFailure({
+        kind: "PROVIDER",
+        name: "APIError",
+        message: "stage2 retry",
+        status: 503,
+        requestId: "req-stage2-1",
+        errorBody,
+      });
+      throw Object.assign(new Error("stage2 retry"), {
+        status: 503,
+        requestID: "req-stage2-1",
+        error: errorBody,
+      });
+    }
+    yield { type: "text_delta", text: "阶段 2 验收完成。" };
+    return {
+      content: [{ type: "text", text: "阶段 2 验收完成。" }],
+      toolCalls: [],
+      stopReason: "end_turn",
+      usage: {
+        inputTokens: 111,
+        outputTokens: 22,
+        cacheCreationInputTokens: 0,
+        cacheReadInputTokens: 0,
+        billedInputTokens: 111,
+      },
+      interrupted: false,
+    };
+  }
+
+  async countTokens(_request: ModelRequest): Promise<number | undefined> {
+    return 111;
+  }
+}
+
 async function drainEventTypes(
   composed: Composed,
   spec: RunSpec,
@@ -138,7 +198,7 @@ async function call(
   svc: RunningService,
   path: string,
   init?: { method?: string; body?: unknown; token?: string | null; origin?: string; host?: string },
-): Promise<{ status: number; body: Record<string, unknown>; raw: string }> {
+): Promise<{ status: number; body: Record<string, unknown>; raw: string; headers: Headers }> {
   const headers: Record<string, string> = {};
   const tok = init?.token === undefined ? TOKEN : init.token;
   if (tok !== null) headers["Authorization"] = `Bearer ${tok}`;
@@ -157,7 +217,7 @@ async function call(
   } catch {
     body = { _raw: raw };
   }
-  return { status: res.status, body, raw };
+  return { status: res.status, body, raw, headers: res.headers };
 }
 
 /**
@@ -1331,6 +1391,466 @@ async function main(): Promise<void> {
       }
     } finally {
       await svcG.close();
+    }
+
+    // ══════════════════════════ G2. 逐轮模型调用审计查看器
+    section("G2. 同轮多次模型调用：按 invocation 懒加载敏感审计事实");
+    console.log(
+      "   一轮不是一次调用：Provider 失败后的退避重试不会递增 turn。\n" +
+        "   因此这里用真实 Runtime 跑出 FAILED → RETURNED 两次调用，再经 HTTP 逐份读取；\n" +
+        "   如果投影按 turn 合并、API 只看文件名或正文混进 detail/trace，判据都会红。\n",
+    );
+    /*
+     * 判别力实测（2026-09-02，临时改坏后均已恢复）：
+     * 按 turn 合并、跳过 invocation 归属、向 Run 详情泄漏 canary、移除响应 revision
+     * 保护，分别令对应判据翻红。刷新竞态收口又实测了三条：保留旧挂载点、移除
+     * viewer/map 身份、移除 entry revision，各自令新增的对应判据单红。
+     * 这些不是只靠实现源码自陈的绿色检查。
+     */
+    {
+      const auditWs = join(tmp, "ws-model-audit-viewer");
+      const modelAuditDir = join(auditWs, ".workagent", "model-invocations");
+      const auditTraceDir = join(auditWs, ".workagent", "runs");
+      const requestCanary = "stage2-request-only-canary";
+      const providerCanary = "stage2-provider-only-canary";
+      const htmlCanary = "</pre><script>stage2-xss-canary</script>";
+      const auditTools = toolsFor(["now"]).map((tool) => ({
+        ...tool,
+        definition: {
+          ...tool.definition,
+          description: `${tool.definition.description} ${requestCanary}`,
+        },
+      }));
+      const svcAudit = await startService({
+        workspaceRoot: auditWs,
+        storageOverride: {
+          dbPath: ":memory:",
+          traceDir: auditTraceDir,
+          modelAuditDir,
+        },
+        endpoint: "bailian",
+        token: TOKEN,
+        composeOverrides: {
+          modelPortOverride: new RetryAuditFixtureModelPort(providerCanary, htmlCanary),
+          tools: auditTools,
+        },
+      });
+      try {
+        const started = await call(svcAudit, "/api/runs", {
+          method: "POST",
+          body: { task: "阶段 2 调用查看器验收" },
+        });
+        const auditRunId = String(started.body["runId"] ?? "");
+        const detailAudit = await waitFor(async () => {
+          const response = await call(svcAudit, `/api/runs/${auditRunId}`);
+          return String(response.body["status"]) === "COMPLETED" ? response : undefined;
+        });
+        if (!detailAudit) throw new Error("阶段 2 审计 Run 未完成");
+        const projectedTurns = (detailAudit.body["turns"] as Array<{
+          turn: number;
+          modelCalls: Array<{
+            id: string;
+            ordinal: number;
+            invocationId?: string;
+            frameId?: string;
+            traceStatus: string;
+            billedInputTokens?: number;
+            outputTokens?: number;
+            runtimeErrors: Array<{ code: string }>;
+          }>;
+        }>) ?? [];
+        const calls = projectedTurns.flatMap((turn) => turn.modelCalls);
+        const firstCall = calls[0];
+        const secondCall = calls[1];
+        fact(
+          "同轮调用投影",
+          `${projectedTurns.length} 轮 / ${calls.length} 次 · ` +
+            calls.map((call) => `#${call.ordinal} ${call.traceStatus} ${call.invocationId}`).join(" → "),
+        );
+        verdict(
+          projectedTurns.length === 1 &&
+            calls.length === 2 &&
+            firstCall?.ordinal === 1 &&
+            firstCall.traceStatus === "FAILED" &&
+            firstCall.runtimeErrors.some((error) => error.code === "MODEL_UNAVAILABLE") &&
+            secondCall?.ordinal === 2 &&
+            secondCall.traceStatus === "RETURNED" &&
+            secondCall.billedInputTokens === 111 &&
+            secondCall.outputTokens === 22 &&
+            !!firstCall.invocationId &&
+            !!secondCall.invocationId &&
+            firstCall.invocationId !== secondCall.invocationId &&
+            !!firstCall.frameId &&
+            !!secondCall.frameId,
+          "同一轮的失败调用与重试调用按 invocation 分成两项，顺序、错误、usage 与 frame 各归各的",
+        );
+
+        const firstAudit = await call(
+          svcAudit,
+          `/api/runs/${auditRunId}/model-invocations/${firstCall?.invocationId}`,
+        );
+        const secondAudit = await call(
+          svcAudit,
+          `/api/runs/${auditRunId}/model-invocations/${secondCall?.invocationId}`,
+        );
+        const firstEnd = firstAudit.body["invocationEnd"] as Record<string, unknown> | undefined;
+        const secondEnd = secondAudit.body["invocationEnd"] as Record<string, unknown> | undefined;
+        const firstProviderError = firstAudit.body["providerError"] as Record<string, unknown> | undefined;
+        const secondEvents = (secondAudit.body["providerEvents"] as unknown[]) ?? [];
+        fact(
+          "两份调用事实",
+          `#1 ${firstAudit.body["state"]}/${firstEnd?.["outcome"]} · ` +
+            `#2 ${secondAudit.body["state"]}/${secondEnd?.["outcome"]} · events=${secondEvents.length}`,
+        );
+        verdict(
+          firstAudit.status === 200 &&
+            firstAudit.body["state"] === "COMPLETE" &&
+            firstEnd?.["outcome"] === "FAILED" &&
+            firstProviderError !== undefined &&
+            secondAudit.status === 200 &&
+            secondAudit.body["state"] === "COMPLETE" &&
+            secondEnd?.["outcome"] === "COMPLETED" &&
+            secondEvents.length === 1 &&
+            firstAudit.headers.get("cache-control") === "no-store" &&
+            secondAudit.headers.get("cache-control") === "no-store",
+          "单次调用 API 原样区分 Provider 失败与后续成功，并以 Cache-Control:no-store 返回敏感正文",
+        );
+
+        const traceAudit = await call(svcAudit, `/api/runs/${auditRunId}/trace`);
+        const isolated =
+          !detailAudit.raw.includes(requestCanary) &&
+          !detailAudit.raw.includes(providerCanary) &&
+          !detailAudit.raw.includes(htmlCanary) &&
+          !traceAudit.raw.includes(requestCanary) &&
+          !traceAudit.raw.includes(providerCanary) &&
+          !traceAudit.raw.includes(htmlCanary) &&
+          secondAudit.raw.includes(requestCanary) &&
+          secondAudit.raw.includes(providerCanary) &&
+          secondAudit.raw.includes(htmlCanary);
+        const secondFile = join(modelAuditDir, auditRunId, `${secondCall!.invocationId}.jsonl`);
+        const original = readFileSync(secondFile, "utf8");
+        fact(
+          "懒加载与大调用",
+          `sidecar ${Buffer.byteLength(original)}B / detail ${Buffer.byteLength(detailAudit.raw)}B / ` +
+            `单调用响应 ${Buffer.byteLength(secondAudit.raw)}B / events ${secondEvents.length}`,
+        );
+        verdict(
+          isolated && Buffer.byteLength(secondAudit.raw) > 256 * 1024,
+          "请求、Provider 与 HTML canary 只在指定 invocation 响应中出现；大型 sidecar 不放大 Run 详情或 Trace",
+        );
+
+        const lines = original.trimEnd().split("\n");
+        writeFileSync(secondFile, `${lines.slice(0, -1).join("\n")}\n`, "utf8");
+        const incomplete = await call(
+          svcAudit,
+          `/api/runs/${auditRunId}/model-invocations/${secondCall!.invocationId}`,
+        );
+        writeFileSync(secondFile, `${original}{broken-json\n`, "utf8");
+        const corrupt = await call(
+          svcAudit,
+          `/api/runs/${auditRunId}/model-invocations/${secondCall!.invocationId}`,
+        );
+        const requestRecord = JSON.parse(lines[0]!) as Record<string, unknown>;
+        requestRecord["runId"] = "run_identity_mismatch";
+        writeFileSync(secondFile, `${[JSON.stringify(requestRecord), ...lines.slice(1)].join("\n")}\n`, "utf8");
+        const mismatch = await call(
+          svcAudit,
+          `/api/runs/${auditRunId}/model-invocations/${secondCall!.invocationId}`,
+        );
+        unlinkSync(secondFile);
+        const missing = await call(
+          svcAudit,
+          `/api/runs/${auditRunId}/model-invocations/${secondCall!.invocationId}`,
+        );
+        writeFileSync(secondFile, original, "utf8");
+        fact(
+          "HTTP 四态与身份冲突",
+          `complete=${secondAudit.body["state"]} incomplete=${incomplete.body["state"]} ` +
+            `corrupt=${corrupt.body["state"]} missing=${missing.body["state"]} ` +
+            `withheld=${mismatch.body["contentWithheld"]}`,
+        );
+        verdict(
+          secondAudit.body["state"] === "COMPLETE" &&
+            incomplete.body["state"] === "INCOMPLETE" &&
+            corrupt.body["state"] === "CORRUPT" &&
+            missing.body["state"] === "NOT_CAPTURED" &&
+            mismatch.body["state"] === "CORRUPT" &&
+            mismatch.body["contentWithheld"] === true &&
+            mismatch.body["request"] === undefined &&
+            mismatch.body["providerEvents"] instanceof Array &&
+            (mismatch.body["providerEvents"] as unknown[]).length === 0,
+          "严格 reader 的四态穿过真实 HTTP 不失真；request 身份冲突只报损坏，不返回敏感前缀",
+        );
+
+        const secondRun = await call(svcAudit, "/api/runs", {
+          method: "POST",
+          body: { task: "阶段 2 调用归属验收" },
+        });
+        const secondRunId = String(secondRun.body["runId"] ?? "");
+        const secondRunDetail = await waitFor(async () => {
+          const response = await call(svcAudit, `/api/runs/${secondRunId}`);
+          return String(response.body["status"]) === "COMPLETED" ? response : undefined;
+        });
+        if (!secondRunDetail) throw new Error("阶段 2 归属 Run 未完成");
+        const crossRun = await call(
+          svcAudit,
+          `/api/runs/${secondRunId}/model-invocations/${firstCall!.invocationId}`,
+        );
+        const encodedSlash = await call(
+          svcAudit,
+          `/api/runs/${auditRunId}/model-invocations/${encodeURIComponent(`${firstCall!.invocationId}/escape`)}`,
+        );
+        verdict(
+          crossRun.status === 404 && encodedSlash.status === 400,
+          "API 先验证 invocation 的 Run 归属并使用 sidecar 文件名白名单；跨 Run 与编码斜杠均读不到正文",
+        );
+
+        const secondRunEvents = svcAudit.host.eventsSince(secondRunId, 0).map((event) => {
+          if (event.type !== "ContextFrameCompiled" && event.type !== "ModelInvocationCompleted") return event;
+          const payload = { ...event.payload } as Record<string, unknown>;
+          delete payload["invocationId"];
+          delete payload["frameId"];
+          return { ...event, payload } as unknown as RunEvent;
+        });
+        const legacyTurns = projectTurns({ entries: [], events: secondRunEvents });
+        const legacyCall = legacyTurns.flatMap((turn) => turn.modelCalls)[0];
+        const malformedAuditFailure = {
+          type: "ModelInvocationAuditFailed",
+          runId: secondRunId,
+          sequence: 999_999,
+          timestamp: Date.now(),
+          payload: { stage: "open", message: "缺少 invocationId 的损坏事件" },
+        } as unknown as RunEvent;
+        const malformedAuditCalls = projectTurns({
+          entries: [],
+          events: [
+            ...secondRunEvents.filter((event) => event.type === "TurnStarted").slice(0, 1),
+            malformedAuditFailure,
+          ],
+        }).flatMap((turn) => turn.modelCalls);
+        verdict(
+          legacyCall?.invocationId === undefined && legacyCall?.billedInputTokens === 111 &&
+            malformedAuditCalls.length === 0,
+          "旧 Trace 缺少 invocationId 时仍保留 usage；损坏的审计失败事件也不补造可读取 sidecar 的假调用",
+        );
+
+        const uiSrc = readFileSync(resolve(REPO_ROOT, "apps/workagent-ui/public/app.js"), "utf8");
+        type AuditProbeCall = { invocationId: string };
+        type AuditProbePanel = { name: string; isConnected: boolean };
+        type AuditProbeEntry = {
+          key: string;
+          runId: string;
+          invocationId: string;
+          status: string;
+          revision: number;
+          controller: AbortController | null;
+          data: unknown;
+          error: string;
+          view: { call: AuditProbeCall; panel: AuditProbePanel } | null;
+        };
+        type AuditProbeViewer = { entries: Map<string, AuditProbeEntry> };
+        type AuditProbeState = { runId: string; modelAuditUi: AuditProbeViewer };
+        type AuditPaint = { panel: string; status: string; marker?: unknown; error: string };
+        type AuditLifecycle = {
+          bindModelAuditView: (
+            entry: AuditProbeEntry,
+            call: AuditProbeCall,
+            panel: AuditProbePanel,
+          ) => void;
+          loadModelInvocationAudit: (entry: AuditProbeEntry, force: boolean) => Promise<void>;
+        };
+        const lifecycleStart = uiSrc.indexOf("\nfunction bindModelAuditView(");
+        const lifecycleEnd = uiSrc.indexOf("\n\nfunction renderModelAuditPanel(", lifecycleStart);
+        if (lifecycleStart < 0 || lifecycleEnd < 0 || lifecycleEnd <= lifecycleStart) {
+          throw new Error(
+            "verify:ui 无法定位模型审计生命周期源码区间；请同步更新 app.js 标记与 G2 夹具" +
+              `（start=${lifecycleStart}, end=${lifecycleEnd}）`,
+          );
+        }
+        const makeLifecycle = new Function(
+          "S",
+          "api",
+          "renderModelAuditPanel",
+          `${uiSrc.slice(lifecycleStart, lifecycleEnd)}\n` +
+            "return { bindModelAuditView, loadModelInvocationAudit };",
+        ) as (
+          state: AuditProbeState,
+          fakeApi: (path: string, opts?: { signal?: AbortSignal }) => Promise<unknown>,
+          render: (
+            panel: AuditProbePanel,
+            call: AuditProbeCall,
+            entry: AuditProbeEntry,
+          ) => void,
+        ) => AuditLifecycle;
+        const deferred = () => {
+          let resolvePromise!: (value: unknown) => void;
+          let rejectPromise!: (reason?: unknown) => void;
+          const promise = new Promise<unknown>((resolve, reject) => {
+            resolvePromise = resolve;
+            rejectPromise = reject;
+          });
+          return { promise, resolve: resolvePromise, reject: rejectPromise };
+        };
+        const makeEntry = (runId: string, invocationId: string): AuditProbeEntry => ({
+          key: `${runId}:${invocationId}`,
+          runId,
+          invocationId,
+          status: "idle",
+          revision: 0,
+          controller: null,
+          data: null,
+          error: "",
+          view: null,
+        });
+        const paintInto = (paints: AuditPaint[]) => (
+          panel: AuditProbePanel,
+          _call: AuditProbeCall,
+          entry: AuditProbeEntry,
+        ): void => {
+          const data = entry.data && typeof entry.data === "object"
+            ? entry.data as Record<string, unknown>
+            : undefined;
+          paints.push({
+            panel: panel.name,
+            status: entry.status,
+            ...(data?.["marker"] !== undefined ? { marker: data["marker"] } : {}),
+            error: entry.error,
+          });
+        };
+
+        // ① 请求开始后 DOM 被 Run 全量刷新替换：结果必须画到 entry 最新挂载点。
+        const refreshDeferred = deferred();
+        const refreshEntry = makeEntry("run_refresh", "inv_refresh");
+        const refreshViewer: AuditProbeViewer = { entries: new Map([[refreshEntry.key, refreshEntry]]) };
+        const refreshState: AuditProbeState = { runId: refreshEntry.runId, modelAuditUi: refreshViewer };
+        const refreshPaints: AuditPaint[] = [];
+        const refreshLifecycle = makeLifecycle(
+          refreshState,
+          async () => refreshDeferred.promise,
+          paintInto(refreshPaints),
+        );
+        const oldPanel: AuditProbePanel = { name: "old", isConnected: true };
+        refreshLifecycle.bindModelAuditView(refreshEntry, { invocationId: refreshEntry.invocationId }, oldPanel);
+        const refreshLoad = refreshLifecycle.loadModelInvocationAudit(refreshEntry, false);
+        oldPanel.isConnected = false;
+        const currentPanel: AuditProbePanel = { name: "current", isConnected: true };
+        refreshLifecycle.bindModelAuditView(
+          refreshEntry,
+          { invocationId: refreshEntry.invocationId },
+          currentPanel,
+        );
+        refreshDeferred.resolve({ marker: "refresh-result" });
+        await refreshLoad;
+        const loadedPaints = refreshPaints.filter((paint) => paint.status === "loaded");
+        currentPanel.isConnected = false;
+        const reboundPanel: AuditProbePanel = { name: "rebound", isConnected: true };
+        refreshLifecycle.bindModelAuditView(
+          refreshEntry,
+          { invocationId: refreshEntry.invocationId },
+          reboundPanel,
+        );
+        verdict(
+          refreshEntry.status === "loaded" &&
+            loadedPaints.length === 1 &&
+            loadedPaints[0]?.panel === "current" &&
+            !loadedPaints.some((paint) => paint.panel === "old") &&
+            refreshPaints.at(-1)?.panel === "rebound" &&
+            refreshPaints.at(-1)?.marker === "refresh-result",
+          "审计请求跨过 Run 全量重渲染后只更新最新挂载点；离开再进入时直接显示缓存结果",
+        );
+
+        // ② 即使旧 fetch 不遵守 AbortSignal，同 ID 的新 viewer 也不能被 ABA 旧响应污染。
+        const ownerDeferred = deferred();
+        const ownerEntry = makeEntry("run_same", "inv_same");
+        const oldViewer: AuditProbeViewer = { entries: new Map([[ownerEntry.key, ownerEntry]]) };
+        const ownerState: AuditProbeState = { runId: ownerEntry.runId, modelAuditUi: oldViewer };
+        const ownerPaints: AuditPaint[] = [];
+        const ownerLifecycle = makeLifecycle(
+          ownerState,
+          async () => ownerDeferred.promise,
+          paintInto(ownerPaints),
+        );
+        ownerLifecycle.bindModelAuditView(
+          ownerEntry,
+          { invocationId: ownerEntry.invocationId },
+          { name: "old-owner", isConnected: true },
+        );
+        const ownerLoad = ownerLifecycle.loadModelInvocationAudit(ownerEntry, false);
+        const replacementEntry = makeEntry(ownerEntry.runId, ownerEntry.invocationId);
+        ownerState.modelAuditUi = { entries: new Map([[replacementEntry.key, replacementEntry]]) };
+        ownerDeferred.resolve({ marker: "must-not-commit" });
+        await ownerLoad;
+        verdict(
+          ownerEntry.status === "loading" && ownerEntry.data === null &&
+            replacementEntry.status === "idle" && replacementEntry.data === null &&
+            !ownerPaints.some((paint) => paint.marker === "must-not-commit"),
+          "切换 viewer 后，即使 Run 与 invocationId 相同且旧请求不响应 abort，旧结果也不能提交",
+        );
+
+        // ③ 同一 entry 连续重读：rev1 先回来不能清掉 rev2 controller，也不能覆盖 rev2。
+        const firstRead = deferred();
+        const secondRead = deferred();
+        const failedRead = deferred();
+        const revisionQueue = [firstRead, secondRead, failedRead];
+        const revisionEntry = makeEntry("run_revision", "inv_revision");
+        const revisionViewer: AuditProbeViewer = {
+          entries: new Map([[revisionEntry.key, revisionEntry]]),
+        };
+        const revisionState: AuditProbeState = {
+          runId: revisionEntry.runId,
+          modelAuditUi: revisionViewer,
+        };
+        const revisionPaints: AuditPaint[] = [];
+        const revisionLifecycle = makeLifecycle(
+          revisionState,
+          async () => {
+            const next = revisionQueue.shift();
+            if (!next) throw new Error("审计生命周期夹具缺少延迟响应");
+            return next.promise;
+          },
+          paintInto(revisionPaints),
+        );
+        revisionLifecycle.bindModelAuditView(
+          revisionEntry,
+          { invocationId: revisionEntry.invocationId },
+          { name: "revision-current", isConnected: true },
+        );
+        const oldReadLoad = revisionLifecycle.loadModelInvocationAudit(revisionEntry, false);
+        const newReadLoad = revisionLifecycle.loadModelInvocationAudit(revisionEntry, true);
+        const newestController = revisionEntry.controller;
+        firstRead.resolve({ marker: "stale-result" });
+        await oldReadLoad;
+        const staleKeptNewController = revisionEntry.controller === newestController;
+        secondRead.resolve({ marker: "new-result" });
+        await newReadLoad;
+        const newestWon =
+          (revisionEntry.data as Record<string, unknown>)?.["marker"] === "new-result" &&
+          !revisionPaints.some((paint) => paint.marker === "stale-result");
+        const errorLoad = revisionLifecycle.loadModelInvocationAudit(revisionEntry, true);
+        failedRead.reject(new Error("fixture audit read failed"));
+        await errorLoad;
+        const uiCss = readFileSync(resolve(REPO_ROOT, "apps/workagent-ui/public/app.css"), "utf8");
+        verdict(
+          staleKeptNewController && newestWon && revisionEntry.controller === null &&
+            revisionEntry.status === "error" &&
+            revisionEntry.error === "fixture audit read failed" &&
+            revisionPaints.at(-1)?.status === "error" &&
+            uiSrc.includes("cache: \"no-store\"") &&
+            uiSrc.includes("renderLazyJsonDetails") &&
+            uiSrc.includes("拼接后的上下文（便于阅读）") &&
+            uiSrc.includes("Provider 原始事件（SDK 解码）") &&
+            uiCss.includes(".model-audit-panel"),
+          "连续重读只接纳最新响应、旧请求不清新 controller；错误仍画在当前面板且保留查看器能力",
+        );
+
+        // 第二个 Run 的正文也不能因为第一次查看被混进第一个调用响应。
+        verdict(
+          !firstAudit.raw.includes(String(secondRunDetail.body["task"] ?? "阶段 2 调用归属验收")),
+          "单调用响应不混入后续 Run 的数据，缓存键与服务端读取都以 runId + invocationId 隔离",
+        );
+      } finally {
+        await svcAudit.close();
+      }
     }
 
     // ══════════════════════════ H. 产物预览：登记绑定 ＋ realpath ＋ hash 漂移

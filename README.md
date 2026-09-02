@@ -157,6 +157,10 @@ SDK 解码后的 Provider 事件、独立的流内错误和规范化结果，不
 也不受 `--no-trace` 影响。SDK 的 ping 不记录，SSE error 进入 `provider_error`；
 这里不承诺 wire-level 字节还原。
 这些文件不得提交或随意分享；`count_tokens` 与 EVAL 不采集。
+Web 界面的「逐轮解剖」会按每次 `invocationId` 显示查看入口；只有展开某次调用时，
+才从受本地会话 Token 保护的单调用接口读取该文件。实际请求体、派生的上下文阅读视图、
+Provider 原始事件与 Runtime 结果彼此分开展示，不会并入 Run 详情或 Trace。
+Run 刷新会把审计请求结果交给该调用当前的面板挂载点；旧 DOM 或旧 Run 的延迟响应不会回写。
 
 **运行期交互**：TTY 下 stdin 是**单一通道**，按「谁在等」分派三种语义 ——
 RUNNING 敲一句话回车 = 插话；等审批时回车 = 应答；等接管时回车 = 完成信号。
