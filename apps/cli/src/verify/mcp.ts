@@ -18,7 +18,7 @@
  * ⚠️ 那一轮抓到了 D 段第一版的真实缺陷：它直接调 `handler.execute`，
  * 而 `actionFor` 自己造好了 `normalizedInput` —— **校验器根本不在那条路径上**。
  * 把 array 分支改成无条件报错，那条判据照样是绿的。
- * 与摸底考试 `read_blob.line_offset` 一字不差：判据打在下游，跨不过出事那一跳。
+ * 与办公任务实跑 `read_blob.line_offset` 一字不差：判据打在下游，跨不过出事那一跳。
  * ══════════════════════════════════════════════════════════════════════
  */
 
@@ -353,7 +353,7 @@ async function main(): Promise<void> {
    * （它由 `settle-batch` / `facade` 调用）。于是我把 array 分支改坏、
    * 让它无条件报错，这条判据**照样是绿的**。
    *
-   * 与摸底考试 `read_blob.line_offset` 那次一字不差：判据打在下游的 Port 上，
+   * 与办公任务实跑 `read_blob.line_offset` 那次一字不差：判据打在下游的 Port 上，
    * 跨不过真正出事的那一跳。所以这里显式走两步，两步都断言。
    */
   const sentArgs = { values: ["a", "b", "c"], count: 3 };

@@ -122,6 +122,22 @@ CLI 和 Service 启动参数可以覆盖新 Run 的默认预算；白盒界面�
 --max-consecutive-failures <整数>
 ```
 
+未覆盖时采用以下生产默认值；`maxTotalWallClockMs` 刻意没有默认值，因为它包含进程停机时间：
+
+| 预算轴 | 默认值 |
+|---|---:|
+| turns | 20 |
+| active wall-clock | 600,000 ms |
+| total wall-clock | 不设置 |
+| model calls | 40 |
+| tool calls | 100 |
+| billed input tokens | 1,500,000 |
+| output tokens | 200,000 |
+| consecutive failures | 3 |
+
+除 consecutive failures（只设硬限制，避免小整数阈值产生噪音）外，所有已设置轴在 80% 时
+发软提醒；各轴到 100% 时触发硬限制。
+
 例如：
 
 ```bash
@@ -312,7 +328,7 @@ npm run verify:tools      # A 段机械跑这 14 条，别手工 grep（表在 a
 | Session 与配置管理（无 Session 概念，`SESSION_MESSAGE` 至今零产出点） | 有真实多轮会话需求时 |
 | Case 02 反证抽象 | 阶段 4 的另一半 |
 
-完整清单见[存量问题清单](sxw_aicoding/存量BUG/存量问题清单_V20260824.md)（按阶段追加，**§0.12 是阶段 4**）。
+当前限制以本表和可执行验收为准；已经删除的阶段清单不再作为索引。
 
 ---
 
@@ -321,15 +337,10 @@ npm run verify:tools      # A 段机械跑这 14 条，别手工 grep（表在 a
 | 文档 | 作用 |
 |---|---|
 | [CLAUDE.md](CLAUDE.md) | 面向协作的工程说明，**最常读的那份** |
-| [架构设计 V05](sxw_aicoding/架构设计/WorkAgent架构设计_V20260823_05.md) | **当前实现依据** |
-| [上位基线 v0.4](sxw_aicoding/方案讨论/WorkAgent目标定位与技术架构三次对焦讨论进展.md) | 项目目标与上位原则，与架构设计冲突时以它为准 |
-| [阶段 Roadmap](sxw_aicoding/阶段roadmap/WorkAgent阶段Roadmap_V20260823.md) | 各阶段研究问题与退出门槛 |
-| [阶段 4 实施方案](sxw_aicoding/实施方案设计/阶段4实施方案_V20260830.md) | **当前阶段的实现依据** |
-| [阶段 3 实施方案](sxw_aicoding/实施方案设计/阶段3实施方案_V20260828-02.md) | 通用能力面那一阶段 |
-| [存量问题清单](sxw_aicoding/存量BUG/存量问题清单_V20260824.md) | 按阶段追加，不是只管阶段 1 |
-| `sxw_aicoding/ADR/` | 决策记录（ADR-0001…0012，另有模板） |
+| [架构设计 V05](sxw_aicoding/架构设计/历史归档/WorkAgent架构设计_V20260823_05.md) | 历史设计基线；现行行为以源码、本文和验收为准 |
+| [上位基线 v0.4](sxw_aicoding/方案讨论/历史归档/WorkAgent目标定位与技术架构三次对焦讨论进展.md) | 历史目标与原则，用于理解设计来路 |
+| [历史 ADR](sxw_aicoding/ADR/历史归档/) | ADR-0001…0012 及模板；保留决策背景，不冒充现行目录 |
 | `sxw_aicoding/代码评审/` | 按日期分目录 |
-| `sxw_aicoding/WorkAgent调研/ProviderProtocolFacts_*.md` | Spike 0 三轮实测事实（75 份证据 / 4 个端点） |
 | `spikes/s0-provider-protocol/` | 一次性探针，已完成，不进主干依赖 |
 
 代码里的实测数字（每工具 180 token 固定开销、每请求底数 5、`count_tokens` 0.00% 误差、

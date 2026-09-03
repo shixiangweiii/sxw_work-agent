@@ -170,7 +170,7 @@ async function main(): Promise<void> {
       "   它为什么能绿一个阶段：`makeUsage()` 原先无条件写\n" +
       "   `cacheRead = 0` ＋ `billed = inputTokens` —— **夹具里这两个数恒等**，\n" +
       "   传错哪个都测不出来。所以这一段的关键不是断言，是**让两者不等**。\n\n" +
-      "   真实代价：2026-08-28 摸底考试 14/14 个 run 打出红色假漂移\n" +
+      "   真实代价：2026-08-28 办公任务实跑 14/14 个 run 打出红色假漂移\n" +
       "   （预估 3640 vs 实际 230，偏差 1482%；对 billed 比是 0.14%）。\n" +
       "   而 `countTokensExcludesReasoning: false` 的 profile 走 FAIL_FAST 分支 ——\n" +
       "   那是一颗雷，不只是噪声。\n",

@@ -247,7 +247,7 @@ export class CommonToolHandler implements ToolHandlerPort {
             /**
              * 【定】透传，不给默认值。
              *
-             * 默认值住在工具里（`renderText`），不住在这里 —— 摸底考试的
+             * 默认值住在工具里（`renderText`），不住在这里 —— 办公任务实跑的
              * A 组修的正是「handler 只转发了三个参数，第四个被静默丢掉」
              * 那一类：参数在 schema 里、在工具里都有，就是不过这一跳。
              */
@@ -284,7 +284,7 @@ export class CommonToolHandler implements ToolHandlerPort {
              *
              * 它们在 schema 里、在工具里都有，**只差这一跳**就整个失效 ——
              * 而失效的样子是「模型声明了交付物，产物表照样空的，
-             * 没有任何报错」。摸底考试 A 组修的 `read_blob.line_offset`
+             * 没有任何报错」。办公任务实跑 A 组修的 `read_blob.line_offset`
              * 就是同一处、同一个形态：handler 只转发了一部分参数。
              */
             ...(input["artifact_path"] === undefined
@@ -325,7 +325,7 @@ export class CommonToolHandler implements ToolHandlerPort {
              * 完全失效，而单行正是被外置的主导形态（工具结果几乎都是一行 JSON，
              * `totalLines: 1`，只能按字符续页）。
              *
-             * 这一行不是补全，是修一个真实事故：2026-08-28 摸底考试题 1 三次全灭
+             * 这一行不是补全，是修一个真实事故：2026-08-28 办公任务实跑的题 1 三次全灭
              * 就死在这里 —— 模型按 description 教的把 `nextLineOffset` 传回来，
              * 每次都拿到**逐字节相同的第 1 页**，还被告知「还有下一页」。
              * 53,000 字符的流水它永远只看得到前 12,000 个。

@@ -2,9 +2,9 @@
 
 ## Project Identity & Sources of Truth
 
-**Project Atlas** is this Work Agent project's communication codename only; do not rename existing `workagent` / `@workagent/*` code, paths, packages, modules, or types. Build this learning-first Agent Harness to turn user goals into observable, recoverable, verified outcomes—not to clone an office suite or maximize features. Use `方案讨论/WorkAgent目标定位与技术架构三次对焦讨论进展.md` for goals, `架构设计/WorkAgent架构设计_V20260823_05.md` for implementation semantics, and the Roadmap for sequencing.
+**Project Atlas** is this Work Agent project's communication codename only; do not rename existing `workagent` / `@workagent/*` code, paths, packages, modules, or types. Build this learning-first Agent Harness to turn user goals into observable, recoverable, verified outcomes—not to clone an office suite or maximize features. Current behavior is defined by the checked-in code, `README.md`, and executable verification. The [former goal baseline](sxw_aicoding/方案讨论/历史归档/WorkAgent目标定位与技术架构三次对焦讨论进展.md) and [V05 architecture](sxw_aicoding/架构设计/历史归档/WorkAgent架构设计_V20260823_05.md) remain only as historical design context; do not treat deleted Roadmap or implementation-plan files as current sources of truth.
 
-## Project Structure & Roadmap
+## Project Structure & Current Scope
 
 This npm-workspaces TypeScript ESM monorepo implements Layer 3 in `packages/harness-runtime/`; fakes live in `packages/testkit/`, SQLite storage in `packages/store-sqlite/`. Provider shapes belong in `adapters/shape-anthropic-messages/`, endpoint behavior in `adapters/endpoint-profiles/`, **Case-agnostic general tools in `tools/common/` (`@workagent/tools-common`)**, and the generic external MCP client in `tools/mcp/` (`@workagent/tools-mcp`). Measurement-only tools stay in `cases/micro-cases/`. `apps/cli/` is the single Composition Root plus CLI and verification; `apps/workagent-service/` is Layer 2, and `apps/workagent-ui/public/` is the build-free Layer 1 UI. `spikes/` is excluded; `sxw_aicoding/` holds design evidence. Stages 1–3.5 are complete; Stage 4 currently includes the white-box UI, workspace switching, external MCP/browser capability, orthogonal approval/execution modes, and configurable per-Run budgets. Case 02 counterexample work is still pending.
 
@@ -25,14 +25,14 @@ External MCP is intentionally generic: no production code recognizes Playwright 
 
 ## Coding Style & Naming Conventions
 
-Use two-space indentation, double quotes, semicolons, trailing commas, and `.js` suffixes in relative ESM imports. Prefer `PascalCase` for types/classes, `camelCase` for values/functions, and kebab-case filenames. Preserve the dependency direction: apps → packages/adapters/cases and runtime → ports → adapters. Runtime must not import provider SDKs or case packages. Comments should explain rationale and failure modes in Chinese with V05 or evidence references. No formatter/linter is configured; match nearby code.
+Use two-space indentation, double quotes, semicolons, trailing commas, and `.js` suffixes in relative ESM imports. Prefer `PascalCase` for types/classes, `camelCase` for values/functions, and kebab-case filenames. Preserve the dependency direction: apps → packages/adapters/cases and runtime → ports → adapters. Runtime must not import provider SDKs or case packages. Comments should explain rationale and failure modes in Chinese and prefer executable evidence; V05/ADR references are historical context, not current authority. No formatter/linter is configured; match nearby code.
 
 ## Testing Guidelines
 
 D-25 specifies no unit-test framework or coverage target. The current suite has 16 acceptance scripts. Scripts in `apps/cli/src/verify/` must print readable evidence through `verify/harness.ts`, not only return a green assertion. Name scripts for the invariant and register them in root `package.json`. Before submitting, run `typecheck`, relevant `verify:*` scripts, and the boundary greps — run them via `npm run verify:tools` (section A), not by hand: the checker filters comment lines, because these files quote the boundary rules themselves everywhere, so copying the raw grep commands gives false reds.
 
-Every new assertion must have discriminating power: state which single line, if broken, would turn it red, and actually run that experiment once. A green assertion that cannot fail is decoration, not a criterion — the 2026-08-28 closeout batch found four of them among 84 supposedly-green checks (see stale-issue list §0.7). Verification requires a configured root `.env`, even with fake ports. Never commit `.env`, credentials, `.workagent-workspace/`, `.workagent/model-invocations/`, or other sensitive provider traces.
+Every new assertion must have discriminating power: state which single line, if broken, would turn it red, and actually run that experiment once. A green assertion that cannot fail is decoration, not a criterion — the 2026-08-28 closeout batch found four of them among 84 supposedly-green checks. Verification requires a configured root `.env`, even with fake ports. Never commit `.env`, credentials, `.workagent-workspace/`, `.workagent/model-invocations/`, or other sensitive provider traces.
 
 ## Commit & Pull Request Guidelines
 
-Recent history uses short Chinese summaries rather than Conventional Commit prefixes. Keep commits cohesive, for example `修复 resume 预算继承`. Pull requests should state the research question or bug, cite the governing V05 section or ADR, list affected boundaries, commands, results, and limitations, and attach CLI evidence for behavioral changes.
+Recent history uses short Chinese summaries rather than Conventional Commit prefixes. Keep commits cohesive, for example `修复 resume 预算继承`. Pull requests should state the research question or bug, cite the current invariant and executable evidence (plus historical V05/ADR context when useful), list affected boundaries, commands, results, and limitations, and attach CLI evidence for behavioral changes.

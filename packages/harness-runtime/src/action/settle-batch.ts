@@ -1032,7 +1032,7 @@ async function materialize(
        * 它此前固定写「按行取回，分页语义与 read_file 一致」，而同一个 stub
        * 报的是 `totalLines: 1` —— 被外置的东西几乎都是一整行 JSON，
        * 「按行翻」在它上面只有一页。照这条提示做的模型会翻一次就以为到头了，
-       * 或者反复用 start_line 试探。2026-08-28 摸底考试的轨迹里两种都出现过。
+       * 或者反复用 start_line 试探。2026-08-28 办公任务实跑的轨迹里两种都出现过。
        *
        * 它与 `CommonToolHandler` 的 `line_offset` 透传是同一个 bug 的两半：
        * 只修透传不修提示，模型仍然不知道该传什么；只修提示不修透传，
@@ -1143,7 +1143,7 @@ function recordUnmetRequired(
 }
 
 /**
- * Port 调用的异常收敛（存量清单 R-4）。
+ * Port 调用的异常收敛。
  *
  * ══════════════════════════════════════════════════════════════════════
  * 在此之前只有 `tools.execute()` 有 try/catch。`effects.resolve()`、

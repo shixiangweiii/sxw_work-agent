@@ -79,7 +79,7 @@ class AnthropicMessagesProtocol implements ModelProtocolPort {
      * 「每轮都在变」把「尾部在增长」和「中间被改写」当成了同一件事，
      * 而前缀缓存要的恰恰只是前者。
      *
-     * 2026-08-28 摸底考试给了量化代价：`cacheReadInputTokens` 在**每个 run 的
+     * 2026-08-28 办公任务实跑给了量化代价：`cacheReadInputTokens` 在**每个 run 的
      * 每一次调用**上恒为 3405（就是 tools＋system 这一段），
      * `cacheCreationInputTokens` 恒为 0，而 `inputTokens` 从 230 涨到 71,334 ——
      * **对话部分一次都没进过缓存**。题 1 单次 run 累计 billed 420,784，

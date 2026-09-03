@@ -580,7 +580,7 @@ async function main(): Promise<void> {
   /**
    * B8 description 必须点名 `$TMPDIR`。
    *
-   * 【定】这不是「description 里必须出现某个词」那类装饰判据（摸底考试 B 组
+   * 【定】这不是「description 里必须出现某个词」那类装饰判据（办公任务实跑 B 组
    * 明确拒绝过的那种）。区别在于它钉的**不是引导措辞，是一个事实**：
    * per-call 临时目录的路径**只**经由 `$TMPDIR` 暴露，模型没有第二种办法
    * 知道它在哪。这个词从 description 里消失，`run_shell` 的临时目录能力
@@ -963,6 +963,12 @@ async function main(): Promise<void> {
   const argCases: Array<{ argv: string[]; label: string; expected: string }> = [
     { argv: ["--list-runs", "--approval"], label: "--approval 是最后一项", expected: "需要一个值" },
     { argv: ["--list-runs", "--sandbox"], label: "--sandbox 是最后一项", expected: "需要一个值" },
+    { argv: ["--trace"], label: "--trace 是最后一项", expected: "需要一个值" },
+    {
+      argv: ["--trace", "--approval", "auto"],
+      label: "--trace 后面紧跟另一个 flag",
+      expected: "后面紧跟着 --approval",
+    },
     { argv: ["--list-runs", "--task", "x"], label: "list 模式带 --task", expected: "list 模式不接受" },
     { argv: ["--list-runs", "--trace", "auto"], label: "list 模式带 --trace", expected: "list 模式不接受" },
     {
@@ -1098,7 +1104,7 @@ async function main(): Promise<void> {
    * 第二次（2026-08-30 评审 F2 抓到）：改成了
    * `const overhead = names.length * 180; ... overhead === names.length * 180`
    * —— **恒真式**。没有任何代码改动能让它翻红。而这个「修复」还被当成教训
-   * 记进了实施记录 §十一。**一个不可能失败的绿勾是装饰，不是判据**，
+   * 记进了当时的复盘。**一个不可能失败的绿勾是装饰，不是判据**，
    * 而记在教训里的装饰会被抄到第二处去。
    *
    * 现在断言的是两个**独立来源**：Runtime 侧 `ToolRegistry` 真算出来的读数，

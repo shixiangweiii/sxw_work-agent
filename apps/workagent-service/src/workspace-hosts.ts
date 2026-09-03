@@ -48,7 +48,7 @@ export interface WorkspaceHostsOptions {
   executionPrivilege?: RunHostOptions["executionPrivilege"];
   composeOverrides?: RunHostOptions["composeOverrides"];
   /**
-   * 首次启动时用命令行参数登记的那一个 workspace。
+   * 本次启动已经选定的 workspace（显式参数 > 注册表 active > 默认目录）。
    *
    * 【定】只给路径，**存储位置一律由注册表按同一套规则推**
    * （`<workspace>/.workagent/`）。此前它还带着 CLI 传进来的

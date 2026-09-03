@@ -1184,7 +1184,7 @@ function renderModelAuditPanel(panel, call, entry) {
   if (data.state === "NOT_CAPTURED") {
     panel.appendChild(el("p", {
       class: "muted",
-      text: "没有审计文件：可能是旧 Run、未采集，或本次调用在打开审计文件时失败。",
+      text: "没有审计文件：本次调用未采集，或打开审计文件失败。",
     }));
     return;
   }

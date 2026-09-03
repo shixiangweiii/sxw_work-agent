@@ -1,6 +1,6 @@
 {
   "_comment_purpose": "§24.6【定】阶段 2 的对照端点。选它的理由和选百炼当主力端点的理由是同一条的反面：百炼零协议兜底（缺 tool_result、错 id 一律 200 放行），用它开发能逼出自持逻辑的全部漏洞；DeepSeek 会真的校验，所以把 Runtime 产出的请求打到它上面，是一次**免费的正确性检查**。发现系统性缺陷 = 阶段 1「批内配对不变量 100% 由 Runtime 自持」这个结论有反例。",
-  "_comment_evidence": "全部字段出自 Spike 0 第三轮实测（ProviderProtocolFacts_V20260823_R3.md），四个端点、同一个模型 ID、同一套探针。没有一条是推测的；推测的字段一律不写，让 confidence 说话。",
+  "_comment_evidence": "全部字段出自 sourceEvidenceRefs 指向的 Spike 0 第三轮 raw 记录。没有一条是推测的；推测的字段一律不写，让 confidence 说话。",
 
   "id": "epcp_deepseek_anthropic_v4flash",
   "endpointId": "ep_deepseek_anthropic",
@@ -47,8 +47,7 @@
   "observedAt": 1787000000000,
   "probeSuiteVersion": "s0-r3",
   "sourceEvidenceRefs": [
-    "spikes/s0-provider-protocol/raw/p9-deepseek-anthropic-shape-2026-08-23T02-45-36-431Z.jsonl",
-    "sxw_aicoding/WorkAgent调研/ProviderProtocolFacts_V20260823_R3.md"
+    "spikes/s0-provider-protocol/raw/p*-deepseek-anthropic-shape-*.jsonl"
   ],
   "_comment_confidence": "PROBED：协议、上下文、token 三组的每个已写字段都能追溯到第三轮的一次具体探针。未测的字段没有写 —— 那是 confidence 之外的第二道纪律。",
   "confidence": "PROBED"

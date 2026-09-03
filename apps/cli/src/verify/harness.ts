@@ -42,7 +42,7 @@ export function fact(label: string, value: unknown): void {
  * 【定】退出码只能由这个登记表推出，**不得手写布尔表达式**。
  *
  * 理由是实测，不是洁癖：`verify:resume` 的 C 段判据（「恢复产物与基线逐字一致」）
- * 算出来了、打印了、还被实施记录列为阶段 2 最有价值的发现之一 ——
+ * 算出来了、打印了、还被当时的复盘列为最有价值的发现之一 ——
  * 却漏在 `process.exit(...)` 的合取式外面。那条判据在 `verify:all` 的 `&&` 链
  * 语义里只读不判：恢复写坏产物、丢掉基线做过的调用，退出码照样是 0。
  * 同一批还查出 persistence 的 F 段（批 1 期间的「已知红」豁免）在转绿之后
@@ -140,7 +140,7 @@ export class ScriptedModelPort implements ModelPort {
   /**
    * countTokens 默认返回写死的 100。
    *
-   * 这个默认值本身就是存量清单 §4 第 3 条说的那个覆盖缺口：token 与预算路径
+   * 这个默认值本身会制造覆盖缺口：token 与预算路径
    * 在脚本化模型下**永远是常量**，所以 usage 清零、预算轴、口径错配这类问题
    * 能同时存在而三条脚本全绿。
    *
@@ -157,8 +157,8 @@ export class ScriptedModelPort implements ModelPort {
      */
     startTurn = 0,
     /**
-     * 每轮的 usage。默认写死 input 100 / output 20 —— **那正是存量清单
-     * §4 第 3 条说的覆盖缺口**：token 与预算路径在脚本化模型下永远是常量，
+     * 每轮的 usage。默认写死 input 100 / output 20 会制造覆盖缺口：
+     * token 与预算路径在脚本化模型下永远是常量，
      * 所以 usage 清零、预算轴、口径错配这类问题能同时存在而脚本全绿。
      * `verify:budget` 传真实数值让 token 轴能被撞到。
      */
@@ -241,7 +241,7 @@ function defaultUsage(): ModelUsage {
  *
  * 后果不是「少测了一个字段」：任何「该读 billed 却读了 input」的代码，
  * 在这套夹具下都测不出来，因为两个值恒等。主循环的漂移观测点就是这么
- * 带着 `usage.inputTokens` 绿了一个阶段，直到 2026-08-28 摸底考试在
+ * 带着 `usage.inputTokens` 绿了一个阶段，直到 2026-08-28 办公任务实跑在
  * 14/14 个真实 run 上打出 1482% 的假漂移才被发现（对 billed 比是 0.14%）。
  *
  * 所以凡是要验「读的是哪个 token 口径」的判据，都必须传一个非零 `cacheRead`

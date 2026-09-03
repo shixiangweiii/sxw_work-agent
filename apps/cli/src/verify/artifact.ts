@@ -113,7 +113,7 @@ function lastToolResult(request: ModelRequest): Record<string, unknown> | undefi
  * ref 带随机后缀、续页偏移要从上一页的 `nextLineOffset` 里读 —— 两者都只有
  * 跑起来才知道。写死脚本就只能绕过工具层直接调 `ports.blobs.get()`，
  * 而 **那一跳恰恰是出过事的地方**：`line_offset` 在 `CommonToolHandler` 里
- * 被丢掉，`read_blob` 对单行 blob 完全失效，2026-08-28 摸底考试题 1 因此
+ * 被丢掉，`read_blob` 对单行 blob 完全失效，2026-08-28 办公任务实跑的题 1 因此
  * 3/3 全灭 —— 而这一段当时是**绿的**，因为它测的是 bug 下面那一层。
  *
  * 段标题写着「read_blob 逐字取回」，断言打的却是 Port。抬头与断言不符，

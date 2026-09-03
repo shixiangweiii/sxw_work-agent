@@ -8,6 +8,7 @@
  * 机械闸门里的前两道（第三道是 S13 的跨场景 smoke，它在批 4）：
  *
  *   A 段  中央边界表 grep —— 通用工具不得依赖任何 Case 包
+ *   A3 段 现行协作文档里的本地链接不得指向已删除文件
  *   B 段  两类声明     —— 场景工具写三场景用例，机制工具写它服务哪条机制
  *
  * 其余各段验的是「工具本身的形态约束」：
@@ -25,7 +26,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   CollectingTraceSink,
@@ -41,6 +42,31 @@ import { BOUNDARIES, grepBoundary } from "./boundaries.js";
 import { ScriptedModelPort, banner, fact, runVerify, section, tempWorkspace, verdict } from "./harness.js";
 
 const WORKER = resolve(fileURLToPath(new URL(".", import.meta.url)), "workers/run-segment.ts");
+const CURRENT_GUIDES = ["AGENTS.md", "CLAUDE.md", "README.md"];
+
+interface BrokenDocLink {
+  file: string;
+  line: number;
+  target: string;
+}
+
+/** 扫现行协作文档中的本地 Markdown 链接；网络链接和页内锚点不属于文件存在性。 */
+function brokenLocalMarkdownLinks(file: string, source: string): BrokenDocLink[] {
+  const out: BrokenDocLink[] = [];
+  for (const match of source.matchAll(/\[[^\]]*\]\(([^)]+)\)/g)) {
+    let target = match[1]!.trim().replace(/^<|>$/g, "");
+    if (/^(?:https?:|mailto:|#)/.test(target)) continue;
+    target = decodeURIComponent(target.split("#", 1)[0]!);
+    const absolute = resolve(dirname(join(REPO_ROOT, file)), target);
+    if (existsSync(absolute)) continue;
+    out.push({
+      file,
+      line: source.slice(0, match.index).split("\n").length,
+      target,
+    });
+  }
+  return out;
+}
 
 // ══════════════════════════════════════════════════════ 边界 grep
 
@@ -280,6 +306,28 @@ async function main(): Promise<void> {
       : `边界判别力失败：抓到=${canaryCaught} 清理=${canaryCleaned}`,
   );
 
+  section("A3. 现行协作文档不引用已删除文件");
+  const brokenGuideLinks = CURRENT_GUIDES.flatMap((file) =>
+    brokenLocalMarkdownLinks(file, readFileSync(join(REPO_ROOT, file), "utf8")),
+  );
+  const brokenLinkCanary = brokenLocalMarkdownLinks(
+    "README.md",
+    "[断链探针](sxw_aicoding/__definitely_missing_doc__.md)",
+  );
+  fact("检查的现行协作文档", CURRENT_GUIDES.join("、"));
+  fact(
+    "断链",
+    brokenGuideLinks.map((link) => `${link.file}:${link.line} → ${link.target}`).join("；") || "（无）",
+  );
+  verdict(
+    brokenGuideLinks.length === 0 && brokenLinkCanary.length === 1,
+    brokenGuideLinks.length === 0 && brokenLinkCanary.length === 1
+      ? "现行文档的本地链接全部存在，且虚构一个已删除目标会让检查翻红"
+      : brokenGuideLinks.length > 0
+        ? "现行文档仍有链接指向不存在的文件"
+        : "断链探针没有被识别，检查器没有判别力",
+  );
+
   // ── B. 两类声明
   section("B. 工具声明扫描（决 2 的两类标准）");
   const decls = scanDeclarations();
@@ -335,7 +383,7 @@ async function main(): Promise<void> {
       "   B2 当初抓到两个真案例（read_file / search 的 HEARTBEAT 死声明），\n" +
       "   但它只查了**一种**声明；`read_blob.line_offset` 是同一个形态的第三例，\n" +
       "   而它躲过了整整一个阶段的 86 条判据。\n\n" +
-      "   代价是 2026-08-28 摸底考试题 1 的 3/3 全灭：模型照 description 教的\n" +
+      "   代价是 2026-08-28 办公任务实跑的题 1 的 3/3 全灭：模型照 description 教的\n" +
       "   把 nextLineOffset 传回来，每次都拿到逐字节相同的第 1 页 ——\n" +
       "   53,000 字符的流水它永远只看得到前 12,000 个。\n",
   );

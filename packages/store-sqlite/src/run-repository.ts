@@ -101,8 +101,8 @@ export class SqliteRunStore implements RunStorePort {
      * 恰恰是没被冻住的那份：谁在恢复过程中改了 `toolSnapshots` 或某条 policy，
      * 不会有任何报错，而 §18.2 的三条分支判定读的正是 `toolSnapshots`。
      *
-     * 二次评审（2026-08-27，P3-2）发现。阶段 2 的实施记录曾把 M-4 记为已落地，
-     * 那个结论只对 `start()` 成立。
+     * 二次评审（2026-08-27，P3-2）发现：M-4 当时只在 `start()` 落地，
+     * resume 仍会漏掉这份快照。
      */
     return freezeRunSpec({ ...rest, agentSpec });
   }

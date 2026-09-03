@@ -14,8 +14,8 @@
  */
 
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { basename, dirname, resolve } from "node:path";
 import {
   CollectingTraceSink,
   loadProfileFromFile,
@@ -38,6 +38,24 @@ const LOOP_FILES = [
   "packages/harness-runtime/src/context/compile.ts",
   "packages/harness-runtime/src/action/settle-batch.ts",
 ];
+
+/**
+ * `sourceEvidenceRefs` 允许和现有 profile 一样在文件名里使用 `*`，并允许
+ * 在源码路径后附 `@YYYY-MM-DD` 表示观测日期。目录本身不做递归 glob；当前
+ * 声明的通配符都只覆盖同一个 raw 目录里的多次探针。
+ */
+function evidenceRefExists(ref: string): boolean {
+  const pathRef = ref.replace(/@\d{4}-\d{2}-\d{2}$/, "");
+  if (!pathRef.includes("*")) return existsSync(resolve(REPO_ROOT, pathRef));
+  const parent = resolve(REPO_ROOT, dirname(pathRef));
+  if (!existsSync(parent)) return false;
+  const pattern = new RegExp(
+    `^${basename(pathRef)
+      .replace(/[.+?^${}()|[\]\\]/g, "\\$&")
+      .replaceAll("*", ".*")}$`,
+  );
+  return readdirSync(parent).some((name) => pattern.test(name));
+}
 
 async function main(): Promise<void> {
   banner(
@@ -166,6 +184,24 @@ async function main(): Promise<void> {
     limitWs.cleanup();
   }
 
+  section("B3. 机器可读证据引用仍然落在仓内真实文件上");
+  const evidenceRefs = [
+    ...real.sourceEvidenceRefs.map((ref) => ({ profile: "bailian", ref })),
+    ...deepseek.sourceEvidenceRefs.map((ref) => ({ profile: "deepseek", ref })),
+  ];
+  const missingEvidenceRefs = evidenceRefs.filter(({ ref }) => !evidenceRefExists(ref));
+  fact("检查的 sourceEvidenceRefs", evidenceRefs.length);
+  fact(
+    "不存在的引用",
+    missingEvidenceRefs.map(({ profile, ref }) => `${profile}:${ref}`).join("；") || "（无）",
+  );
+  verdict(
+    evidenceRefs.length > 0 && missingEvidenceRefs.length === 0,
+    missingEvidenceRefs.length === 0
+      ? "端点声明只引用仍存在的源码或 raw 探针；删除阶段性汇总不会留下机器断链"
+      : "端点声明仍指向已删除的证据文件",
+  );
+
   // ── C. validateFrame 的严格度必须随声明改变
   section("C. 「含 tool_call 但缺推理块」的帧，两个端点下的校验结果");
 
@@ -206,7 +242,7 @@ async function main(): Promise<void> {
       "   每轮都在变，打在那里没有意义」。这条推理在 STRICT_PREFIX 下不成立 ——\n" +
       "   transcript 是**只追加**的，第 N 轮的 messages 是第 N+1 轮的严格前缀。\n" +
       "   「每轮都在变」把「尾部在增长」和「中间被改写」当成了同一件事。\n\n" +
-      "   代价是实测的：2026-08-28 摸底考试里 `cacheReadInputTokens` 在每个 run 的\n" +
+      "   代价是实测的：2026-08-28 办公任务实跑里 `cacheReadInputTokens` 在每个 run 的\n" +
       "   每一次调用上**恒为 3405**（就是 tools＋system 那一段），\n" +
       "   `cacheCreationInputTokens` 恒为 0，而 inputTokens 从 230 涨到 71,334 ——\n" +
       "   对话部分一次都没进过缓存，同一份内容被全价重计了约 5.6 倍。\n",

@@ -45,7 +45,7 @@ export const DEFAULT_CONTEXT_POLICY: ContextBudgetPolicy = {
  * `checkBudgets`；两条 token 轴也已有生产默认值。`maxTotalWallClockMs`
  * 仍刻意不设默认值，因为它跨关机累计，隔夜 resume 不应立刻撞墙。
  *
- * 代价是实测的：2026-08-28 摸底考试题 1 单次 run 烧掉 420,784 billed input token
+ * 代价是实测的：2026-08-28 办公任务实跑的题 1 单次 run 烧掉 420,784 billed input token
  * 与 46,563 output token，八条轴一条都没拦。
  *
  * 【定】`handoffReserveTokens` 已删。它是同一批里**唯一没被补上读取点**的那条，
@@ -192,7 +192,7 @@ export interface BudgetAxisReading {
  *
  * 「哪条轴读哪个字段、配哪个限额」是 Runtime 知识：`billedInputTokens`
  * 含缓存读写两项，只读 `inputTokens` 在命中时低估达 85%
- * （摸底考试 14/14 个 run 因此打出 1482% 假漂移）。
+ * （办公任务实跑 14/14 个 run 因此打出 1482% 假漂移）。
  *
  * 【定】所以提出来的是**读数**，不是判定：`checkBudgets` 仍然是唯一的判官，
  * Layer 2 拿到的是它用的同一张表。§5.2「合法状态迁移不由 UI 拥有」不因此松动。

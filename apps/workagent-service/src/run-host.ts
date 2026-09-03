@@ -1220,7 +1220,7 @@ export class RunHost {
    *   · `loadTraceOutcome` 读的是 footer → 服务重启后 outcome / summary /
    *     未完成项在界面上全部蒸发（盘上 status 还是 COMPLETED）；
    *   · Trace 视图「段 N ＋ commit ＋ gitDirty」对 Web 段永远缺失 ——
-   *     而 Roadmap §6.1 声明的正是「Trace 按段分组，每段带 commit / gitDirty」。
+   *     而现行 Trace 契约要求「按段分组，每段带 commit / gitDirty」。
    *
    * 用同一个 sink 就顺带拿到了 segmentIndex 的计数（它数已有 header 行），
    * 于是「CLI 跑一段 → 界面 resume 一段」在同一个文件里真的接上了，

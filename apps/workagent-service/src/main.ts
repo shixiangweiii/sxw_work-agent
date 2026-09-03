@@ -27,6 +27,7 @@ import { startService } from "./server.js";
 import { selectStartupWorkspace } from "./workspace-registry.js";
 
 function arg(argv: string[], name: string): string | undefined {
+  // 只在 `assertKnownArgs(argv)` 成功后调用；届时下一项已确认存在且不是另一个 flag。
   const i = argv.indexOf(`--${name}`);
   return i >= 0 ? argv[i + 1] : undefined;
 }

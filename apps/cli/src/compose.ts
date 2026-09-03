@@ -224,7 +224,7 @@ export function parseEndpointArg(argv: string[]): EndpointChoice {
 /**
  * 默认端点 = 百炼 Anthropic 形状（D-16）。
  *
- * `requireCredentials = false` 时缺凭证不抛（存量清单 §4 第 5 条）。
+ * `requireCredentials = false` 时缺凭证不抛，供脚本化模型的验收装配使用。
  *
  * 为什么这样改而不是「延后到真正要发请求时」：凭证断言其实有**两层**，
  * `assertCredentialGoesWhereIntended()` 在 client 构造时还会再挡一次。
@@ -603,7 +603,7 @@ export interface GitProvenance {
  *
  * 【定】它同样是两个入口共用的：阶段 4 之前只有 CLI 写 trace header，
  * 于是 Web 入口跑出来的段在 Trace 视图里没有 commit / gitDirty ——
- * Roadmap 声明的「Trace 按段带 commit + gitDirty」对 Web 段不成立。
+ * 现行 Trace 契约要求的「按段带 commit + gitDirty」对 Web 段不成立。
  */
 export function gitProvenance(): GitProvenance {
   const run = (args: string[]): string | undefined => {
@@ -678,7 +678,7 @@ export interface ComposeOptions {
   /**
    * 覆盖上下文预算策略。verify:compact 用它把阈值调到几百 token ——
    * 默认的 60k/100k 在脚本化模型下永远撞不到，Compact 就永远测不着
-   * （这正是 roadmap 里「Compact 写了但没被真跑过」的直接成因）。
+   * （这正是 Compact 曾经「写了但没被真跑过」的直接成因）。
    */
   contextPolicy?: typeof DEFAULT_CONTEXT_POLICY;
   /**
@@ -1254,7 +1254,7 @@ export const DEFAULT_SYSTEM_PROMPT = [
   /**
    * 【定】这一条必须带下面那条限定，不能单独存在。
    *
-   * 2026-08-28 摸底考试题 3 三次全灭，直接成因就是这句话：模型判断出
+   * 2026-08-28 办公任务实跑的题 3 三次全灭，直接成因就是这句话：模型判断出
    * 「合同编号要人去审批系统查」之后，写了占位符草稿、在总结里如实说明了
    * 「有一件事我做不了」，然后停止调用工具 —— **它是在照做这一条**，
    * 连「有哪些没做到」都照做了。Runtime 于是按「不再请求工具即完成」结算 SUCCESS。

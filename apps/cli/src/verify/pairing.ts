@@ -106,7 +106,7 @@ interface Scenario {
   /** 审批器本身抛异常（ApprovalDecider 不是 Port，但同属 R-4 的四个调用点）。 */
   throwingApproval?: boolean;
   /**
-   * 真正的「工具执行到一半被 cancel」注入（存量清单 §4 第 1 条）。
+   * 真正的「工具执行到一半被 cancel」注入。
    *
    * 阶段 1 用「第二个 Action 被审批拒绝」代偿了 §9.2 的第二条中断路径，
    * 脚本抬头也写明了不覆盖。那个代偿测的是**审批闸门**，不是**执行中取消** ——
@@ -135,7 +135,7 @@ const CALLS_3 = [
 
 const scenarios: Scenario[] = [
   {
-    name: "中断路径 B：工具执行中被 cancel（存量清单 §4 第 1 条）",
+    name: "中断路径 B：工具执行中被 cancel",
     path: "第 2 个 call 是一个慢写；执行到一半 cancel() → 它与第 3 个都必须有合法 result",
     build: () =>
       new ScriptedModelPort([
@@ -461,7 +461,7 @@ async function main(): Promise<void> {
     }
   }
 
-  // ── orphan result 的反向注入（存量清单 §4 第 4 条）
+  // ── orphan result 的反向注入
   section("反向注入：让 findOrphanResults() 返回非空");
   console.log(
     "   前面所有场景都断言它 == 0。但一个**永远返回空数组**的检查器与\n" +

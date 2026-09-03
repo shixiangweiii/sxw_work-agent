@@ -87,6 +87,7 @@ export interface UiAssistantMessage extends UiEntryBase {
  */
 export interface UiToolActivity extends UiEntryBase {
   kind: "TOOL_ACTIVITY";
+  /** 刻意透传的关联键；内置 UI 暂不单独展示，外部白盒消费者可据此对齐原始调用。 */
   toolCallId: string;
   toolName: string;
   /** 规范化前的模型原始入参。来自 transcript 的 tool_call 块。 */
@@ -127,6 +128,7 @@ export interface UiToolActivity extends UiEntryBase {
 
 export interface UiApproval extends UiEntryBase {
   kind: "APPROVAL";
+  /** 刻意透传的关联键；内置 UI 暂不单独展示，不能据零 DOM 读取点删掉。 */
   actionId: string;
   effect: string;
   reason: string;
@@ -485,6 +487,10 @@ export interface UiRunDetail {
      * 每个执行段实际由哪个入口运行；只有首段必然与这里对应。
      */
     origin: string;
+    /**
+     * 以下端点、时区与审批策略字段刻意保留为冻结 RunSpec 的全量白盒契约。
+     * 内置 UI 暂未逐项展示，但 API 使用者可用它们解释或比对一次历史执行。
+     */
     endpointId: string;
     modelId: string;
     endpointProfileRef: string;
@@ -501,7 +507,11 @@ export interface UiRunDetail {
     createdAt: number;
     /** 冻结的 system prompt。白盒的一部分：模型到底被告知了什么。 */
     systemPrompt: string;
-    approvalPolicy: { requiresApprovalFor: string[]; approvalTimeoutMs?: number };
+    approvalPolicy: {
+      requiresApprovalFor: string[];
+      /** 冻结策略的全量字段；内置 UI 暂不显示超时时间。 */
+      approvalTimeoutMs?: number;
+    };
   };
   timeline: UiTranscriptEntry[];
   turns: UiTurn[];

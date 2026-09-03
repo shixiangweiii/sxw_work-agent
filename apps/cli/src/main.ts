@@ -232,6 +232,8 @@ function assertModeArgs(argv: string[], mode: Mode): void {
 
 function parseArgs(argv: string[]): Args {
   assertKnownArgs(argv);
+  // 安全前置由上一行保证：每个带值参数的下一项都存在且不是另一个 `--flag`。
+  // `get()` 不单独承担校验，避免两处规则分叉。
   const get = (name: string): string | undefined => {
     const i = argv.indexOf(`--${name}`);
     return i >= 0 ? argv[i + 1] : undefined;

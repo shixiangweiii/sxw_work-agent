@@ -235,7 +235,7 @@ async function call(
  * 第一次跑就是这样 —— 判据打了 200，而同一个服务用 curl 打 `Host: evil.example`
  * 是 403。**代码是对的，仪器是坏的。**
  *
- * 这正是摸底考试那条纪律的形态：**新增判据前先问「这条判据要区分的两个值，
+ * 这正是办公任务实跑那条纪律的形态：**新增判据前先问「这条判据要区分的两个值，
  * 在夹具里相等吗」**。这里比相等更糟 —— 夹具连那个错误的值都造不出来。
  * ══════════════════════════════════════════════════════════════════════
  */
@@ -1247,7 +1247,7 @@ async function main(): Promise<void> {
        * 而纯 Web 起跑、纯 Web 跑完的 Run **没有任何人写这两种行**。后果：
        * 服务重启后 outcome 蒸发（`loadTraceOutcome` 读的就是 footer），
        * Trace 视图的「段 N ＋ commit ＋ gitDirty」对 Web 段永远缺失 ——
-       * 而那正是 Roadmap §6.1 声明过的东西。
+       * 而现行 Trace 契约要求的正是这些字段。
        */
       const traceResponse = await call(svcG, `/api/runs/${gid}/trace`);
       const traceLines = traceResponse.body["lines"] as

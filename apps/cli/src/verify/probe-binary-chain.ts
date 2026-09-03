@@ -12,7 +12,7 @@
  * 能从工具结果落到 workspace 的 `images/` 里？这不评价 `run_shell` 联网下载
  * 等独立旁路，只检查 `fetch_url` 自己的返回链。
  *
- * 2026-08-30 的答案是**没有**，且原因是结构性的（存量清单 S3.5-8）：
+ * 2026-08-30 的答案是**没有**，且原因是结构性的：
  *   ① `BlobStorePort.put({ content: string })` 只吃文本，存不了字节；
  *   ② `ToolExecutionContext` 里没有 blob 句柄；
  *   ③ `ModelContent` 只有 text / reasoning / tool_call / tool_result 四种，
