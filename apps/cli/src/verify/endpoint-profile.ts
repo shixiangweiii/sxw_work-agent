@@ -29,7 +29,12 @@ import {
   readUsagePartial,
 } from "@workagent/shape-anthropic-messages";
 import { fakeProfile, strictFakeProfile } from "@workagent/testkit";
-import { DEFAULT_TOOLS, compose, REPO_ROOT } from "../compose.js";
+import {
+  DEFAULT_TOOLS,
+  compose,
+  REPO_ROOT,
+  readEndpointConfig,
+} from "../compose.js";
 import { ScriptedModelPort, banner, fact, runVerify, section, tempWorkspace, verdict } from "./harness.js";
 
 const LOOP_FILES = [
@@ -78,6 +83,34 @@ async function main(): Promise<void> {
   fact("虚拟端点 modelId", fake.modelId);
   fact("  validatesToolResultPairing", fake.protocol.validatesToolResultPairing);
   fact("  reasoningBlockRule", fake.context.reasoningBlockRule);
+
+  section("A2. .env modelId 选择同模型的独立声明");
+  const originalModel = process.env["dashscope_model"];
+  let qwen38Config: ReturnType<typeof readEndpointConfig>;
+  let qwen37Config: ReturnType<typeof readEndpointConfig>;
+  try {
+    process.env["dashscope_model"] = "qwen3.8-flash";
+    qwen38Config = readEndpointConfig(false, "bailian");
+    process.env["dashscope_model"] = "qwen3.7-plus";
+    qwen37Config = readEndpointConfig(false, "bailian");
+  } finally {
+    if (originalModel === undefined) delete process.env["dashscope_model"];
+    else process.env["dashscope_model"] = originalModel;
+  }
+  const qwen38 = loadProfileFromFile(qwen38Config.profilePath);
+  const qwen37 = loadProfileFromFile(qwen37Config.profilePath);
+  fact("qwen3.8-flash 声明", `${basename(qwen38Config.profilePath)} / ${qwen38.id}`);
+  fact("  modelId / confidence", `${qwen38.modelId} / ${qwen38.confidence}`);
+  fact("qwen3.7-plus 声明", `${basename(qwen37Config.profilePath)} / ${qwen37.id}`);
+  verdict(
+    qwen38Config.modelId === "qwen3.8-flash" &&
+      qwen38.modelId === qwen38Config.modelId &&
+      qwen38.confidence === "ASSUMED" &&
+      qwen38.id !== qwen37.id &&
+      qwen37Config.modelId === "qwen3.7-plus" &&
+      qwen37.modelId === qwen37Config.modelId,
+    "配置 qwen3.8-flash 会选中独立的 ASSUMED profile；不会覆盖或冒充 qwen3.7-plus 的 PROBED 声明",
+  );
 
   // ── B. protocolRoleOf 的判定必须随声明改变
   section("B. 同一个推理块，两个端点下的协议角色");

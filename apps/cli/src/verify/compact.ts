@@ -41,17 +41,18 @@ import {
   compactMessages,
   findOrphanResults,
   findUnpairedToolUses,
+  loadProfileFromFile,
   type ContextMessage,
   type TranscriptEntry,
 } from "@workagent/harness-runtime";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import {
   SqliteResourceStore,
   SqliteTranscriptStore,
   openDb,
 } from "@workagent/store-sqlite";
 import { listDirSnapshot } from "@workagent/tools-common";
-import { compose } from "../compose.js";
+import { compose, REPO_ROOT } from "../compose.js";
 import {
   ScriptedModelPort,
   banner,
@@ -96,6 +97,17 @@ const FIXTURE_TOOLS = [listDirSnapshot];
  * 夹具要验的是 Compact 的落地，不是「今天的 prompt 有多长」。
  */
 const FIXTURE_PROMPT = "你是一个测试用的执行体。按要求调用工具，完成后用一句话说明。";
+
+/**
+ * 【定】Compact 夹具固定使用它所引用过探针结论的 qwen3.7-plus 声明。
+ *
+ * 在 modelId 可以从 `.env` 选择独立 profile 之后，不显式固定会让这条 Runtime
+ * 验收随开发者当前使用的模型改变。它要测的是 Compact 回写，不是新模型尚未探明的
+ * token/cache 行为；这与上面的单工具、固定 prompt 是同一条夹具隔离纪律。
+ */
+const FIXTURE_PROFILE = loadProfileFromFile(
+  resolve(REPO_ROOT, "adapters/endpoint-profiles/bailian-anthropic.json"),
+);
 
 const POLICY = {
   ...DEFAULT_CONTEXT_POLICY,
@@ -160,6 +172,7 @@ async function main(): Promise<void> {
       approvalDecider: async () => ({ approved: true }),
       trace,
       modelPortOverride: model,
+      profileOverride: FIXTURE_PROFILE,
       contextPolicy: POLICY,
       tools: FIXTURE_TOOLS,
       systemPrompt: FIXTURE_PROMPT,

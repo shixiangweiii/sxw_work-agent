@@ -1,0 +1,47 @@
+{
+  "_comment_purpose": "qwen3.8-flash 在百炼 Anthropic 形状下的独立能力声明。模型可用性由使用者于 2026-09-03 确认；协议、上下文与 token 三组行为尚未跑完仓内 probe，因此不得冒充 qwen3.7-plus 的 PROBED 结论。",
+  "id": "epcp_bailian_anthropic_qwen38flash_assumed_v1",
+  "endpointId": "ep_bailian_anthropic",
+  "shape": "ANTHROPIC_MESSAGES",
+  "modelId": "qwen3.8-flash",
+  "_comment_expectedBaseUrlHost": "端点身份仍是百炼专属部署；compose 会在真实请求前校验 baseUrl，避免把凭证和这份声明发往其他端点。",
+  "expectedBaseUrlHost": "maas.aliyuncs.com",
+
+  "_comment_protocol": "保守假设端点不替 Harness 校验任何工具协议不变量。Runtime 无论这些值为何都会自持配对；若端点实际开始校验，DriftDetector 会在相关 Provider 错误上 fail fast。",
+  "protocol": {
+    "validatesToolResultPairing": false,
+    "validatesToolCallId": false,
+    "validatesToolResultOrder": false,
+    "validatesToolDefinitionSchema": false,
+    "validatesToolInputSchema": false,
+    "honorsDisableParallelToolCalls": false
+  },
+
+  "_comment_context": "DROPPABLE / 无服务端状态 / 显式 close 暂按同一百炼 Anthropic 形状的已知行为假设，以兼容可能不产出 thinking 的 flash 模型；缓存能力不作乐观假设，因此不发送显式 cache breakpoint。完整 probe 后必须用实测值替换并提升 confidence。",
+  "context": {
+    "reasoningBlockRule": "DROPPABLE",
+    "reasoningIsServerSideStateful": false,
+    "hasExplicitBlockCloseEvent": true,
+    "cacheMatching": "UNKNOWN",
+    "supportsExplicitCacheBreakpoints": false
+  },
+
+  "_comment_tokens": "不假设 qwen3.7-plus 的 count_tokens 精度、推理块口径或每请求底数。关闭远端 count_tokens 后，Context 层走本地估算；Provider usage 仍按 Anthropic 形状的缓存字段归一化。",
+  "tokens": {
+    "hasCountTokensEndpoint": false,
+    "perRequestBaseTokens": 0,
+    "billedInputFormula": "INPUT_PLUS_CACHE",
+    "usageFieldMap": {
+      "inputTokens": "input_tokens",
+      "outputTokens": "output_tokens",
+      "cacheCreationInputTokens": "cache_creation_input_tokens",
+      "cacheReadInputTokens": "cache_read_input_tokens"
+    }
+  },
+
+  "_comment_evidence": "sourceEvidenceRefs 刻意为空：qwen3.7-plus 的 raw probe 不能作为 qwen3.8-flash 的实测证据。ASSUMED 会在每次装配时产生 SYSTEM_NOTICE，使这笔证据债可见。",
+  "observedAt": 0,
+  "probeSuiteVersion": "unprobed-qwen38-v1",
+  "sourceEvidenceRefs": [],
+  "confidence": "ASSUMED"
+}

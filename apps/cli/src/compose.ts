@@ -184,6 +184,10 @@ export interface EndpointConfig {
   apiKey: string;
   modelId: string;
   profilePath: string;
+  /** 供错配诊断使用，避免 compose 再按 endpoint 名猜一次变量名。 */
+  modelEnvKey: string;
+  /** 当前端点已有独立能力声明的模型；未知模型仍由 M-5 在真实请求前挡下。 */
+  supportedModelIds: string[];
 }
 
 /**
@@ -194,6 +198,62 @@ export interface EndpointConfig {
  * 打到一个**真的会校验**的端点上，是一次免费的正确性检查。
  */
 export type EndpointChoice = "bailian" | "deepseek";
+
+interface EndpointSelectionSpec {
+  urlKey: string;
+  keyKey: string;
+  modelKey: string;
+  fallbackModel: string;
+  fallbackProfile: string;
+  /**
+   * 【定】modelId 只负责选择一份完整声明，不直接覆盖声明里的 modelId。
+   *
+   * 直接覆盖会把 A 模型的实测行为伪装成 B 模型的事实，破坏“端点 × 模型”
+   * 粒度以及 resume 的身份闸门。新增可选模型时必须先在 adapters 中放一份
+   * 独立声明，再在这张 Composition Root 的选择表里登记。
+   */
+  profileByModel: Readonly<Record<string, string>>;
+}
+
+const ENDPOINT_SELECTIONS: Readonly<Record<EndpointChoice, EndpointSelectionSpec>> = {
+  deepseek: {
+    urlKey: "deepseek_base_url_Anthropic",
+    keyKey: "deepseek_api_key",
+    modelKey: "deepseek_model",
+    fallbackModel: "deepseek-v4-flash",
+    fallbackProfile: "deepseek-anthropic.json",
+    profileByModel: {
+      "deepseek-v4-flash": "deepseek-anthropic.json",
+    },
+  },
+  bailian: {
+    urlKey: "dashscope_base_url_Anthropic",
+    keyKey: "dashscope_api_key",
+    modelKey: "dashscope_model",
+    fallbackModel: "qwen3.7-plus",
+    fallbackProfile: "bailian-anthropic.json",
+    profileByModel: {
+      "qwen3.7-plus": "bailian-anthropic.json",
+      "qwen3.8-flash": "bailian-anthropic-qwen38flash.json",
+    },
+  },
+};
+
+/**
+ * `.env` 的 modelId → 独立能力声明。
+ *
+ * 未登记值暂时回到默认声明，随后由 compose 的 M-5 一致性校验拒绝真实请求。
+ * 这样脚本化 ModelPort 的验收仍可装配并看到诊断，而生产路径绝不会静默使用
+ * 默认模型。这个回退只用于生成可解释错误，不是运行时降级。
+ */
+function resolveEndpointProfilePath(
+  choice: EndpointChoice,
+  modelId: string,
+): string {
+  const spec = ENDPOINT_SELECTIONS[choice];
+  const profile = spec.profileByModel[modelId] ?? spec.fallbackProfile;
+  return resolve(REPO_ROOT, "adapters/endpoint-profiles", profile);
+}
 
 /**
  * 从 argv 里解析 `--endpoint`，**受枚举约束**，拼错立刻失败。
@@ -236,22 +296,7 @@ export function readEndpointConfig(
   requireCredentials = true,
   choice: EndpointChoice = "bailian",
 ): EndpointConfig {
-  const spec =
-    choice === "deepseek"
-      ? {
-          urlKey: "deepseek_base_url_Anthropic",
-          keyKey: "deepseek_api_key",
-          modelKey: "deepseek_model",
-          fallbackModel: "deepseek-v4-flash",
-          profile: "deepseek-anthropic.json",
-        }
-      : {
-          urlKey: "dashscope_base_url_Anthropic",
-          keyKey: "dashscope_api_key",
-          modelKey: "dashscope_model",
-          fallbackModel: "qwen3.7-plus",
-          profile: "bailian-anthropic.json",
-        };
+  const spec = ENDPOINT_SELECTIONS[choice];
 
   const baseUrl = process.env[spec.urlKey] ?? "";
   const apiKey = process.env[spec.keyKey] ?? "";
@@ -268,7 +313,9 @@ export function readEndpointConfig(
     baseUrl,
     apiKey,
     modelId,
-    profilePath: resolve(REPO_ROOT, "adapters/endpoint-profiles", spec.profile),
+    profilePath: resolveEndpointProfilePath(choice, modelId),
+    modelEnvKey: spec.modelKey,
+    supportedModelIds: Object.keys(spec.profileByModel),
   };
 }
 
@@ -853,7 +900,7 @@ export function compose(opts: ComposeOptions): Composed {
    */
   const modelMismatch =
     !opts.profileOverride && cfg.modelId !== profile.modelId
-      ? `.env 的 ${opts.endpoint === "deepseek" ? "deepseek_model" : "dashscope_model"}` +
+      ? `.env 的 ${cfg.modelEnvKey}` +
         `（${cfg.modelId}）与端点声明里的 modelId（${profile.modelId}）不一致。` +
         `实际发出的请求用的是**声明里的** ${profile.modelId} —— .env 那个值一直没有生效。`
       : undefined;
@@ -871,9 +918,9 @@ export function compose(opts: ComposeOptions): Composed {
   if (modelMismatch && !opts.modelPortOverride) {
     throw new Error(
       `${modelMismatch}\n\n` +
-        `二选一：\n` +
-        `  · 把 .env 改成 ${profile.modelId}（推荐 —— 那就是实际在用的模型）；\n` +
-        `  · 或为 ${cfg.modelId} 补一份端点能力声明，再指向它。`,
+        `可选处理：\n` +
+        `  · 把 ${cfg.modelEnvKey} 改成已有独立声明的模型：${cfg.supportedModelIds.join("、")}；\n` +
+        `  · 或为 ${cfg.modelId} 补一份端点能力声明，并登记 modelId → profile 的选择关系。`,
     );
   }
   /**

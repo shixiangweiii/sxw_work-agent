@@ -39,6 +39,12 @@ dashscope_model=qwen3.7-plus
 dashscope_api_key=...
 ```
 
+`dashscope_model` 当前可选 `qwen3.7-plus` 或 `qwen3.8-flash`，会分别选择独立的
+端点能力声明；配置值不会再被固定 profile 静默覆盖。`qwen3.7-plus` 的声明来自现有
+协议探针（`PROBED`），`qwen3.8-flash` 目前只有可用性确认，能力声明标为 `ASSUMED`，
+因此会在启动信息中明确提示，并暂用本地 token 估算、不开显式缓存断点。完成同套 probe 后
+再把这些临时值升级为实测结论。
+
 ### 外部 MCP 与 Playwright（ADR-0011）
 
 外部 MCP 是通用能力，不是 Playwright 专用适配：生产代码不认识任何 Playwright 工具名，
