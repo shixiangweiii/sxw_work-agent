@@ -1,8 +1,8 @@
 /**
  * 事件流的终端渲染。
  *
- * 阶段 1 没有 GUI（那是阶段 4）。这里是「Layer 1 通过 RunEvent 流驱动」
- * 这条约束的最小兑现 —— 换成任何 UI 都只是换一个投影器。
+ * CLI 与阶段 4 Web UI 是两个并存入口。这里负责让终端也看见安全、恢复、
+ * 预算和交付物事实；不能依赖 Web 投影替终端补话。
  */
 
 import type { RunEvent } from "@workagent/harness-runtime";
@@ -99,6 +99,10 @@ export function renderEvent(e: RunEvent): void {
       console.log(`  ${RED}✗${RESET} 拒绝（${e.payload.stage}）：${e.payload.reason}`);
       break;
 
+    case "AttemptStarted":
+      console.log(`  ${DIM}执行 ${e.payload.toolName}（${e.payload.actionId}）${RESET}`);
+      break;
+
     case "ApprovalRequested":
       console.log(`  ${YELLOW}?${RESET} 需要确认：${e.payload.reason}`);
       break;
@@ -138,6 +142,43 @@ export function renderEvent(e: RunEvent): void {
       console.log(`${tag("插话", YELLOW)} ${e.payload.content}`);
       break;
 
+    case "ToolProgress":
+      console.log(`  ${DIM}进展：${e.payload.note}${RESET}`);
+      break;
+
+    case "InteractionRequested":
+      console.log(`${tag("等待接管", YELLOW)} ${e.payload.toolName}：${e.payload.detail}`);
+      break;
+
+    case "InteractionCompleted":
+      console.log(
+        `${tag("接管结束", e.payload.answered ? GREEN : YELLOW)} ` +
+          (e.payload.answered ? "已收到人的应答" : "没有收到人的应答"),
+      );
+      break;
+
+    case "ToolResultExternalized":
+      console.log(
+        `${tag("大结果外置")} ${e.payload.toolName} → ${e.payload.ref} ` +
+          `(${e.payload.sizeBytes}B / ≈${e.payload.approxTokens} tokens)`,
+      );
+      break;
+
+    case "ArtifactRegistered":
+      console.log(
+        `${tag("产物登记")} ${e.payload.logicalId} v${e.payload.version} ` +
+          `${e.payload.role}/${e.payload.kind}`,
+      );
+      break;
+
+    case "ArtifactVerified":
+      console.log(
+        `${tag("产物检查", e.payload.ok ? GREEN : RED)} ${e.payload.artifactId}：` +
+          `${e.payload.ok ? "通过" : "失败"}（${e.payload.checksRun.join(", ") || "无适用检查器"}）` +
+          ` ${e.payload.detail}`,
+      );
+      break;
+
     case "LoopContinued":
       console.log(`${DIM}  ↻ continue: ${e.payload.transition.reason}${RESET}`);
       break;
@@ -145,6 +186,27 @@ export function renderEvent(e: RunEvent): void {
     case "BudgetHardLimitReached":
       console.log(
         `${tag("预算硬墙", RED)} ${e.payload.axis}: ${e.payload.used} / ${e.payload.limit}`,
+      );
+      break;
+
+    case "BudgetSoftLimitReached":
+      console.log(
+        `${tag("预算软限", YELLOW)} ${e.payload.axis}: ${e.payload.used} / ${e.payload.limit} ` +
+          `（${Math.round(e.payload.ratio * 100)}%）`,
+      );
+      break;
+
+    case "NoProgressDetected":
+      console.log(
+        `${tag("无进展", RED)} ${e.payload.toolName} 连续重复 ${e.payload.repeats} 次 ` +
+          `(${e.payload.inputDigest})`,
+      );
+      break;
+
+    case "RecoveryResolved":
+      console.log(
+        `${tag("恢复决策", YELLOW)} ${e.payload.decision} · ${e.payload.items} 项` +
+          (e.payload.note ? `：${e.payload.note}` : ""),
       );
       break;
 
@@ -186,12 +248,37 @@ export function renderEvent(e: RunEvent): void {
       );
       break;
 
+    case "InteractionResumed":
+      console.log(
+        `${tag("恢复接管", YELLOW)} 重新处理等待中的工具：` +
+          `${e.payload.pendingToolUses.join(", ") || "（无）"}`,
+      );
+      break;
+
+    case "ResumeExternalToolsUnverifiable":
+      console.log(
+        `${tag("外部工具状态未核验", RED)} ${e.payload.toolNames.join(", ") || "（无）"}` +
+          (e.payload.drifted.length > 0
+            ? `\n  当前装配缺失或已漂移：${e.payload.drifted.join(", ")}`
+            : "\n  工具声明未漂移，但外部会话身份与状态仍无法核对。"),
+      );
+      break;
+
     case "RecoveryRequired":
       console.log(`${tag("RECOVERY_REQUIRED", RED)} ${e.payload.items} 项需要人工确认`);
       break;
 
-    default:
+    case "LoopTerminated":
+      console.log(
+        `${tag("LoopTerminated", e.payload.outcome.kind === "SUCCESS" ? GREEN : YELLOW)} ` +
+          `${e.payload.terminal.reason} → ${e.payload.outcome.kind}`,
+      );
       break;
+
+    default: {
+      const exhaustive: never = e;
+      return exhaustive;
+    }
   }
 }
 

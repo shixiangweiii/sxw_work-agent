@@ -1,9 +1,8 @@
 /**
  * CLI 入口（V05 §5）。
  *
- * 阶段 1 没有图形界面 —— 那是阶段 4。
- * 但「不是不能交互」：Approval / Interject / Cancel 都在阶段 1 范围内，
- * 所以终端必须能停下来问、能中途插话、能 Ctrl+C。
+ * 与阶段 4 的 Web UI 并存。Approval / Interject / Cancel 在终端也必须
+ * 完整可见：能停下来问、能中途插话、能 Ctrl+C。
  *
  * 阶段 2 补上了跨进程的那一半 —— 三条恢复分支（§18.2）在此之前
  * **在真实使用里一条都走不到**，因为没有任何入口能触发 resume：
@@ -29,6 +28,7 @@ import {
   DEFAULT_BUDGETS,
   NullTraceSink,
   asId,
+  executionPrivilegeOf,
   readBudgetLimits,
   readRunFacts,
 } from "@workagent/harness-runtime";
@@ -71,13 +71,6 @@ interface Args {
   /**
    * 审批档位（ADR-0012）。**一条轴、三个值、一个参数名。**
    *
-   * ── 【定】它取代了 `--confirm` / `--yes-all` 两个布尔开关 ────────────────
-   *
-   * 两个布尔开关编码一条三值轴，必然出现「两个都打了怎么办」这种没有答案
-   * 的组合；而 `--yes` 那件事（文档里承诺、`parseArgs` 从来没解析过、
-   * 打上去"能用"只因为默认档位本来就是它）说明这类开关一旦对不上，
-   * 用户是发现不了的。现在拼错任何一个值都会立刻失败。
-   *
    * 理由（决 3，DEFAULT 那一档不变）：不接 Capability 授权层时，每写一个
    * 文件就停下来问一次，在「读一批文档 → 汇总 → 产出」这种任务里会问十几次
    * —— 那不是安全，是把闸门变成噪音，用户会开始无脑回车（而无脑回车比
@@ -97,8 +90,8 @@ interface Args {
    * 的分工那张表：合并这两层的第一个后果就是把边界拆掉。
    */
   sandbox: ExecutionPrivilege;
-  /** undefined = --no-trace；string = 显式 --trace 路径；"auto" = 按 runId 定名 */
-  trace: string | undefined;
+  /** undefined = --no-trace；true = 按 runId 定名；string = 显式 --trace 路径。 */
+  trace: true | string | undefined;
   dbPath: string;
   runId: string;
   recoveryDecision: "CONTINUE" | "ABORT" | undefined;
@@ -193,35 +186,47 @@ function assertKnownArgs(argv: string[]): void {
       i += 1; // 跳过它的值，免得值本身被当成参数
       continue;
     }
-    /**
-     * ── 【定】迁移提示照 `--yes` 那条的写法，不做同义开关 ────────────────────
-     *
-     * ADR-0012 把审批做成了一条有三档的轴（`--approval`），于是布尔开关
-     * `--confirm` / `--yes-all` 各自只能表达其中一档，而两个名字与一条轴
-     * 是不同构的。留着它们做别名的代价，本仓已经记过两次：
-     * `STAGE1_ACTIVE_*` 那批的分叉，以及 `--yes` 那个「从来没被解析过、
-     * 能用只因为默认档位本来就是它」的开关。
-     *
-     * 所以是**删掉 ＋ 报错 ＋ 指出新写法**，不是悄悄接受。
-     */
-    const migrated: Record<string, string> = {
-      yes:
-        "`--yes` 已删除：workspace 内的可逆写自动放行本来就是**默认档位**，" +
-        "而这个开关从来没有被解析过。",
-      confirm: "`--confirm` 已改成 `--approval confirm`。",
-      "yes-all":
-        "`--yes-all` 已改成 `--approval auto`（ADR-0012）。" +
-        "它现在两个入口都有，界面上也能中途切。",
-    };
     throw new Error(
       `不认识的参数 ${raw}。\n` +
         `可用：${[...BOOL_FLAGS, ...VALUE_FLAGS].map((f) => `--${f}`).join(" ")}\n` +
         `  --approval confirm|default|auto   审批档位（默认 default）\n` +
         `  --sandbox  on|off                 执行特权（默认 on）\n` +
         // 【定】由表推出，不手写 —— 加一条轴时说明不会漏。
-        `${budgetFlagHelp()}\n` +
-        (migrated[name] ? `\n（${migrated[name]}）` : ""),
+        `${budgetFlagHelp()}\n`,
     );
+  }
+}
+
+function assertModeArgs(argv: string[], mode: Mode): void {
+  const supplied = new Set(
+    argv.filter((value) => value.startsWith("--")).map((value) => value.slice(2)),
+  );
+  const common = ["workspace", "db"];
+  const allowed: Record<Mode, string[]> = {
+    list: [...common, "list-runs"],
+    start: [
+      ...common,
+      "task", "trace", "no-trace", "endpoint", "mcp-config", "approval", "sandbox",
+      ...BUDGET_VALUE_FLAGS,
+    ],
+    resume: [
+      ...common,
+      "resume", "trace", "no-trace", "recovery-decision", "recovery-note",
+      "endpoint", "mcp-config", "approval", "sandbox",
+    ],
+  };
+  const ignored = [...supplied].filter((name) => !allowed[mode].includes(name));
+  if (ignored.length > 0) {
+    throw new Error(
+      `${mode} 模式不接受这些参数：${ignored.map((name) => `--${name}`).join(" ")}。` +
+        "拒绝静默忽略不会生效的配置。",
+    );
+  }
+  if (supplied.has("trace") && supplied.has("no-trace")) {
+    throw new Error("--trace 与 --no-trace 不能同时使用。");
+  }
+  if (supplied.has("recovery-note") && !supplied.has("recovery-decision")) {
+    throw new Error("--recovery-note 必须与 --recovery-decision 一起使用。");
   }
 }
 
@@ -235,6 +240,7 @@ function parseArgs(argv: string[]): Args {
   const workspace = resolve(get("workspace") ?? resolve(REPO_ROOT, ".workagent-workspace"));
   const resumeId = get("resume");
   const mode: Mode = argv.includes("--list-runs") ? "list" : resumeId ? "resume" : "start";
+  assertModeArgs(argv, mode);
 
   const decision = get("recovery-decision");
   if (decision !== undefined && decision !== "CONTINUE" && decision !== "ABORT") {
@@ -263,7 +269,7 @@ function parseArgs(argv: string[]): Args {
      * 默认关闭等于把「记不记录」这个决定推给每一个使用者，而忘记开的那次
      * 恰恰是最想回看的那次。要关就显式 --no-trace。
      */
-    trace: argv.includes("--no-trace") ? undefined : (get("trace") ?? "auto"),
+    trace: argv.includes("--no-trace") ? undefined : (get("trace") ?? true),
     dbPath: resolveDbPath(workspace, get("db")),
     runId: resumeId ?? "",
     recoveryDecision: decision as Args["recoveryDecision"],
@@ -653,27 +659,32 @@ async function main(): Promise<void> {
   // thunk 只在第一个事件到达时被读，那时下面这两个变量都已赋值。
   let profileRef = "unknown";
   let modelId = "unknown";
-  const fileSink = args.trace
+  let traceTask = args.task;
+  let traceTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  let traceExecutionPrivilege: ExecutionPrivilege = args.sandbox;
+  const traceTarget = args.trace;
+  const fileSink = traceTarget
     ? new FileTraceSink(
         // N-1：文件名按 runId 定，resume 往同一个文件续写下一段。
         // 显式 --trace 时听用户的，那是「我要这一段单独存一份」的意思。
         (runId) =>
-          args.trace === "auto"
+          traceTarget === true
             ? resolve(workspaceStorage(args.workspace).traceDir, `${runId}.jsonl`)
-            : resolve(args.trace!),
+            : resolve(traceTarget),
         () => ({
           ...gitProvenance(),
           nodeVersion: process.version,
+          entry: "cli",
           endpointProfile: profileRef,
           modelId,
-          task: args.task,
+          task: traceTask,
           workspaceRoot: args.workspace,
           // 【定】trace header 要能独立回答「这一段当时有没有沙箱」（P2-5）。
           // 事件流里 RunStarted 也带了它 —— 两处不是重复：header 描述的是
           // **这个段**的装配，事件描述的是**这个 Run** 冻结的那一份，
           // 而 resume 换档会被闸门拒，所以两者必然一致（不一致本身就是信号）。
-          executionPrivilege: args.sandbox,
-          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+          executionPrivilege: traceExecutionPrivilege,
+          timezone: traceTimezone,
           startedAt: new Date().toISOString(),
         }),
       )
@@ -719,224 +730,231 @@ async function main(): Promise<void> {
   };
   process.once("exit", () => void (mcpClosed || mcp.close()));
 
-  const composed = compose({
-    mcp,
-    workspaceRoot: args.workspace,
-    approvalDecider: interactiveApproval(
-      () => args.approval,
-      () => args.sandbox,
-      args.workspace,
-      sigint.signal,
-      stdin,
-    ),
-    // ADR-0012：第二条轴。冻结进 RunSpec 的就是这个值。
-    executionPrivilege: args.sandbox,
-    trace,
-    dbPath: args.dbPath,
-    endpoint: args.endpoint,
-    // `--max-turns` 等八条轴。非法值在 compose 里就抛（服务/命令起不来），
-    // 不留到起 Run 那一刻 —— 见 ComposeOptions.budgetOverrides。
-    budgetOverrides: args.budgets,
-    // S10：接管通道是 stdin 三方复用里的第三方（语义在 S1 定死）。
+  try {
+    const composed = compose({
+      mcp,
+      workspaceRoot: args.workspace,
+      approvalDecider: interactiveApproval(
+        () => args.approval,
+        () => args.sandbox,
+        args.workspace,
+        sigint.signal,
+        stdin,
+      ),
+      // ADR-0012：第二条轴。冻结进 RunSpec 的就是这个值。
+      executionPrivilege: args.sandbox,
+      trace,
+      dbPath: args.dbPath,
+      endpoint: args.endpoint,
+      // `--max-turns` 等八条轴。非法值在 compose 里就抛（服务/命令起不来），
+      // 不留到起 Run 那一刻 —— 见 ComposeOptions.budgetOverrides。
+      budgetOverrides: args.budgets,
+      // S10：接管通道是 stdin 三方复用里的第三方（语义在 S1 定死）。
+      /**
+       * ── 【定】AUTO 档下两条通道的处置**相反**，这是 ADR-0008 的直接后果 ─────
+       *
+       *   ask_user        「你来定」→ 没人回答**不是失败**，模型自己定。
+       *                    AUTO 档下立刻返回 NO_ANSWER，不停下来。
+       *   request_handoff 「你去做」→ 没人接管**就是失败**，那件事真的没做。
+       *                    AUTO 档下**照样等人** —— 自动化的是"要不要问你"，
+       *                    不是"要不要有人去做那件事"。
+       *
+       * 把它们做成同一种处置，正是 ADR-0008 那张对照表存在的理由。
+       * 具体到用户场景：AUTO 档跑浏览器任务时模型请你去登录一下，
+       * 那一停是有价值的 —— 人就在浏览器前面，而 Atlas 登不了那个录。
+       */
+      handoff: terminalHandoff(stdin, sigint.signal),
+      question: terminalQuestion(stdin, sigint.signal, () => args.approval),
+    });
+    interjectInto = (runId, text) => composed.runtime.interject(asId<RunId>(runId), text);
+    profileRef = `${composed.profile.id}@${composed.profile.observedAt}`;
+    modelId = composed.profile.modelId;
+
     /**
-     * ── 【定】AUTO 档下两条通道的处置**相反**，这是 ADR-0008 的直接后果 ─────
+     * S1：把**解析后**的端点如实打出来。
      *
-     *   ask_user        「你来定」→ 没人回答**不是失败**，模型自己定。
-     *                    AUTO 档下立刻返回 NO_ANSWER，不停下来。
-     *   request_handoff 「你去做」→ 没人接管**就是失败**，那件事真的没做。
-     *                    AUTO 档下**照样等人** —— 自动化的是"要不要问你"，
-     *                    不是"要不要有人去做那件事"。
+     * 【定】只打 baseUrl 的 host、声明 id 与模型 id，**绝不打印 key**。
+     * 打 host 而不是完整 URL 是刻意的：路径里有时带部署标识，而这一行会被
+     * 贴进 issue 和评测报告。
      *
-     * 把它们做成同一种处置，正是 ADR-0008 那张对照表存在的理由。
-     * 具体到用户场景：AUTO 档跑浏览器任务时模型请你去登录一下，
-     * 那一停是有价值的 —— 人就在浏览器前面，而 Atlas 登不了那个录。
+     * 为什么必须打：U-6 的教训是「闸门排在另一个闸门后面等于没有闸门」——
+     * 而更早一层的问题是**当时根本看不出实际连的是哪个端点**。
      */
-    handoff: terminalHandoff(stdin, sigint.signal),
-    question: terminalQuestion(stdin, sigint.signal, () => args.approval),
-  });
-  interjectInto = (runId, text) => composed.runtime.interject(asId<RunId>(runId), text);
-  profileRef = `${composed.profile.id}@${composed.profile.observedAt}`;
-  modelId = composed.profile.modelId;
-
-  /**
-   * S1：把**解析后**的端点如实打出来。
-   *
-   * 【定】只打 baseUrl 的 host、声明 id 与模型 id，**绝不打印 key**。
-   * 打 host 而不是完整 URL 是刻意的：路径里有时带部署标识，而这一行会被
-   * 贴进 issue 和评测报告。
-   *
-   * 为什么必须打：U-6 的教训是「闸门排在另一个闸门后面等于没有闸门」——
-   * 而更早一层的问题是**当时根本看不出实际连的是哪个端点**。
-   */
-  console.log(`endpoint : ${args.endpoint}（${hostOf(composed.endpointBaseUrl)}）`);
-  console.log(`profile  : ${composed.profile.id}`);
-  console.log(`model    : ${composed.profile.modelId}`);
-  if (!stdin.isInteractive) {
-    console.log(`stdin    : 非交互环境，插话与审批应答不可用（审批按拒绝处置）`);
-  } else {
-    console.log(`stdin    : 运行期直接敲一句话回车 = 插话；审批时回车 = 应答`);
-  }
-
-  /**
-   * 预算：**只打被覆盖的轴**，没覆盖就一行都不打。
-   *
-   * 【定】它与 `--sandbox` 那种"必须一直看得见"不是一类东西 ——
-   * 预算不是安全边界，而每个 Run 的实际限额在界面「预算」页与
-   * 冻结的 `spec.budgets` 上都查得到。默认值天天打反而会被读者划过去。
-   *
-   * 但**被覆盖了就必须打**：一个静默生效的 `--max-turns 60` 与一个
-   * 被吞掉的 `--max-turns 60`，在用户那里完全不可区分（M-5 的形态）。
-   */
-  const overridden = Object.keys(args.budgets);
-  if (overridden.length > 0) {
-    const spec = composed.makeRunSpec("(预算探针)");
-    const line = readBudgetLimits(spec.budgets)
-      .filter((a) => overridden.includes(String(a.axis)))
-      .map((a) => `${a.field} ${a.limit}（默认 ${DEFAULT_BUDGETS[a.field] ?? "未设"}）`)
-      .join("，");
-    console.log(`budget   : ${line}`);
-  }
-
-  for (const n of composed.notices) {
-    console.log(`⚠️  ${n.text}`);
-    // 终端**照旧全打**。折叠是界面的处置 —— 顶栏只有几行高，而 scrollback 没有上限。
-    if (n.detail) console.log(`  ${n.detail}`);
-    console.log();
-  }
-
-  let runId = args.runId;
-  currentRunId = runId;
-  let gen: AsyncGenerator<RunEvent, { terminal: unknown; outcome?: unknown }>;
-
-  if (args.mode === "resume") {
-    const snapshot = await composed.runtime.inspect(asId<RunId>(runId));
-    if (!snapshot) {
-      console.error(`\n找不到 Run ${runId}。用 --list-runs 看看库里有什么。`);
-      await shutdownMcp();
-      process.exit(1);
+    console.log(`endpoint : ${args.endpoint}（${hostOf(composed.endpointBaseUrl)}）`);
+    console.log(`profile  : ${composed.profile.id}`);
+    console.log(`model    : ${composed.profile.modelId}`);
+    if (!stdin.isInteractive) {
+      console.log(`stdin    : 非交互环境，插话与审批应答不可用（审批按拒绝处置）`);
+    } else {
+      console.log(`stdin    : 运行期直接敲一句话回车 = 插话；审批时回车 = 应答`);
     }
-    console.log(`resume   : ${runId}（上次状态 ${snapshot.status}，已跑 ${snapshot.turnCount} 轮）`);
+
     /**
-     * 【定】resume 用的是**冻结在 RunSpec 里的**预算，不是今天的默认值，
-     * 更不是这次命令行上的 `--max-turns`。必须说出来。
+     * 预算：**只打被覆盖的轴**，没覆盖就一行都不打。
      *
-     * 不说的后果很具体：一个撞了 MAX_TURNS 的 Run，用户第一反应是
-     * `--max-turns 40 --resume <id>`，然后看着它**立刻又停在同一个数字上**，
-     * 而命令行上明明写着 40。参数没被吞（`assertKnownArgs` 认得它），
-     * 它只是对这条路径无效 —— 这正是"看起来生效、实际什么都没变"的形状，
-     * 而本仓对这个形状的处置一律是：让它开口说话。
+     * 【定】它与 `--sandbox` 那种"必须一直看得见"不是一类东西 ——
+     * 预算不是安全边界，而每个 Run 的实际限额在界面「预算」页与
+     * 冻结的 `spec.budgets` 上都查得到。默认值天天打反而会被读者划过去。
+     *
+     * 但**被覆盖了就必须打**：一个静默生效的 `--max-turns 60` 与一个
+     * 被吞掉的 `--max-turns 60`，在用户那里完全不可区分（M-5 的形态）。
      */
-    const frozen = (await composed.ports.runs.getRunSpec(asId<RunId>(runId)))?.budgets;
-    if (frozen) {
+    const overridden = Object.keys(args.budgets);
+    if (overridden.length > 0) {
+      const spec = composed.makeRunSpec("(预算探针)");
+      const line = readBudgetLimits(spec.budgets)
+        .filter((a) => overridden.includes(String(a.axis)))
+        .map((a) => `${a.field} ${a.limit}（默认 ${DEFAULT_BUDGETS[a.field] ?? "未设"}）`)
+        .join("，");
+      console.log(`budget   : ${line}`);
+    }
+
+    for (const n of composed.notices) {
+      console.log(`⚠️  ${n.text}`);
+      // 终端**照旧全打**。折叠是界面的处置 —— 顶栏只有几行高，而 scrollback 没有上限。
+      if (n.detail) console.log(`  ${n.detail}`);
+      console.log();
+    }
+
+    let runId = args.runId;
+    currentRunId = runId;
+    let gen: AsyncGenerator<RunEvent, { terminal: unknown; outcome?: unknown }>;
+
+    if (args.mode === "resume") {
+      const snapshot = await composed.runtime.inspect(asId<RunId>(runId));
+      if (!snapshot) {
+        console.error(`\n找不到 Run ${runId}。用 --list-runs 看看库里有什么。`);
+        process.exitCode = 1;
+        return;
+      }
+      console.log(`resume   : ${runId}（上次状态 ${snapshot.status}，已跑 ${snapshot.turnCount} 轮）`);
+      /**
+       * 【定】resume 用的是**冻结在 RunSpec 里的**预算，不是今天的默认值，
+       * 更不是这次命令行上的 `--max-turns`。必须说出来。
+       *
+       * 不说的后果很具体：一个撞了 MAX_TURNS 的 Run，用户第一反应是
+       * `--max-turns 40 --resume <id>`，然后看着它**立刻又停在同一个数字上**，
+       * 而命令行上明明写着 40。参数没被吞（`assertKnownArgs` 认得它），
+       * 它只是对这条路径无效 —— 这正是"看起来生效、实际什么都没变"的形状，
+       * 而本仓对这个形状的处置一律是：让它开口说话。
+       */
+      const frozenSpec = await composed.ports.runs.getRunSpec(asId<RunId>(runId));
+      if (!frozenSpec) throw new Error(`Run ${runId} 有状态但缺少 RunSpec`);
+      traceTask = frozenSpec.input.task;
+      traceTimezone = frozenSpec.agentSpec.timezone;
+      traceExecutionPrivilege = executionPrivilegeOf(frozenSpec.agentSpec);
       console.log(
-        `           预算用的是**启动时冻结的那一份**（maxTurns ${frozen.maxTurns}）——` +
+        `           预算用的是**启动时冻结的那一份**（maxTurns ${frozenSpec.budgets.maxTurns}）——` +
           `这次命令行上的 --max-* 对它无效。`,
       );
+      console.log();
+      gen = composed.runtime.resume(asId<RunId>(runId), {
+        ...(args.recoveryDecision ? { recoveryDecision: args.recoveryDecision } : {}),
+        ...(args.recoveryNote ? { recoveryNote: args.recoveryNote } : {}),
+      }) as typeof gen;
+    } else {
+      console.log();
+      const spec = composed.makeRunSpec(args.task);
+      traceTask = spec.input.task;
+      traceTimezone = spec.agentSpec.timezone;
+      traceExecutionPrivilege = executionPrivilegeOf(spec.agentSpec);
+      gen = composed.runtime.start(spec) as typeof gen;
     }
-    console.log();
-    gen = composed.runtime.resume(asId<RunId>(runId), {
-      ...(args.recoveryDecision ? { recoveryDecision: args.recoveryDecision } : {}),
-      ...(args.recoveryNote ? { recoveryNote: args.recoveryNote } : {}),
-    }) as typeof gen;
-  } else {
-    console.log();
-    gen = composed.runtime.start(composed.makeRunSpec(args.task)) as typeof gen;
-  }
 
-  // Ctrl+C → cancel。单个 AbortController 传播到所有 Port（V05 §9.1）。
-  process.on("SIGINT", () => {
-    console.log("\n\n收到 Ctrl+C，正在协作式取消……（未启动的工具会合成 SKIPPED result）");
-    sigint.abort();
-    if (runId) composed.runtime.cancel(asId<RunId>(runId), "SIGINT");
-  });
-
-  let r = await gen.next();
-  while (!r.done) {
-    const e: RunEvent = r.value;
-    if (!runId) {
-      runId = String(e.runId);
-      // 插话要知道往哪个 Run 排队。start() 的 runId 是第一个事件才带出来的。
-      currentRunId = runId;
-    }
-    renderEvent(e);
-    r = await gen.next();
-  }
-  finishRendering();
-  // 【定】跑完就交还 stdin，否则进程不会退出（readline 持有 stdin 的引用）。
-  stdin.close();
-
-  const { terminal, outcome } = r.value as {
-    terminal: { reason: string; recoveryItems?: Array<{ what: string; sideEffectState: string }> };
-    outcome?: {
-      kind: string;
-      summary?: string;
-      incompleteItems: Array<{ what: string; why: string }>;
-      recoveryItems: Array<{ what: string; sideEffectState: string }>;
-    };
-  };
-
-  console.log(`\n${"─".repeat(60)}`);
-  console.log(`RunId   : ${runId}`);
-  console.log(`Terminal: ${terminal.reason}`);
-  // outcome 缺席只有一种情况：停在 RECOVERY_REQUIRED 这个非终态上 ——
-  // Run 没结束，自然没有结果可结算。
-  console.log(`Outcome : ${outcome?.kind ?? "（未结算：Run 停在非终态）"}`);
-  // R-7：kind 只说了「算不算成功」，summary 才说了「究竟发生了什么」。
-  // 少了这一行，模型明确拒绝任务的那种 Run，用户看到的只有一个 SUCCESS。
-  if (outcome?.summary) {
-    console.log(`Summary : ${outcome.summary}`);
-  }
-  if (terminal.reason === "RECOVERY_REQUIRED") {
-    console.log("需要人工确认后才能继续：");
-    for (const i of terminal.recoveryItems ?? []) console.log(`  - ${i.what}（${i.sideEffectState}）`);
-    console.log(
-      `\n人工确认外部状态后，带决策继续：\n` +
-        `  npm run dev -- --resume ${runId} --recovery-decision CONTINUE --recovery-note "..."\n` +
-        `  npm run dev -- --resume ${runId} --recovery-decision ABORT`,
-    );
-  }
-  if (outcome && outcome.incompleteItems.length > 0) {
-    console.log("未完成项：");
-    for (const i of outcome.incompleteItems) console.log(`  - ${i.what}：${i.why}`);
-  }
-  if (outcome && outcome.recoveryItems.length > 0) {
-    console.log("状态未知项（需人工确认）：");
-    for (const i of outcome.recoveryItems) console.log(`  - ${i.what}（${i.sideEffectState}）`);
-  }
-
-  const entries = await composed.ports.transcript.readAll(asId<RunId>(runId));
-  console.log(`transcript: ${entries.length} 条`);
-
-  /**
-   * footer 把「跑完之后的事实」补进 artifact：终止原因、outcome、以及从
-   * transcript 的 RUN_META 读回的预算使用。
-   *
-   * 为什么预算要从 transcript 读而不是从事件流里凑：事件流里的 usage 是逐次的，
-   * 累计量的权威副本在 RUN_META 里（A-7 之后就是这样）。凑出来的数和权威副本
-   * 万一对不上，事后没人分得清哪个是对的。
-   */
-  if (fileSink) {
-    fileSink.finish({
-      terminal,
-      outcome: outcome ?? null,
-      transcriptEntries: entries.length,
-      /**
-       * transcript 条目占用的序号（D-2 的可核对形态）。
-       *
-       * 事件不落 transcript，所以事件流里会有空洞；把 transcript 这一侧的号
-       * 也写进 artifact，两条轨道就能只凭这一个文件对齐 ——
-       * 空洞应当恰好被这个列表填满，既不重号也不缺号。
-       */
-      transcriptSequences: entries.map((e) => e.sequence),
-      budgetUsage: readLastBudget(entries),
-      finishedAt: new Date().toISOString(),
+    // Ctrl+C → cancel。单个 AbortController 传播到所有 Port（V05 §9.1）。
+    process.on("SIGINT", () => {
+      console.log("\n\n收到 Ctrl+C，正在协作式取消……（未启动的工具会合成 SKIPPED result）");
+      sigint.abort();
+      if (runId) composed.runtime.cancel(asId<RunId>(runId), "SIGINT");
     });
-    console.log(`trace     : ${fileSink.filePath}`);
-  }
 
-  // 【定】在 process.exit 之前真的等它收完，别指望 exit 钩子（见上）。
-  await shutdownMcp();
-  process.exit(0);
+    let r = await gen.next();
+    while (!r.done) {
+      const e: RunEvent = r.value;
+      if (!runId) {
+        runId = String(e.runId);
+        // 插话要知道往哪个 Run 排队。start() 的 runId 是第一个事件才带出来的。
+        currentRunId = runId;
+      }
+      renderEvent(e);
+      r = await gen.next();
+    }
+    finishRendering();
+
+    const { terminal, outcome } = r.value as {
+      terminal: { reason: string; recoveryItems?: Array<{ what: string; sideEffectState: string }> };
+      outcome?: {
+        kind: string;
+        summary?: string;
+        incompleteItems: Array<{ what: string; why: string }>;
+        recoveryItems: Array<{ what: string; sideEffectState: string }>;
+      };
+    };
+
+    console.log(`\n${"─".repeat(60)}`);
+    console.log(`RunId   : ${runId}`);
+    console.log(`Terminal: ${terminal.reason}`);
+    // outcome 缺席只有一种情况：停在 RECOVERY_REQUIRED 这个非终态上 ——
+    // Run 没结束，自然没有结果可结算。
+    console.log(`Outcome : ${outcome?.kind ?? "（未结算：Run 停在非终态）"}`);
+    // R-7：kind 只说了「算不算成功」，summary 才说了「究竟发生了什么」。
+    // 少了这一行，模型明确拒绝任务的那种 Run，用户看到的只有一个 SUCCESS。
+    if (outcome?.summary) {
+      console.log(`Summary : ${outcome.summary}`);
+    }
+    if (terminal.reason === "RECOVERY_REQUIRED") {
+      console.log("需要人工确认后才能继续：");
+      for (const i of terminal.recoveryItems ?? []) console.log(`  - ${i.what}（${i.sideEffectState}）`);
+      console.log(
+        `\n人工确认外部状态后，带决策继续：\n` +
+          `  npm run dev -- --resume ${runId} --recovery-decision CONTINUE --recovery-note "..."\n` +
+          `  npm run dev -- --resume ${runId} --recovery-decision ABORT`,
+      );
+    }
+    if (outcome && outcome.incompleteItems.length > 0) {
+      console.log("未完成项：");
+      for (const i of outcome.incompleteItems) console.log(`  - ${i.what}：${i.why}`);
+    }
+    if (outcome && outcome.recoveryItems.length > 0) {
+      console.log("状态未知项（需人工确认）：");
+      for (const i of outcome.recoveryItems) console.log(`  - ${i.what}（${i.sideEffectState}）`);
+    }
+
+    const entries = await composed.ports.transcript.readAll(asId<RunId>(runId));
+    console.log(`transcript: ${entries.length} 条`);
+
+    /**
+     * footer 把「跑完之后的事实」补进 artifact：终止原因、outcome、以及从
+     * transcript 的 RUN_META 读回的预算使用。
+     *
+     * 为什么预算要从 transcript 读而不是从事件流里凑：事件流里的 usage 是逐次的，
+     * 累计量的权威副本在 RUN_META 里（A-7 之后就是这样）。凑出来的数和权威副本
+     * 万一对不上，事后没人分得清哪个是对的。
+     */
+    if (fileSink) {
+      fileSink.finish({
+        terminal,
+        outcome: outcome ?? null,
+        transcriptEntries: entries.length,
+        /**
+         * transcript 条目占用的序号（D-2 的可核对形态）。
+         *
+         * 事件不落 transcript，所以事件流里会有空洞；把 transcript 这一侧的号
+         * 也写进 artifact，两条轨道就能只凭这一个文件对齐 ——
+         * 空洞应当恰好被这个列表填满，既不重号也不缺号。
+         */
+        transcriptSequences: entries.map((e) => e.sequence),
+        budgetUsage: readLastBudget(entries),
+        finishedAt: new Date().toISOString(),
+      });
+      console.log(`trace     : ${fileSink.filePath}`);
+    }
+  } finally {
+    // compose、resume 与运行中任一异常都必须经过这里；readline 与 MCP
+    // 任一方还持有句柄，CLI 都可能在报错后继续挂着。exit 钩子只处理极端兜底。
+    stdin.close();
+    await shutdownMcp();
+  }
 }
 
 /**
@@ -1081,6 +1099,6 @@ function readLastBudget(entries: TranscriptEntry[]): unknown {
 }
 
 main().catch((err) => {
-  console.error(`\n启动失败：${(err as Error).message}`);
-  process.exit(1);
+  console.error(`\n命令执行失败：${(err as Error).message}`);
+  process.exitCode = 1;
 });

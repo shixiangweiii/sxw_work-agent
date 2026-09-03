@@ -20,6 +20,11 @@
  * JSON-RPC，写 stdout。诊断信息一律走 stderr（写 stdout 会污染协议流）。
  */
 
+import { writeFileSync } from "node:fs";
+
+const pidFile = process.env["FAKE_MCP_PID_FILE"];
+if (pidFile) writeFileSync(pidFile, String(process.pid), "utf8");
+
 interface Rpc {
   jsonrpc: "2.0";
   id?: number | string;

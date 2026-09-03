@@ -132,6 +132,9 @@ async function main(): Promise<void> {
         () => tracePath,
         () => ({
           commit: "verify",
+          gitDirty: false,
+          nodeVersion: process.version,
+          entry: "cli",
           endpointProfile: "verify",
           modelId: "scripted",
           task: "verify:persistence",

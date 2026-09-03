@@ -47,39 +47,17 @@ export type ExecutionPrivilege =
   /** ADR-0012：沙箱不生效，`policy` 不再拒绝越界写。唯一还在的闸门是审批和人。 */
   | "UNRESTRICTED";
 
-/**
- * 从一份可能来自旧库的 AgentSpec 里读出执行特权档位。
- *
- * 【定】缺省是 `SANDBOXED`，而这**不是一个猜测**：`executionPrivilege`
- * 之前，`UNRESTRICTED` 这个档位在本仓不存在 —— 任何一条没有这个字段的
- * transcript，当时必然跑在沙箱里。所以这个默认值是一条**事实**，
- * 与 `assertResumeWorkspaceMatches` 那个 `UNKNOWN_LEGACY` 不同类
- * （那一条是"我无法核对"，这一条是"我知道当时是什么"）。
- *
- * 【定】收敛在这一个函数里，不要在读取点各写一个 `?? "SANDBOXED"` ——
- * 那样每多一个读取点就多一个可能写错方向的地方，而写错的方向是
- * "把一条无沙箱的记录读成有沙箱"。
- */
+/** 从反序列化得到的 AgentSpec 严格读取执行特权档位。 */
 export function executionPrivilegeOf(agentSpec: AgentSpecSnapshot): ExecutionPrivilege {
   const raw = agentSpec.executionPrivilege as unknown;
   /**
-   * ── 【定】缺字段 → SANDBOXED（事实）；**非法值 → 抛**（二次评审 P2-2）──
-   *
-   * 这两件事必须分开，而第一版把它们折叠成了一句
-   * `=== "UNRESTRICTED" ? … : "SANDBOXED"` —— 于是 `null`、拼错的枚举、
-   * 被截断的字符串统统变成 SANDBOXED，**掩盖数据库损坏**。
+   * 【定】缺失、null、拼错的枚举和截断字符串全部视为损坏，不做旧数据降级。
    *
    * 后果具体：一条本来 UNRESTRICTED 的 Run 记录损坏后被读成 SANDBOXED，
    * 而 §18.3 第三维闸门比的正是这个值 —— 于是它用 `--sandbox on` 恢复时
    * **闸门会放行**，那条 transcript 从此在盘上自称"一直有沙箱"。
-   * 这与 current-only 那批「不保留兼容层、损坏数据 fail-fast」是同一条纪律。
-   *
-   * 【定】缺字段那一支**保留**，它不是兼容层：`UNRESTRICTED` 这一档在
-   * ADR-0012 之前不存在，所以「没有这个字段」推出「当时在沙箱里」是一条
-   * **事实**，不是猜测。与 workspace 那条 `UNKNOWN_LEGACY` 不同类
-   * （那一条是"我无法核对"，这一条是"我知道当时是什么"）。
+   * 这与 current-only 的「不保留兼容层、损坏数据 fail-fast」是同一条纪律。
    */
-  if (raw === undefined || raw === null) return "SANDBOXED";
   if (raw === "SANDBOXED" || raw === "UNRESTRICTED") return raw;
   throw new Error(
     `RunSpec 的 executionPrivilege 是一个非法值：${JSON.stringify(raw)}（agentSpec ` +
@@ -112,10 +90,8 @@ export interface AgentSpecSnapshot {
   /**
    * 本次 Run 的执行特权档位（ADR-0012）。见 `ExecutionPrivilege`。
    *
-   * 【定】读它一律走 `executionPrivilegeOf()`，不要直接解构 ——
-   * 旧库里的 RunSpec 没有这个字段，而直接解构拿到的是 `undefined`，
-   * 它在 `=== "SANDBOXED"` 与 `=== "UNRESTRICTED"` 两个判别式下**都是假**，
-   * 于是两条分支都不走，落到哪一支取决于是谁先写的那个 if。
+   * 【定】反序列化后的读取一律走 `executionPrivilegeOf()`，让缺失或非法值
+   * fail-fast；不能靠 TypeScript 断言把损坏的 JSON 当成合法快照。
    */
   executionPrivilege: ExecutionPrivilege;
   toolSnapshots: ToolSnapshot[];
@@ -249,7 +225,7 @@ export interface ResumableRunFacts {
 export interface ArtifactCheckFact {
   artifactId: string;
   logicalId: string;
-  role: "DELIVERABLE" | "INTERMEDIATE" | "RESULT";
+  role: "DELIVERABLE" | "INTERMEDIATE";
   ok: boolean;
   checksRun: string[];
   detail: string;

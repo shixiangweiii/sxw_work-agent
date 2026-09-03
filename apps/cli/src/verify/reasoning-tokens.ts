@@ -182,6 +182,8 @@ async function main(): Promise<void> {
       `结果不落在两种干净形态上：count_tokens 算了 ${countedThinking}、` +
         `真实计费多 ${missing}、本地估算 ${thinkingEstimate}。需要人看一眼再下结论。`,
     );
+    // 探针不走 runVerify；无法下结论仍必须让调用方从退出码看出来。
+    process.exitCode = 1;
   }
 
   section("这条探针的边界");

@@ -669,7 +669,7 @@ td.num { font-family: var(--mono); text-align: right; }
   color: var(--fg);
 }
 .model-call[open] > summary { border-bottom: 1px solid var(--line); }
-.model-call-summary, .model-call-legacy { font-family: var(--mono); overflow-wrap: anywhere; }
+.model-call-summary { font-family: var(--mono); overflow-wrap: anywhere; }
 .model-audit-panel { padding: 9px; min-width: 0; }
 .model-audit-facts { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; font-size: 11px; }
 .model-audit-warning {

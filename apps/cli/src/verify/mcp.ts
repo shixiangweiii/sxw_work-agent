@@ -22,8 +22,8 @@
  * ══════════════════════════════════════════════════════════════════════
  */
 
-import { execFileSync } from "node:child_process";
-import { writeFileSync, rmSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { existsSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
 import { evaluatePolicy, TRUSTED_PERSONAL, validateAndNormalize } from "@workagent/harness-runtime";
 import type {
@@ -39,7 +39,7 @@ import {
   type McpConfig,
   type McpRuntime,
 } from "@workagent/tools-mcp";
-import { REPO_ROOT, compose } from "../compose.js";
+import { DEFAULT_TOOLS, REPO_ROOT, compose } from "../compose.js";
 import { BOUNDARIES, grepBoundary } from "./boundaries.js";
 import {
   ScriptedModelPort,
@@ -130,13 +130,14 @@ async function main(): Promise<void> {
   } finally {
     rmSync(canary, { force: true });
   }
+  const canaryCleaned = !existsSync(canary);
   fact("注入后边界 12 命中", injectedHit[0] ?? "（没命中 —— 说明这条 grep 是瞎的）");
-  fact("注入文件已清理", "是");
+  fact("注入文件已清理", canaryCleaned ? "是" : "否（文件仍存在）");
   verdict(
-    injectedHit.length > 0 && injectedHit[0]!.includes("__mcp_canary"),
-    injectedHit.length > 0
+    injectedHit.length > 0 && injectedHit[0]!.includes("__mcp_canary") && canaryCleaned,
+    injectedHit.length > 0 && canaryCleaned
       ? "往 Runtime 注入一行 MCP SDK import，边界 12 当场翻红并指出行号 —— 它有判别力"
-      : "注入了违规却没被抓到 —— 边界 12 是一条永远为绿的装饰",
+      : `边界判别力失败：命中=${injectedHit.length > 0} 清理=${canaryCleaned}`,
   );
 
   // ══════════════════════════════════════════ B. 默认档位 = 最保守
@@ -637,8 +638,8 @@ async function main(): Promise<void> {
     "   V05 §18.3 要求 resume 检查 Browser Session 是否仍然有效。Atlas **做不到** ——\n" +
       "   登录态活在 MCP 子进程里，是 transcript 之外的隐藏状态，而协议不提供\n" +
       "   任何会话身份。跨进程 resume 之后，那可能已经是另一个窗口、另一个账号。\n\n" +
-      "   【定】做不到就**说出来**，不硬拒。理由与 workspace 闸门的 UNKNOWN_LEGACY\n" +
-      "   一字同源：一条放行了却没验过的闸门如果不说话，与「验过并通过」在事后\n" +
+      "   【定】做不到就**说出来**，不硬拒：一条放行了却没验过的闸门\n" +
+      "   如果不说话，与「验过并通过」在事后\n" +
       "   完全不可区分。硬拒则会让一个只用过一次 browser_snapshot 的长任务整个\n" +
       "   恢复不了，而那次调用可能无关紧要。\n\n" +
       "   E2 的另一半：工具身份要覆盖 schema / description / 档位。配 `@latest` 时\n" +
@@ -923,6 +924,56 @@ async function main(): Promise<void> {
     "配置文件不存在时安静地什么都不装 —— 没有 MCP 是绝大多数用户的常态，不该是一条警告",
   );
 
+  // ══════════════════════════ K2. 异常出口也要收掉 MCP
+  section("K2. compose 失败时 CLI 仍然 await 关闭 MCP");
+  const lifecycleConfig = resolve(ws.root, "lifecycle-mcp.json");
+  const lifecyclePidFile = resolve(ws.root, "lifecycle-mcp.pid");
+  writeFileSync(
+    lifecycleConfig,
+    JSON.stringify({
+      servers: {
+        lifecycle: {
+          type: "local",
+          command: [TSX, FIXTURE],
+          environment: { FAKE_MCP_PID_FILE: lifecyclePidFile },
+          timeout: { startup: 30_000, request: 20_000 },
+        },
+      },
+    }),
+    "utf8",
+  );
+  const failedCli = spawnSync(
+    "npx",
+    [
+      "tsx", "apps/cli/src/main.ts", "--task", "lifecycle probe",
+      "--workspace", ws.root, "--mcp-config", lifecycleConfig,
+      // MCP 已完成 initialize/tools-list 后，compose 会在创建这个非目录路径时失败。
+      "--db", "/dev/null/runs.db", "--no-trace",
+    ],
+    { cwd: REPO_ROOT, encoding: "utf8", timeout: 30_000 },
+  );
+  const lifecyclePid = existsSync(lifecyclePidFile)
+    ? Number(readFileSync(lifecyclePidFile, "utf8"))
+    : 0;
+  let lifecycleAlive = false;
+  if (lifecyclePid > 0) {
+    try {
+      process.kill(lifecyclePid, 0);
+      lifecycleAlive = true;
+    } catch {
+      lifecycleAlive = false;
+    }
+  }
+  const lifecycleOutput = `${failedCli.stdout ?? ""}\n${failedCli.stderr ?? ""}`;
+  fact("CLI 失败阶段", lifecycleOutput.includes("命令执行失败") ? "compose 后异常" : lifecycleOutput.trim().slice(0, 120));
+  fact("MCP 子进程", lifecyclePid > 0 ? (lifecycleAlive ? `${lifecyclePid} 仍存活` : `${lifecyclePid} 已退出`) : "未写出 pid");
+  verdict(
+    failedCli.status !== 0 && lifecyclePid > 0 && !lifecycleAlive,
+    failedCli.status !== 0 && lifecyclePid > 0 && !lifecycleAlive
+      ? "MCP 建连后的 compose 异常仍经过 finally，子进程在 CLI 退出前已关闭"
+      : `异常收段失败：exit=${failedCli.status} pid=${lifecyclePid} alive=${lifecycleAlive}`,
+  );
+
   // ══════════════════════════════════════ L. 起步价（记录用，不判定）
   section("L. 工具面与固定开销（记录用）");
   console.log(
@@ -930,22 +981,23 @@ async function main(): Promise<void> {
       "   但注意它落在**缓存前缀**里（protocol.ts 实测 cacheRead 恒为 tools＋system\n" +
       "   那一段），所以增量按 cache-read 计价，不是全价。",
   );
-  fact("Atlas 自家工具", `14 个 ≈ 2520 token`);
+  fact("Atlas 自家工具", `${DEFAULT_TOOLS.length} 个 ≈ ${DEFAULT_TOOLS.length * 180} token`);
   fact("夹具 MCP 带来", `${plain.snapshots.length} 个 ≈ ${plain.snapshots.length * 180} token`);
-  fact("Playwright 实测（待填）", "跑一次真实任务后回填这里");
 }
 
 let cleanupWs: (() => void) | undefined;
 const mcpToClose: McpRuntime[] = [];
 
-void runVerify(main, () => {
+void runVerify(main, async () => {
   // 【定】子进程必须收掉。仪器不得在被测系统之外留痕 —— 阶段 3.5 那次
   // 故障注入在 $HOME 留下探针文件，之后每次 existsSync 都为真，判据被永久毒化。
-  for (const m of mcpToClose) void m.close();
+  const closeResults = await Promise.allSettled(mcpToClose.map((m) => m.close()));
   cleanupWs?.();
   try {
     execFileSync("pkill", ["-f", "fake-mcp-server"], { stdio: "ignore" });
   } catch {
     /* 没有残留进程时 pkill 退出码非 0，那是好事 */
   }
+  const failed = closeResults.find((r) => r.status === "rejected");
+  if (failed?.status === "rejected") throw failed.reason;
 });

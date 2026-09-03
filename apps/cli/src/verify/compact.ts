@@ -423,17 +423,6 @@ async function main(): Promise<void> {
           `只剩 4 说明轮号没有去重（那正是这条判据要抓的形态）`,
     );
 
-    section("总判定");
-    const allOk =
-      triggered && writebackOk && boundaryOk && rebuildOk && strippedOk && recentTwoOk;
-    verdict(
-      allOk,
-      allOk
-        ? "Compact 真的落地了：压缩结果进了 state.messages 与 transcript，" +
-          "重建语义被激活，配对完好，推理块不再每轮重复付费"
-        : "Compact 仍然只是「发了个事件」",
-    );
-
     console.log(
       "\n   为什么这条验收项不看事件的有无：R-6 修复前 ContextCompacted 照常发出，\n" +
         "   只看事件流会得到一个「压缩正常工作」的错误结论。所有判据都落在\n" +

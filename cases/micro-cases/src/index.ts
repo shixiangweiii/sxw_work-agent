@@ -115,10 +115,9 @@ export class MicroCaseVerifier implements VerificationPort {
   /**
    * 执行前拍指纹（决 6）。
    *
-   * 拍什么由工具的 `recoveryObservation.kind` 决定：
-   *   TARGET_APPEND_TAIL  —— 追加是相对操作，要记住起始时的字节数与尾部 hash；
-   *   TARGET_CONTENT_HASH —— 覆盖写是绝对操作，其实不需要前置状态，
-   *                          但记一份也无妨（能顺带回答「本来就有没有」）。
+   * 所有微用例文件工具都拍目标的存在性、字节数与 hash。
+   * `requiresPreFingerprint` 只决定恢复时是否必须带这份前置事实：
+   * 追加是相对操作，覆盖写可以用目标内容作绝对判据。
    *
    * 返回 undefined = 这次观察不了 → 该 Action 崩溃后落第三条分支。
    */

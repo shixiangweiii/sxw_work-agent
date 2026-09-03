@@ -86,7 +86,7 @@ export interface McpServerConfig {
    * 值得写下来的是：跑几次之后你**应该**把只读工具标出来，
    * 而理由不是"审批问得烦"—— 是 `execute` 档报错时记 `UNKNOWN`，
    * 那会 push 一个 RecoveryItem，让这个 Run 永远结算不成 `SUCCESS`
-   * （`settle-outcome.ts` 第 77 行那一支）。浏览器自动化里报错很常见，
+   * （`settleOutcome()` 的 recoveryItems 分支）。浏览器自动化里报错很常见，
    * 于是那个降级信号会变成一盏**永远亮着的灯**，也就等于没有灯。
    */
   tools?: Record<string, ToolTier>;

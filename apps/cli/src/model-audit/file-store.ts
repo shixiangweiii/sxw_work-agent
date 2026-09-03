@@ -26,7 +26,6 @@ import type {
   ProviderResponseMetadata,
   Timestamp,
 } from "@workagent/harness-runtime";
-import { MODEL_INVOCATION_AUDIT_SCHEMA_VERSION } from "@workagent/harness-runtime";
 
 export class FileModelInvocationAuditStore implements ModelInvocationAuditStorePort {
   constructor(private readonly rootDir: string) {}
@@ -42,7 +41,6 @@ export class FileModelInvocationAuditStore implements ModelInvocationAuditStoreP
     try {
       writer.write({
         kind: "request",
-        schemaVersion: MODEL_INVOCATION_AUDIT_SCHEMA_VERSION,
         runId: start.runId,
         invocationId: start.invocationId,
         frameId: start.frameId,
@@ -69,7 +67,6 @@ class FileModelInvocationAuditWriter implements ModelInvocationAuditWriter {
   responseMetadata(metadata: ProviderResponseMetadata, observedAt: Timestamp): void {
     this.write({
       kind: "response_metadata",
-      schemaVersion: MODEL_INVOCATION_AUDIT_SCHEMA_VERSION,
       observedAt,
       ...metadata,
     });
@@ -79,7 +76,6 @@ class FileModelInvocationAuditWriter implements ModelInvocationAuditWriter {
     this.providerEventIndex += 1;
     this.write({
       kind: "provider_event",
-      schemaVersion: MODEL_INVOCATION_AUDIT_SCHEMA_VERSION,
       index: this.providerEventIndex,
       observedAt,
       event,
@@ -89,7 +85,6 @@ class FileModelInvocationAuditWriter implements ModelInvocationAuditWriter {
   providerFailure(failure: ProviderFailureObservation, observedAt: Timestamp): void {
     this.write({
       kind: "provider_error",
-      schemaVersion: MODEL_INVOCATION_AUDIT_SCHEMA_VERSION,
       observedAt,
       failure,
     });
@@ -99,7 +94,6 @@ class FileModelInvocationAuditWriter implements ModelInvocationAuditWriter {
     try {
       this.write({
         kind: "invocation_end",
-        schemaVersion: MODEL_INVOCATION_AUDIT_SCHEMA_VERSION,
         ...end,
       });
     } finally {
@@ -209,9 +203,6 @@ function corrupt(
 
 function auditRecordShapeError(value: unknown): string | undefined {
   if (!isRecord(value)) return "记录必须是 JSON object";
-  if (value["schemaVersion"] !== MODEL_INVOCATION_AUDIT_SCHEMA_VERSION) {
-    return `schemaVersion 必须为 ${MODEL_INVOCATION_AUDIT_SCHEMA_VERSION}`;
-  }
 
   switch (value["kind"]) {
     case "request":

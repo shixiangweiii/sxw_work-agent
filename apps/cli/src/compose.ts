@@ -39,7 +39,6 @@ import {
   type ToolDefinition,
   type ToolSnapshot,
   type TraceSinkPort,
-  type TranscriptStorePort,
 } from "@workagent/harness-runtime";
 import { createAnthropicModelPort, createAnthropicProtocol } from "@workagent/shape-anthropic-messages";
 import { FileModelInvocationAuditStore } from "./model-audit/file-store.js";
@@ -78,7 +77,7 @@ const HERE = resolve(fileURLToPath(new URL(".", import.meta.url)));
 export const REPO_ROOT = resolve(HERE, "../../..");
 
 /**
- * 跨 workspace 的产品状态目录。**只放注册表**（有哪些 workspace）。
+ * 跨 workspace 的产品状态目录：放 workspace 注册表与 MCP 配置，不放 Run 数据。
  *
  * 【定】它不再放库。见 `workspaceStorage()`。
  */
@@ -206,7 +205,7 @@ export type EndpointChoice = "bailian" | "deepseek";
  * 【定】它住在 compose.ts 而不是 main.ts：这里是全仓唯一写死端点名的地方，
  * 校验逻辑跟着名字走。此前这段是 `main.ts` 里的内联代码，于是
  * `eval/suite` 想加 `--endpoint`（方案 S1 明确要求的）就得抄一份 ——
- * 结果它一直没加，manifest 里的 `endpointProfile` 还是写死的 "eval"。
+ * 这个公共解析函数同时供 CLI 与 eval 使用，避免两个入口各维护一份枚举规则。
  * ══════════════════════════════════════════════════════════════════════
  */
 export function parseEndpointArg(argv: string[]): EndpointChoice {
@@ -299,7 +298,7 @@ export type AutoGrantVerdict = { ok: true } | { ok: false; why: string };
  *
  * `--yes` 那件事的教训是"一个被静默吞掉的参数与一个生效的参数不可区分"，
  * `STAGE1_ACTIVE_*` 那批的教训是别名会让两处定义悄悄分叉。所以这里只有
- * 三个值、一个参数名，`--yes-all` 已删除并在 `assertKnownArgs` 里留了迁移提示。
+ * 三个值、一个参数名；未知参数统一报错，不维护已删除参数的迁移分支。
  * ══════════════════════════════════════════════════════════════════════
  */
 export type ApprovalMode =
@@ -320,7 +319,7 @@ export type ApprovalMode =
   | "CONFIRM"
   /** 决 3 的有限自动放行：workspace 内、非 IRREVERSIBLE 的写事先同意。 */
   | "DEFAULT"
-  /** ADR-0012：一律自动放行。原 `--yes-all` 的语义，现在两个入口都有。 */
+  /** ADR-0012：一律自动放行，两个入口共用同一档位。 */
   | "AUTO";
 
 /**
@@ -625,9 +624,9 @@ export function gitProvenance(): GitProvenance {
 /**
  * 入口身份。**唯一**的取值来源，两个入口共用（终端 / 浏览器）。
  *
- * 【定】它落到两个地方，两处必须一致：`RunSpec.origin.kind`（进 SQLite）
- * 与 trace header 的 `entry`（进 JSONL）。此前只有后者是对的 ——
- * header 写着 `entry:"web"`，而同一个 Run 的 RunSpec 里写着 `CLI`。
+ * 【定】它落到两个不同时间尺度：`RunSpec.origin.kind` 记录谁**创建 Run**，
+ * trace header 的 `entry` 记录谁**执行这一段**。首段两者对应；跨入口 resume
+ * 时它们应当不同，例如 WEB 创建的 Run 可由 CLI 执行后续段。
  * 两条轨道对同一件事各说各话，事后没有任何办法判断哪条可信。
  *
  * 【定】`EVAL` 是本批补的：`RunOrigin` 里早就有这个变体、零生产者，
@@ -768,13 +767,6 @@ export interface ComposeOptions {
 export interface Composed {
   runtime: HarnessRuntime;
   ports: RuntimePorts;
-  /**
-   * 【定】Port 类型，不是具体类。
-   *
-   * 阶段 1 这里写死成 `InMemoryTranscriptStore`，于是「换存储实现」这件事
-   * 在类型上是做不到的 —— 而阶段 2 干的正是这件事。
-   */
-  transcript: TranscriptStorePort;
   db: Db;
   profile: EndpointCapabilityProfile;
   /**
@@ -890,10 +882,45 @@ export function compose(opts: ComposeOptions): Composed {
   if (!opts.modelPortOverride && !opts.profileOverride) {
     assertProfileMatchesEndpoint(profile, cfg.baseUrl);
   }
+  const requestedContextPolicy = opts.contextPolicy ?? DEFAULT_CONTEXT_POLICY;
+  const endpointContextLimit = profile.limits?.maxContextTokens;
+  const contextPolicy = (() => {
+    if (endpointContextLimit === undefined ||
+        endpointContextLimit >= requestedContextPolicy.hardInputLimitTokens) {
+      return requestedContextPolicy;
+    }
+    const ratio = endpointContextLimit / requestedContextPolicy.hardInputLimitTokens;
+    return {
+      ...requestedContextPolicy,
+      hardInputLimitTokens: endpointContextLimit,
+      softInputLimitTokens: Math.max(1, Math.floor(requestedContextPolicy.softInputLimitTokens * ratio)),
+      compactTargetTokens: Math.max(1, Math.floor(requestedContextPolicy.compactTargetTokens * ratio)),
+    };
+  })();
   const notices: Notice[] = [
     // 这两条本来就是一句话，没有可折叠的第二层 —— 只填 text。
     ...warnIfAssumed(profile).map((text) => ({ text })),
     ...(modelMismatch ? [{ text: modelMismatch }] : []),
+    ...(endpointContextLimit !== undefined
+      ? [{
+          text:
+            `端点声明的上下文上限为 ${endpointContextLimit} tokens；` +
+            `本次输入硬限采用 ${contextPolicy.hardInputLimitTokens}。`,
+        }]
+      : []),
+    ...(profile.limits?.observedMaxSingleRequestTokens !== undefined
+      ? [{
+          text:
+            `端点探针已观察到的最大单请求为 ` +
+            `${profile.limits.observedMaxSingleRequestTokens} tokens（这是观测值，不冒充硬上限）。`,
+        }]
+      : []),
+    ...(profile.limits?.quotaBeforeContextLimit
+      ? [{
+          text:
+            "端点声明配额可能先于上下文窗口耗尽；QUOTA_EXHAUSTED 需要补充配额或换端点，压缩上下文无效。",
+        }]
+      : []),
     // MCP 装了几个工具、几个自动放行 —— 起步价与闸门档位都在这一行里，
     // 而这两件事恰好是接入外部工具面最该被看见的代价。
     // 工具原名清单在它的 `detail` 里（顶栏默认折叠，终端照旧全打）。
@@ -913,7 +940,6 @@ export function compose(opts: ComposeOptions): Composed {
   // （RunSpec 冻结、ShellEffectResolver、启动横幅）读的必须是同一个变量。
   const executionPrivilege: ExecutionPrivilege = opts.executionPrivilege ?? "SANDBOXED";
   const systemPrompt = opts.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
-  const contextPolicy = opts.contextPolicy ?? DEFAULT_CONTEXT_POLICY;
 
   const dbPath = opts.dbPath ?? workspaceStorage(opts.workspaceRoot).dbPath;
   if (dbPath !== ":memory:") mkdirSync(dirname(dbPath), { recursive: true });
@@ -1107,10 +1133,9 @@ export function compose(opts: ComposeOptions): Composed {
     /**
      * 【定】workspace 身份也要冻结（S4-5）。
      *
-     * 这个字段从阶段 1 起就在 `RunSpec` 的类型里，**一直是 undefined** ——
-     * 而 `resume()` 用的 workspaceRoot 来自当前 compose。于是「在 /A 起的 Run
-     * 用 --workspace /B 恢复」会让旧 Run 在错误的目录里继续产生副作用，
-     * 且盘上看不出来。填上它，`assertResumeWorkspaceMatches` 才有东西可比。
+     * 它曾经只在类型里而生产时未填，导致「在 /A 起的 Run 用
+     * --workspace /B 恢复」可能在错误目录继续产生副作用。现在每次创建都
+     * `freezeWorkspace()`，`assertResumeWorkspaceMatches` 只比对这份必填快照。
      *
      * 阶段 4 之前这个洞不易触发（CLI 要手打 runId）；白盒界面把它变成了
      * 列表里一个按钮 —— 所以「选目录 → 切换 workspace」必须先有这道闸门。
@@ -1132,7 +1157,6 @@ export function compose(opts: ComposeOptions): Composed {
   return {
     runtime,
     ports,
-    transcript,
     db,
     profile,
     tools,
@@ -1248,7 +1272,7 @@ export const DEFAULT_SYSTEM_PROMPT = [
  * 最小脱敏实现（V05 §22.2）。
  *
  * 【定】脱敏失败 = Tool 失败，不得降级为原样保存。
- * 阶段 1 只处理最明显的凭证形态；Case 01 的 RedactionProfile 是阶段 3 的范围。
+ * STANDARD 处理明确凭证形态；STRICTEST 额外处理邮箱、高熵串与个人标识。
  */
 class SimpleRedaction implements RedactionPort {
   redact(raw: string, profile: ToolDefinition["redaction"]): RedactionOutcome {

@@ -7,7 +7,6 @@
  * 全部经 ModelProtocolPort 取得 —— 那是形状适配器 ＋ 端点能力声明的组合出口。
  */
 
-import { createHash } from "node:crypto";
 import type {
   ContextBudgetPolicy,
   ContextFrame,
@@ -20,7 +19,7 @@ import type { ContextMessage } from "../types/transcript.js";
 import type { ExecutionPrivilege } from "../types/run.js";
 import type { ModelProtocolPort } from "../ports/index.js";
 import type { IdGeneratorPort } from "../ports/index.js";
-import { asId, type ContextFrameId, type ModelInvocationId, type RunId } from "../types/ids.js";
+import { asId, digest, type ContextFrameId, type ModelInvocationId, type RunId } from "../types/ids.js";
 import { compactMessages } from "./compact.js";
 
 export interface CompileDeps {
@@ -395,7 +394,7 @@ function finishItem(p: PartialItem, deps: CompileDeps): ContextItem {
   return {
     ...p,
     id: asId(deps.ids.next("ci")),
-    contentHash: sha256(text),
+    contentHash: digest(text),
     estimatedTokens: Math.ceil(text.length / 2.5),
     createdAt: deps.now,
   };
@@ -503,9 +502,5 @@ function computeIrreducible(
 }
 
 function hashFrame(f: ContextFrame): string {
-  return sha256(f.items.map((i) => i.contentHash).join("|"));
-}
-
-function sha256(s: string): string {
-  return createHash("sha256").update(s).digest("hex").slice(0, 32);
+  return digest(f.items.map((i) => i.contentHash).join("|"));
 }

@@ -16,7 +16,7 @@
  *
  * 三场景：
  *   办公：打包、解包、格式转换 —— 一条命令顶一个专用工具
- *   代码：跑测试、跑构建、看 git 状态
+ *   代码：跑测试、跑构建、检查生成文件
  *   聊天：临时算个东西、看看某个文件到底多大
  *
  * ── 两道闸门，职责必须分清 ────────────────────────────────────────────
@@ -59,7 +59,7 @@ const MAX_STREAM_CHARS = 30_000;
 /**
  * 默认超时。比 fetch_url 的 30s 长 —— 构建与打包本来就慢。
  *
- * ── 【定】`MAX` 必须等于 `timeoutPolicy.timeoutMs`（2026-08-30 评审 P1）──
+ * ── 【定】`timeoutPolicy.timeoutMs` 必须大于 `MAX`（2026-08-30 评审 P1）──
  *
  * 原来 `MAX_TIMEOUT_MS = 600_000` 而 `timeoutPolicy.timeoutMs = 120_000`，
  * 于是 schema 向模型承诺「上限 600000」，实际 Runtime 在 120 秒就
@@ -70,8 +70,8 @@ const MAX_STREAM_CHARS = 30_000;
  * 它看起来像有人按了取消，实际是一条**文档承诺过、实现里不存在**的上限。
  * 这正是本仓反复猎杀的「声明与实现不符」，只是这次藏在两个常量之间。
  *
- * 【定】改任一个都要改另一个。`timeoutPolicy` 是 Runtime 那一侧的步级超时，
- * 它必须 ≥ 工具自己的上限，否则工具内的 timer 永远轮不到。
+ * 【定】改任一个都要复核另一个。`timeoutPolicy` 是 Runtime 那一侧的步级超时，
+ * 它必须留出余量，否则工具内的 timer 可能轮不到。
  */
 const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_TIMEOUT_MS = 600_000;
@@ -128,17 +128,13 @@ const EXIT_SEMANTICS: Record<string, (code: number) => string | undefined> = {
 export const runShellDefinition: ToolDefinition = {
   id: asId("tool_run_shell"),
   /**
-   * 1.1.0：新增 `artifact_path` / `artifact_role`，并改变了执行后的行为
-   * （读回字节登记产物、执行前拍快照）—— 入参与语义都变了，版本必须动。
+   * 1.1.0：新增 `artifact_path` / `artifact_role`，执行后读回字节登记产物，
+   * 并在执行前拍快照；入参与语义都发生了变化。
+   * 1.1.1：错写的 `artifact_role` 不再被提升为 DELIVERABLE。
    *
-   * ⚠️ 【定】升它是**卫生**，不是修好了什么：`ToolSnapshot.contentHash`
-   * （= `name@version`）在 Runtime 里**零消费者**，全仓只有类型声明那一处。
-   * 也就是说今天没有任何东西会因为版本不变而漏报漂移 ——
-   * 二次评审说「旧 Run Resume/Replay 无法检测语义漂移」时假设了一个
-   * 并不存在的检测器。**真正的缺口是那个字段没接线**（S3-1 同族），
-   * 登记在 S5-8；在它接上之前，版本号只对读代码的人有意义。
+   * 版本是冻结工具快照的显式身份之一；入参或执行语义变化就必须升版。
    */
-  version: "1.1.0",
+  version: "1.1.1",
   name: "run_shell",
   /**
    * ── 【定】① 这一条是**承诺**，必须与 `sandbox.ts` 放行的范围逐字对齐 ──
@@ -269,13 +265,6 @@ export const runShellDefinition: ToolDefinition = {
    */
   effectResolution: { kind: "RESOLVER", resolverRef: SHELL_RESOLVER_REF },
   redaction: { profile: "STANDARD" },
-  /**
-   * 【定】maxAttempts: 1 —— 不重试。
-   *
-   * 其他工具重试是安全的，因为它们幂等。一条 shell 命令不是：
-   * 自动重试一次 `rm -rf build && make install` 意味着那条命令真的跑了两遍。
-   * 重试与否交给模型，它至少知道自己刚才想干什么。
-   */
   /**
    * 【定】说实话：既不幂等也不只读。
    *
@@ -691,7 +680,19 @@ async function collectDeclaredArtifact(
   // 【定】只认 DELIVERABLE / INTERMEDIATE，与 write_file 同一条纪律。
   // 不填按 DELIVERABLE —— 会专门去声明产物路径的人要的就是交付物，
   // 而把它降级成 INTERMEDIATE 会顺带把「检查失败判 FAILED」这条强制力也降掉。
-  const role = input.artifact_role === "INTERMEDIATE" ? "INTERMEDIATE" : "DELIVERABLE";
+  const role =
+    input.artifact_role === undefined || input.artifact_role === "DELIVERABLE"
+      ? "DELIVERABLE"
+      : input.artifact_role === "INTERMEDIATE"
+        ? "INTERMEDIATE"
+        : undefined;
+  if (!role) {
+    return {
+      note:
+        `声明的 artifact_role=${JSON.stringify(input.artifact_role)} 无效，未登记 ${rel}。` +
+        `只接受 DELIVERABLE 或 INTERMEDIATE。`,
+    };
+  }
 
   if (exitCode !== 0) {
     return { note: `声明了交付物 ${rel}，但命令以 exitCode=${exitCode} 结束，未登记。` };

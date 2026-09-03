@@ -10,7 +10,6 @@
  * 「人在哪」。见 `human-channels.ts` 的文件头。
  */
 
-import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 import {
   BUDGET_VALUE_FLAGS,
@@ -25,6 +24,7 @@ import {
 } from "../../cli/src/compose.js";
 import { connectMcpServers } from "@workagent/tools-mcp";
 import { startService } from "./server.js";
+import { selectStartupWorkspace } from "./workspace-registry.js";
 
 function arg(argv: string[], name: string): string | undefined {
   const i = argv.indexOf(`--${name}`);
@@ -90,10 +90,7 @@ function assertKnownArgs(argv: string[]): void {
         `  --sandbox  on|off                 执行特权（默认 on，**运行中不可改**）\n` +
         // 【定】由表推出，不手写 —— 与 CLI 那一处同源。
         `${budgetFlagHelp()}\n` +
-        `  （预算轴也可以在界面「新任务」栏里逐 Run 覆盖）` +
-        (name === "yes-all"
-          ? `\n\n（\`--yes-all\` 已改成 \`--approval auto\`，ADR-0012。它现在两个入口都有。）`
-          : ""),
+        `  （预算轴也可以在界面「新任务」栏里逐 Run 覆盖）`,
     );
   }
 }
@@ -101,7 +98,13 @@ function assertKnownArgs(argv: string[]): void {
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   assertKnownArgs(argv);
-  const workspaceRoot = resolve(arg(argv, "workspace") ?? resolve(REPO_ROOT, ".workagent-workspace"));
+  const registryFile = resolve(REPO_ROOT, DEFAULT_STATE_DIR, "workspaces.json");
+  const requestedWorkspace = arg(argv, "workspace");
+  const workspaceRoot = selectStartupWorkspace({
+    registryFile,
+    fallbackPath: resolve(REPO_ROOT, ".workagent-workspace"),
+    ...(requestedWorkspace ? { requestedPath: resolve(requestedWorkspace) } : {}),
+  }).realPath;
   const endpoint = parseEndpointArg(argv);
   const portArg = arg(argv, "port");
   // ADR-0012：两条轴，与 CLI 同一份解析函数（抄一份就会分叉）。
@@ -109,8 +112,8 @@ async function main(): Promise<void> {
   const executionPrivilege = parseSandboxArg(arg(argv, "sandbox"));
 
   // 【定】没有 `--db` / `--trace-dir`：存储位置由 workspace 唯一推出
-  // （`workspaceStorage()`），CLI 与界面同一条规则。
-  mkdirSync(workspaceRoot, { recursive: true });
+  // （`workspaceStorage()`），CLI 与界面同一条规则。目录已由上面的启动选择
+  // 完成校验与创建；无 `--workspace` 时这里拿到的是注册表上次的 active 项。
 
   /**
    * ── 【定】MCP 连一次，跨 workspace 切换**复用同一个连接** ────────────────
@@ -130,77 +133,87 @@ async function main(): Promise<void> {
     workspaceRoot,
   });
 
-  const svc = await startService({
-    workspaceRoot,
-    endpoint,
-    approvalMode,
-    executionPrivilege,
-    // `--max-turns` 等八条轴：这是**启动档**（每个新 Run 的默认预算）。
-    // 界面「新任务」栏里的输入框压在它之上，逐 Run 生效。
-    composeOverrides: { mcp, budgetOverrides: parseBudgetFlags(argv) },
-    /**
-     * 【定】注册表放在 `.workagent-state/` 而不是某个 workspace 里面。
-     *
-     * 它记的是「有哪些 workspace」—— 一份**跨 workspace** 的产品状态。
-     * 放进其中一个 workspace 的话，切到别的目录之后就找不着这张表了
-     * （而那正是「切换」这个功能要解决的问题）。
-     */
-    registryFile: resolve(REPO_ROOT, DEFAULT_STATE_DIR, "workspaces.json"),
-    // 【定】默认随机端口（§22.6）。`--port` 是给「我要把它固定在书签里」的人用的，
-    // 代价是端口可预测 —— 但 Token 与 Origin/Host 校验仍然在，那才是边界。
-    ...(portArg ? { port: Number(portArg) } : {}),
-  });
+  try {
+    const svc = await startService({
+      workspaceRoot,
+      endpoint,
+      approvalMode,
+      executionPrivilege,
+      // `--max-turns` 等八条轴：这是**启动档**（每个新 Run 的默认预算）。
+      // 界面「新任务」栏里的输入框压在它之上，逐 Run 生效。
+      composeOverrides: { mcp, budgetOverrides: parseBudgetFlags(argv) },
+      /**
+       * 【定】注册表放在 `.workagent-state/` 而不是某个 workspace 里面。
+       *
+       * 它记的是「有哪些 workspace」—— 一份**跨 workspace** 的产品状态。
+       * 放进其中一个 workspace 的话，切到别的目录之后就找不着这张表了
+       * （而那正是「切换」这个功能要解决的问题）。
+       */
+      registryFile,
+      // 【定】默认随机端口（§22.6）。`--port` 是给「我要把它固定在书签里」的人用的，
+      // 代价是端口可预测 —— 但 Token 与 Origin/Host 校验仍然在，那才是边界。
+      ...(portArg ? { port: Number(portArg) } : {}),
+    });
 
-  const info = svc.host.info();
-  const wsList = svc.workspaces.list();
-  console.log(`workspace : ${info.workspaceRoot}`);
-  console.log(`  （已登记 ${wsList.length} 个，可在界面左上角切换 / 新建）`);
-  console.log(`db        : ${info.dbPath}`);
-  console.log(`trace     : ${info.traceDir}`);
-  console.log(`endpoint  : ${info.endpoint}（${info.endpointHost}）`);
-  console.log(`profile   : ${info.profileId}`);
-  console.log(`model     : ${info.modelId}`);
-  console.log(`工具      : ${info.toolNames.length} 个，固定开销起步价 ≈ ${info.fixedOverheadTokens} token`);
-  // 【定】档位与 CLI 一样要打出来，且用同一个 `describeModes()`。
-  // 一次对用户可见的边界让渡而不打印，等于没通知。
-  console.log(`modes     : ${info.approvalMode}`);
-  if (info.fullAccessWarning) console.log(`\x1b[31m⚠️  ${info.fullAccessWarning}\x1b[0m`);
-  if (executionPrivilege === "UNRESTRICTED") {
-    // 【定】把「这一档不能在界面上改」说出来。界面上审批那个开关是活的，
-    // 用户很容易以为旁边那条也是 —— 而它不是（随 RunSpec 冻结）。
-    console.log(`            执行特权随 Run 冻结，界面上改不了；要换请重启并调整 --sandbox。`);
-  }
-  /**
-   * 预算：只打**被覆盖的**轴，与 CLI 同一条口径。
-   * 默认值不打（界面「预算」页与每个 Run 冻结的 spec 上都查得到）。
-   */
-  const budgetLine = info.budgetDefaults
-    .filter((a) => a.axis in parseBudgetFlags(argv))
-    .map((a) => `${a.field} ${a.limit}`)
-    .join("，");
-  if (budgetLine) console.log(`budget    : ${budgetLine}（启动档，界面上可逐 Run 再改）`);
-  for (const n of info.notices) {
-    console.log(`⚠️  ${n.text}`);
-    // 终端照旧全打。折叠是**界面**的处置 —— 顶栏只有几行高，scrollback 没有上限。
-    if (n.detail) console.log(`  ${n.detail}`);
-  }
-  console.log(`\n白盒界面已启动，用浏览器打开（**这个 URL 带着会话 Token，别贴出去**）：\n`);
-  console.log(`  \x1b[36m${svc.url}\x1b[0m\n`);
-  console.log(`Ctrl+C 停止。停止时正在跑的 Run 会被取消（等人的请求一并中断）。`);
+    try {
+      const info = svc.host.info();
+      const wsList = svc.workspaces.list();
+      console.log(`workspace : ${info.workspaceRoot}`);
+      console.log(`  （已登记 ${wsList.length} 个，可在界面左上角切换 / 新建）`);
+      console.log(`db        : ${info.dbPath}`);
+      console.log(`trace     : ${info.traceDir}`);
+      console.log(`endpoint  : ${info.endpoint}（${info.endpointHost}）`);
+      console.log(`profile   : ${info.profileId}`);
+      console.log(`model     : ${info.modelId}`);
+      console.log(`工具      : ${info.toolNames.length} 个，固定开销起步价 ≈ ${info.fixedOverheadTokens} token`);
+      // 【定】档位与 CLI 一样要打出来，且用同一个 `describeModes()`。
+      // 一次对用户可见的边界让渡而不打印，等于没通知。
+      console.log(`modes     : ${info.approvalMode}`);
+      if (info.fullAccessWarning) console.log(`\x1b[31m⚠️  ${info.fullAccessWarning}\x1b[0m`);
+      if (executionPrivilege === "UNRESTRICTED") {
+        // 【定】把「这一档不能在界面上改」说出来。界面上审批那个开关是活的，
+        // 用户很容易以为旁边那条也是 —— 而它不是（随 RunSpec 冻结）。
+        console.log(`            执行特权随 Run 冻结，界面上改不了；要换请重启并调整 --sandbox。`);
+      }
+      /**
+       * 预算：只打**被覆盖的**轴，与 CLI 同一条口径。
+       * 默认值不打（界面「预算」页与每个 Run 冻结的 spec 上都查得到）。
+       */
+      const budgetLine = info.budgetDefaults
+        .filter((a) => a.axis in parseBudgetFlags(argv))
+        .map((a) => `${a.field} ${a.limit}`)
+        .join("，");
+      if (budgetLine) console.log(`budget    : ${budgetLine}（启动档，界面上可逐 Run 再改）`);
+      for (const n of info.notices) {
+        console.log(`⚠️  ${n.text}`);
+        // 终端照旧全打。折叠是**界面**的处置 —— 顶栏只有几行高，scrollback 没有上限。
+        if (n.detail) console.log(`  ${n.detail}`);
+      }
+      console.log(`\n白盒界面已启动，用浏览器打开（**这个 URL 带着会话 Token，别贴出去**）：\n`);
+      console.log(`  \x1b[36m${svc.url}\x1b[0m\n`);
+      console.log(`Ctrl+C 停止。停止时正在跑的 Run 会被取消（等人的请求一并中断）。`);
 
-  const stop = async (): Promise<void> => {
-    console.log("\n正在停止……");
-    await svc.close();
-    // MCP 子进程（浏览器）也要收掉 —— 不收的话它会留在后台，
-    // 而下次启动会再开一个，用户只会看到「浏览器窗口越来越多」。
+      await new Promise<void>((resolveStop) => {
+        let requested = false;
+        const stop = (): void => {
+          if (requested) return;
+          requested = true;
+          console.log("\n正在停止……");
+          resolveStop();
+        };
+        process.once("SIGINT", stop);
+        process.once("SIGTERM", stop);
+      });
+    } finally {
+      await svc.close();
+    }
+  } finally {
+    // MCP 子进程（浏览器）覆盖 startService、启动信息与运行期的全部异常出口。
     await mcp.close();
-    process.exit(0);
-  };
-  process.on("SIGINT", () => void stop());
-  process.on("SIGTERM", () => void stop());
+  }
 }
 
 main().catch((err) => {
-  console.error(`\n启动失败：${(err as Error).message}`);
-  process.exit(1);
+  console.error(`\n服务运行失败：${(err as Error).message}`);
+  process.exitCode = 1;
 });

@@ -19,6 +19,7 @@ import { resolve } from "node:path";
 import {
   CollectingTraceSink,
   loadProfileFromFile,
+  parseProfile,
   type ContextItem,
 } from "@workagent/harness-runtime";
 import {
@@ -27,7 +28,7 @@ import {
   mergeUsage,
   readUsagePartial,
 } from "@workagent/shape-anthropic-messages";
-import { strictFakeProfile } from "@workagent/testkit";
+import { fakeProfile, strictFakeProfile } from "@workagent/testkit";
 import { DEFAULT_TOOLS, compose, REPO_ROOT } from "../compose.js";
 import { ScriptedModelPort, banner, fact, runVerify, section, tempWorkspace, verdict } from "./harness.js";
 
@@ -47,6 +48,9 @@ async function main(): Promise<void> {
   section("A. 两份端点声明的差异");
   const real = loadProfileFromFile(
     resolve(REPO_ROOT, "adapters/endpoint-profiles/bailian-anthropic.json"),
+  );
+  const deepseek = loadProfileFromFile(
+    resolve(REPO_ROOT, "adapters/endpoint-profiles/deepseek-anthropic.json"),
   );
   const fake = strictFakeProfile();
 
@@ -97,6 +101,70 @@ async function main(): Promise<void> {
     roleReal === "ORDINARY" && roleFake === "PLACEHOLDER_REQUIRED",
     `协议角色随端点声明改变：${roleReal} → ${roleFake}`,
   );
+
+  section("B2. usageFieldMap 的键真的接到归一化 usage 字段");
+  let unknownUsageKeyRejected = false;
+  try {
+    parseProfile({
+      ...deepseek,
+      tokens: { ...deepseek.tokens, usageFieldMap: { input: "input_tokens" } },
+    } as unknown as Record<string, unknown>);
+  } catch {
+    unknownUsageKeyRejected = true;
+  }
+  let fractionalLimitRejected = false;
+  try {
+    parseProfile({
+      ...deepseek,
+      limits: { quotaBeforeContextLimit: false, maxContextTokens: 1.5 },
+    } as unknown as Record<string, unknown>);
+  } catch {
+    fractionalLimitRejected = true;
+  }
+  const deepseekUsage = readUsagePartial(
+    { input_tokens: 321, output_tokens: 9 },
+    deepseek,
+  );
+  fact("DeepSeek map", JSON.stringify(deepseek.tokens.usageFieldMap));
+  verdict(
+    deepseek.tokens.usageFieldMap.inputTokens === "input_tokens" &&
+      deepseek.tokens.usageFieldMap.outputTokens === "output_tokens" &&
+      deepseekUsage.inputTokens === 321 && deepseekUsage.outputTokens === 9 &&
+      unknownUsageKeyRejected && fractionalLimitRejected,
+    "DeepSeek 配置使用归一化键且 reader 真正消费；未知 usage 键与非整数 token 上限会在加载时被拒绝",
+  );
+
+  const limitedProfile = fakeProfile({
+    limits: {
+      maxContextTokens: 12_000,
+      observedMaxSingleRequestTokens: 10_000,
+      quotaBeforeContextLimit: true,
+    },
+  });
+  const limitWs = tempWorkspace();
+  const limited = compose({
+    dbPath: ":memory:",
+    workspaceRoot: limitWs.root,
+    approvalDecider: async () => ({ approved: true }),
+    trace: new CollectingTraceSink(),
+    profileOverride: limitedProfile,
+    modelPortOverride: new ScriptedModelPort([{ text: "不调用。", toolCalls: [] }]),
+  });
+  try {
+    const spec = limited.makeRunSpec("端点上限验收");
+    const notices = limited.notices.map((notice) => notice.text).join("\n");
+    fact("端点限制后的 context hard/soft", `${spec.agentSpec.contextPolicy.hardInputLimitTokens}/${spec.agentSpec.contextPolicy.softInputLimitTokens}`);
+    verdict(
+      spec.agentSpec.contextPolicy.hardInputLimitTokens === 12_000 &&
+        spec.agentSpec.contextPolicy.softInputLimitTokens < 12_000 &&
+        notices.includes("10000 tokens") &&
+        notices.includes("QUOTA_EXHAUSTED"),
+      "EndpointLimits 会收紧冻结的上下文策略，并把观测上限与 quota-before-context 处置公开给入口",
+    );
+  } finally {
+    limited.db.close();
+    limitWs.cleanup();
+  }
 
   // ── C. validateFrame 的严格度必须随声明改变
   section("C. 「含 tool_call 但缺推理块」的帧，两个端点下的校验结果");

@@ -77,7 +77,7 @@ export interface DeclarativeScopeRule {
  */
 export type EffectResolutionDescriptor =
   | { kind: "DECLARATIVE"; rule: DeclarativeScopeRule }
-  | { kind: "RESOLVER"; resolverRef: VersionedRef<unknown> };
+  | { kind: "RESOLVER"; resolverRef: VersionedRef };
 
 // ─────────────────────────────────────────────────────── Descriptors
 

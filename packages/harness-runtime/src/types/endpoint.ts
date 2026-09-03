@@ -75,15 +75,25 @@ export interface TokenAccountingCapability {
    * 因为命中时 input_tokens 只剩非缓存部分。
    */
   billedInputFormula: "INPUT_ONLY" | "INPUT_PLUS_CACHE";
-  usageFieldMap: Record<string, string>;
+  /**
+   * 形状默认字段名的可选覆盖。键是归一化 `ModelUsage` 字段，值是 Provider 字段。
+   * 未列出的键使用形状适配器默认值；未知键必须在加载声明时拒绝。
+   */
+  usageFieldMap: Partial<Record<UsageFieldKey, string>>;
 }
 
-/** 阶段 2 实现（D-17）。阶段 1 只留类型。 */
+export type UsageFieldKey =
+  | "inputTokens"
+  | "outputTokens"
+  | "cacheCreationInputTokens"
+  | "cacheReadInputTokens";
+
+/** Provider 错误分类所依赖的端点声明（D-17）。 */
 export interface ErrorTaxonomyProfile {
   discriminators: Array<"HTTP_STATUS" | "TYPE" | "CODE" | "MESSAGE_MATCH">;
 }
 
-/** 阶段 2 实现（D-17）。阶段 1 只留类型。 */
+/** 组合时收紧上下文策略、生成可观测提示的端点限制。 */
 export interface EndpointLimits {
   maxContextTokens?: number;
   observedMaxSingleRequestTokens?: number;
@@ -110,12 +120,12 @@ export interface EndpointCapabilityProfile {
    */
   expectedBaseUrlHost?: string;
 
-  // 阶段 1 实现的三组（D-17）
+  /** 协议、上下文与 token 是每个端点声明的基础能力。 */
   protocol: ProtocolEnforcement;
   context: ContextCapability;
   tokens: TokenAccountingCapability;
 
-  // 阶段 2（D-17）
+  /** 只有具备相应证据的端点才声明错误分类与容量限制。 */
   errors?: ErrorTaxonomyProfile;
   limits?: EndpointLimits;
 

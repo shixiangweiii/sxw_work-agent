@@ -11,10 +11,7 @@ import type { RuntimeErrorRecord } from "./error.js";
 import type { ContextFrameId, ModelInvocationId, RunId, Timestamp } from "./ids.js";
 import type { ModelUsage } from "./run.js";
 
-export const MODEL_INVOCATION_AUDIT_SCHEMA_VERSION = 1 as const;
-
 export interface ModelInvocationAuditStart {
-  schemaVersion: typeof MODEL_INVOCATION_AUDIT_SCHEMA_VERSION;
   runId: RunId;
   invocationId: ModelInvocationId;
   frameId: ContextFrameId;
@@ -84,7 +81,7 @@ export type ModelInvocationAuditEnd =
       error: RuntimeErrorRecord;
     };
 
-/** schemaVersion=1 的五类持久化记录。大字段保持 unknown，reader 只校验容器契约。 */
+/** 五类持久化记录。大字段保持 unknown，reader 严格校验当前容器契约。 */
 export type ModelInvocationAuditRequestRecord =
   Omit<ModelInvocationAuditStart, "requestBody"> & {
     kind: "request";
@@ -93,13 +90,11 @@ export type ModelInvocationAuditRequestRecord =
 
 export interface ModelInvocationAuditResponseMetadataRecord extends ProviderResponseMetadata {
   kind: "response_metadata";
-  schemaVersion: typeof MODEL_INVOCATION_AUDIT_SCHEMA_VERSION;
   observedAt: Timestamp;
 }
 
 export interface ModelInvocationAuditProviderEventRecord {
   kind: "provider_event";
-  schemaVersion: typeof MODEL_INVOCATION_AUDIT_SCHEMA_VERSION;
   index: number;
   observedAt: Timestamp;
   /** SDK 解码后的 Provider 语义事件；ping 不在 SDK 迭代结果中。 */
@@ -108,14 +103,12 @@ export interface ModelInvocationAuditProviderEventRecord {
 
 export interface ModelInvocationAuditProviderErrorRecord {
   kind: "provider_error";
-  schemaVersion: typeof MODEL_INVOCATION_AUDIT_SCHEMA_VERSION;
   observedAt: Timestamp;
   failure: ProviderFailureObservation;
 }
 
 export type ModelInvocationAuditEndRecord = ModelInvocationAuditEnd & {
   kind: "invocation_end";
-  schemaVersion: typeof MODEL_INVOCATION_AUDIT_SCHEMA_VERSION;
 };
 
 export type ModelInvocationAuditRecord =

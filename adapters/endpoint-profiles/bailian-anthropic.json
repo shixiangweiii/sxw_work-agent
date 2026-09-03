@@ -40,12 +40,12 @@
     }
   },
 
-  "_comment_errors": "阶段 2 实现（D-17）。连 type/code 字段都没有，message 也最简短（Model not exist.），判别式只能是 HTTP_STATUS + MESSAGE_MATCH。",
+  "_comment_errors": "连 type/code 字段都没有，message 也最简短（Model not exist.），判别式只能是 HTTP_STATUS + MESSAGE_MATCH。",
   "errors": {
     "discriminators": ["HTTP_STATUS", "MESSAGE_MATCH"]
   },
 
-  "_comment_limits": "阶段 2 实现（D-17）。同平台 OpenAI 形状对 60 万 token 返回 429 insufficient_quota，本形状接受同一 payload。",
+  "_comment_limits": "同平台 OpenAI 形状对 60 万 token 返回 429 insufficient_quota，本形状接受同一 payload。",
   "limits": {
     "quotaBeforeContextLimit": false
   },

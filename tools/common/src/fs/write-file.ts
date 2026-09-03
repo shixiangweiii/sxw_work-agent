@@ -43,7 +43,7 @@ export const writeFileDefinition: ToolDefinition = {
   name: "write_file",
   // 1.1.0：`kindOf` 改为共享的 `artifactKindOf`，`.png` 这类扩展名从
   // `text` 变成 `binary` —— **跑的检查器变了**，是语义变化。
-  // 升版本的意义见 run-shell.ts 同一处的【定】（contentHash 目前零消费者）。
+  // 工具入参或执行语义变化就必须升版。
   description:
     "把一段文本写入文件，**覆盖**已有内容。path 相对于 workspace 根目录，" +
     "必须落在 workspace 内（写操作不允许越界）。父目录会自动创建。" +

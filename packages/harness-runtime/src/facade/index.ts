@@ -78,7 +78,7 @@ export interface HarnessRuntimeDeps {
    *
    * 【定】与 `currentEndpointProfile` / `currentToolSnapshots` 同一条纪律：
    * **只用来比对冻结的那一份，绝不用来顶替它**。执行期读的永远是
-   * `executionPrivilegeOf(spec.agentSpec)`。
+   * `executionPrivilegeOf(spec.agentSpec)`；缺失或非法的盘上值会 fail-fast。
    *
    * 不传按 `SANDBOXED` 处置 —— 那是 `compose()` 的默认值，两处必须同向。
    * 反向（不传按 UNRESTRICTED）会让一个忘了传的调用方悄悄拿到无沙箱执行。
@@ -403,8 +403,7 @@ export class HarnessRuntime {
        * §18.3 里 Atlas **做不到**的那一维：外部工具的世界还是不是原来那个。
        *
        * 【定】做不到就说出来，不许默不作声。理由见
-       * `ResumeExternalToolsUnverifiable` 的类型注释 —— 与 workspace 闸门
-       * 那条 `UNKNOWN_LEGACY` 是同一条：放行了却没验过的闸门如果不说话，
+       * `ResumeExternalToolsUnverifiable` 的类型注释：放行了却没验过的闸门如果不说话，
        * 与「验过并通过」在事后完全不可区分。
        *
        * 判别式用 `effectResolution.kind === "RESOLVER"` ＋ scope 不可解析这类
@@ -973,7 +972,6 @@ function tallyUnmetCauses(verifications: VerificationResult[]): Record<string, n
   }
   return out;
 }
-
 
 function terminalToStatus(t: Terminal): RunStatus {
   switch (t.reason) {

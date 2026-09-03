@@ -7,7 +7,6 @@
 
 import { writeSync } from "node:fs";
 import {
-  MODEL_INVOCATION_AUDIT_SCHEMA_VERSION,
   asId,
   type ContextFrameId,
   type ModelInvocationId,
@@ -20,7 +19,6 @@ const rootDir = process.argv[2];
 if (!rootDir) throw new Error("用法：model-audit-crash.ts <audit-root>");
 
 const writer = new FileModelInvocationAuditStore(rootDir).open({
-  schemaVersion: MODEL_INVOCATION_AUDIT_SCHEMA_VERSION,
   runId: asId<RunId>("run_audit_crash"),
   invocationId: asId<ModelInvocationId>("inv_audit_crash"),
   frameId: asId<ContextFrameId>("frame_audit_crash"),

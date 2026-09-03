@@ -82,6 +82,10 @@ const L = (id: string) => ({
   text: "看看目录",
   toolCalls: [{ toolCallId: id, name: "list_dir", input: { path: "." } }],
 });
+const R = (id: string, path: string) => ({
+  text: `读 ${path}`,
+  toolCalls: [{ toolCallId: id, name: "read_file", input: { path } }],
+});
 const END = { text: "做完了。", toolCalls: [] };
 
 const CASES: Case[] = [
@@ -117,6 +121,14 @@ const CASES: Case[] = [
     seed: [["b.txt", "开头\n改我\n结尾\n"]],
   },
   {
+    name: "窗口 C：Blob 已落库、引用消息未落盘 → 只读调用重跑",
+    killAt: "ToolResultExternalized#1",
+    expectBranch: "IDEMPOTENT_RETRY",
+    script: [R("c1", "large.txt"), END],
+    resumeOffset: 1,
+    seed: [["large.txt", Array.from({ length: 120 }, () => "x".repeat(1_000)).join("\n")]],
+  },
+  {
     name: "窗口 A ＋ 分支三：追加且拍不到前置指纹 → 停在 RECOVERY_REQUIRED",
     killAt: "AttemptStarted#1",
     expectBranch: "RECOVERY_REQUIRED",
@@ -143,7 +155,7 @@ async function main(): Promise<void> {
   );
 
   const tmp = mkdtempSync(join(tmpdir(), "workagent-crash-"));
-  const results: Array<{ name: string; ok: boolean }> = [];
+  const caseResults: Array<{ name: string; ok: boolean }> = [];
 
   try {
     section("A. 逐个注入：崩溃点 → 恢复分支");
@@ -176,7 +188,7 @@ async function main(): Promise<void> {
 
       if (!seg1.killed || !seg1.runId) {
         fact(c.name, `段 1 没被 kill（${seg1.error ?? seg1.exitCode}）`);
-        results.push({ name: c.name, ok: false });
+        caseResults.push({ name: c.name, ok: false });
         continue;
       }
 
@@ -233,14 +245,14 @@ async function main(): Promise<void> {
       const finalMsgs = messagesOf(await readEntries(dbPath, runId));
       const unpaired = findUnpairedToolUses(finalMsgs);
       fact("   最终未配对 tool_use", unpaired.length);
-      results.push({ name: c.name, ok: finalOk && unpaired.length === 0 });
+      caseResults.push({ name: c.name, ok: finalOk && unpaired.length === 0 });
     }
 
     verdict(
-      results.every((r) => r.ok),
-      results.every((r) => r.ok)
+      caseResults.every((r) => r.ok),
+      caseResults.every((r) => r.ok)
         ? "三个窗口、三条分支各自命中，且每次恢复之后配对不变量都完好"
-        : `未通过：${results.filter((r) => !r.ok).map((r) => r.name).join(" / ")}`,
+        : `未通过：${caseResults.filter((r) => !r.ok).map((r) => r.name).join(" / ")}`,
     );
 
     // ────────────────────────────────────────────── B. 决 6 的判别力
@@ -249,7 +261,7 @@ async function main(): Promise<void> {
     const withoutFp = CASES.find((c) => c.name.includes("拍不到前置指纹"));
     const idxWith = CASES.indexOf(withFp!);
     const idxWithout = CASES.indexOf(withoutFp!);
-    const bOk = results[idxWith]?.ok === true && results[idxWithout]?.ok === true;
+    const bOk = caseResults[idxWith]?.ok === true && caseResults[idxWithout]?.ok === true;
     fact("append_log ＋ 指纹", "→ OBSERVE_FIRST（分支二）");
     fact("append_log ＋ 无指纹", "→ RECOVERY_REQUIRED（分支三）");
     console.log(
@@ -264,7 +276,6 @@ async function main(): Promise<void> {
         ? "同一个 append_log 被送进了两条不同的分支，分流由 Action 级事实决定而非工具声明"
         : "决 6 的判别力没验出来",
     );
-    results.push({ name: "决 6 判别力", ok: bOk });
 
     // ────────────────────────────────────────────── C. 测量装置
     section("C. 阶段 2 的测量装置：分支分布可导出");
@@ -320,22 +331,6 @@ async function main(): Promise<void> {
         : !exportMatches
           ? `Facade 导出与直读 RUN_META 不一致：${fmtTally(viaFacade)} vs ${fmtTally(branchTally)}`
           : `只观测到 ${Object.keys(branchTally).length} 条分支，测量装置不完整`,
-    );
-    results.push({ name: "测量装置", ok: cOk });
-
-    // ────────────────────────────────────────────── 总判定
-    section("总判定");
-    const ok = results.every((r) => r.ok);
-    verdict(
-      ok,
-      ok
-        ? "真 SIGKILL 下：窗口 A/B 各自可恢复，三条分支各命中，RECOVERY_REQUIRED 闸门有效，配对不变量全程守住，分支分布可导出"
-        : "有失败项，见上",
-    );
-    console.log(
-      "\n   关于窗口 C（Blob 已写入但引用消息未落盘）：**本阶段不验**。\n" +
-        "   BlobStore 按决 1 推到了阶段 3，当前没有任何工具会产出 Blob ——\n" +
-        "   造一个假的 Blob 来测它，测的是假货不是机制。\n",
     );
   } finally {
     rmSync(tmp, { recursive: true, force: true });

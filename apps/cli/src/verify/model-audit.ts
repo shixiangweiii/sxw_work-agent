@@ -449,7 +449,7 @@ async function main(): Promise<void> {
       "provider_event 写盘失败只产生一条显眼诊断，模型调用、预算计数和 Run 结算继续",
     );
 
-    section("H. Reader 用严格 v1 状态机区分完整、合法前缀与语义损坏");
+  section("H. Reader 用严格状态机区分完整、合法前缀与语义损坏");
     // 判别力实测：临时跳过 shapeError 后，本段语义矩阵翻红，SIGKILL 合法前缀仍为绿色。
     const readerDir = join(workspace.root, "reader-fixtures");
     mkdirSync(readerDir, { recursive: true });
@@ -473,7 +473,6 @@ async function main(): Promise<void> {
     const corrupt = readModelInvocationAudit(corruptPath);
     const missing = readModelInvocationAudit(join(readerDir, "missing.jsonl"));
     const semanticCases = [
-      readModelInvocationAudit(fixture("wrong-schema", [{ ...requestFixture, schemaVersion: 2 }])),
       readModelInvocationAudit(fixture("end-only", [endFixture])),
       readModelInvocationAudit(fixture("duplicate-request", [requestFixture, requestFixture])),
       readModelInvocationAudit(fixture("metadata-after-event", [requestFixture, eventFixture, metadataFixture])),
@@ -482,7 +481,7 @@ async function main(): Promise<void> {
       readModelInvocationAudit(fixture("duplicate-error", [requestFixture, errorFixture, errorFixture])),
       readModelInvocationAudit(fixture("event-after-error", [requestFixture, errorFixture, eventFixture])),
       readModelInvocationAudit(fixture("record-after-end", [requestFixture, endFixture, metadataFixture])),
-      readModelInvocationAudit(fixture("unknown-kind", [requestFixture, { kind: "mystery", schemaVersion: 1 }])),
+      readModelInvocationAudit(fixture("unknown-kind", [requestFixture, { kind: "mystery" }])),
       readModelInvocationAudit(fixture("missing-field", [{ ...requestFixture, invocationId: undefined }])),
       readModelInvocationAudit(fixture("internal-blank", [requestFixture, endFixture], "\n\n")),
     ];

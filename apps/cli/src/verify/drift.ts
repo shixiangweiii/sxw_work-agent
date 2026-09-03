@@ -51,7 +51,6 @@ async function main(): Promise<void> {
   );
 
   const live = process.argv.includes("--live");
-  const results: Array<{ name: string; ok: boolean }> = [];
 
   // ────────────────────────────────────────────────────────── A
   section("A. 三条规则各自的判别力（纯函数层）");
@@ -134,7 +133,6 @@ async function main(): Promise<void> {
         "规则 1 这次是真的被断言了（此前抬头三条、断言两条）"
       : "规则的判别力不成立",
   );
-  results.push({ name: "A", ok: aOk });
 
   // ────────────────────────────────────────────────────────── B
   section("B. 本地推理块补估不该被当成端点漂移");
@@ -161,7 +159,6 @@ async function main(): Promise<void> {
       ? "有本地补估时只 RECORD 不 FAIL_FAST —— 不会因为我们自己的保守估算把 Run 打死"
       : "补估与端点漂移没有被区分开",
   );
-  results.push({ name: "B", ok: bOk });
 
   // ────────────────────────────────────────────────────────── B2
   section("B2. 【定】观测点读的是 billedInputTokens，不是 inputTokens");
@@ -258,7 +255,6 @@ async function main(): Promise<void> {
       : `观测点读错了 token 口径：报的是「${farObserved}」，` +
         `对齐后仍有 ${aligned.drift.length} 条事件`,
   );
-  results.push({ name: "B2", ok: b2Ok });
 
   // ────────────────────────────────────────────────────────── C
   section("C. 端到端：FAIL_FAST 真的终止，且事件真的发出");
@@ -302,7 +298,6 @@ async function main(): Promise<void> {
   } finally {
     ws.cleanup();
   }
-  results.push({ name: "C", ok: cOk });
 
   // ────────────────────────────────────────────────────────── D
   section("D. U-6：对照端点的装配检查");
@@ -346,7 +341,6 @@ async function main(): Promise<void> {
       ? "端点声明与 baseUrl 的对应关系在启动前被断言 —— 换 baseUrl 却忘了换声明会当场被挡下，而不是悄悄跑错"
       : "U-6 的断言没有判别力",
   );
-  results.push({ name: "D", ok: dOk });
 
   // ────────────────────────────────────────────────────────── E
   /**
@@ -448,7 +442,6 @@ async function main(): Promise<void> {
   } finally {
     wsE.cleanup();
   }
-  results.push({ name: "E", ok: eOk });
 
   if (!live) {
     console.log(
@@ -494,21 +487,11 @@ async function main(): Promise<void> {
               "阶段 1「批内配对不变量 100% 由 Runtime 自持」这个结论在对照端点上成立"
           : "对照端点上出现了错误，需要逐条看是不是自持逻辑的系统性缺陷（那是有价值的发现）",
       );
-      results.push({ name: "D-live", ok: liveOk });
     } finally {
       ws2.cleanup();
     }
   }
 
-  // ────────────────────────────────────────────────────────── 总判定
-  section("总判定");
-  const ok = results.every((r) => r.ok);
-  verdict(
-    ok,
-    ok
-      ? "漂移检测有运行时载体且有判别力；本地补估不被误判为端点漂移；对照端点声明就位、U-6 断言生效"
-      : `失败段：${results.filter((r) => !r.ok).map((r) => r.name).join(" ")}`,
-  );
   console.log(
     "\n   为什么 U-1 必须先于接 DeepSeek：§24.6 对照测试的意义**建立在能观测到漂移上**。\n" +
       "   `profileMatches` 与 `DriftDetector` 双双零调用点的状态下，\n" +

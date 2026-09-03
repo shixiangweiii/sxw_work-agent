@@ -73,7 +73,7 @@ export async function executeNow(
   _input: Record<string, never>,
   ctx: ToolExecutionContext,
 ): Promise<ToolExecutionOutcome> {
-  const tz = ctx.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const tz = ctx.timezone;
   const d = new Date();
   const local = new Intl.DateTimeFormat("zh-CN", {
     timeZone: tz,

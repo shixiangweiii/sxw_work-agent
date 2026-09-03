@@ -34,8 +34,8 @@
     "perRequestBaseTokens": 84,
     "billedInputFormula": "INPUT_PLUS_CACHE",
     "usageFieldMap": {
-      "input": "input_tokens",
-      "output": "output_tokens"
+      "inputTokens": "input_tokens",
+      "outputTokens": "output_tokens"
     }
   },
 

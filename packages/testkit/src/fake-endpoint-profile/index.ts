@@ -18,6 +18,7 @@ export interface FakeProfileOverrides {
   protocol?: Partial<EndpointCapabilityProfile["protocol"]>;
   context?: Partial<EndpointCapabilityProfile["context"]>;
   tokens?: Partial<EndpointCapabilityProfile["tokens"]>;
+  limits?: Partial<NonNullable<EndpointCapabilityProfile["limits"]>>;
   modelId?: string;
 }
 
@@ -67,7 +68,7 @@ export function fakeProfile(overrides: FakeProfileOverrides = {}): EndpointCapab
       ...overrides.tokens,
     },
     errors: { discriminators: ["HTTP_STATUS", "MESSAGE_MATCH"] },
-    limits: { quotaBeforeContextLimit: false },
+    limits: { quotaBeforeContextLimit: false, ...overrides.limits },
     observedAt: 0,
     probeSuiteVersion: "fake",
     sourceEvidenceRefs: [],

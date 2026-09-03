@@ -589,13 +589,13 @@ export interface ArtifactStorePort {
 /**
  * 产物在本次 Run 里的角色。**它决定检查失败时的 outcome 映射**（§1.2 第 3 条）：
  *
- *   DELIVERABLE          → 检查失败结算 `FAILED`
- *   INTERMEDIATE / RESULT → 检查失败结算 `COMPLETED_WITH_LIMITS` ＋ 具名 incompleteItems
+ *   DELIVERABLE  → 检查失败结算 `FAILED`
+ *   INTERMEDIATE → 检查失败结算 `COMPLETED_WITH_LIMITS` ＋ 具名 incompleteItems
  *
  * 【定】两者必须可区分。一律降级为 COMPLETED_WITH_LIMITS 会让
  * 「交付物是坏的」和「某个中间步骤有瑕疵」在 outcome 上看不出差别。
  */
-export type ArtifactRole = "DELIVERABLE" | "INTERMEDIATE" | "RESULT";
+export type ArtifactRole = "DELIVERABLE" | "INTERMEDIATE";
 
 export interface ArtifactRegistration {
   runId: RunId;

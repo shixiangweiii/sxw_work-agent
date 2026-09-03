@@ -1,7 +1,7 @@
 /**
  * 验收脚本共用工具。
  *
- * 【定·D-25】三条验收项以**可运行脚本**交付，不是测试套件。
+ * 【定·D-25】验收项以**可运行脚本**交付，不是测试套件。
  * 它们输出可读证据供人判断，而不是断言绿灯 —— 与 Spike 0 的探针形态一致。
  *
  * 代价是回归靠人，收益是每次运行都产出可读证据而不是一个布尔值。
@@ -61,7 +61,7 @@ export function verdict(ok: boolean, text: string): boolean {
 }
 
 /** 汇总登记表。返回 true 表示每一条判据都通过。零判据也算失败——脚本没跑起来。 */
-export function concludeVerdicts(): boolean {
+function concludeVerdicts(): boolean {
   const failed = verdictLog.filter((v) => !v.ok);
   const passed = verdictLog.length - failed.length;
   console.log(
@@ -88,7 +88,10 @@ export function concludeVerdicts(): boolean {
  * `body` 里的早退站点直接 `return` 即可 —— 它此前打印的那条 `verdict(false, …)`
  * 会把退出码带成 1，不需要也不应该再手动 exit。
  */
-export async function runVerify(body: () => Promise<void>, cleanup?: () => void): Promise<void> {
+export async function runVerify(
+  body: () => Promise<void>,
+  cleanup?: () => void | Promise<void>,
+): Promise<void> {
   let ok = false;
   try {
     await body();
@@ -97,7 +100,7 @@ export async function runVerify(body: () => Promise<void>, cleanup?: () => void)
     console.error(err);
     ok = false;
   } finally {
-    cleanup?.();
+    await cleanup?.();
   }
   process.exit(ok ? 0 : 1);
 }

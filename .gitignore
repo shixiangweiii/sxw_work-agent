@@ -9,7 +9,7 @@ bin
 .env.*
 !.env.example
 
-# 阶段 1 的默认 workspace，跑 CLI 时自动生成
+# CLI 未显式指定目录时使用的默认 workspace
 node_modules
 .workagent-workspace
 
@@ -17,12 +17,7 @@ node_modules
 # 所以这一条不能只靠上面那个固定目录名兜。
 .workagent/
 
-# 每次 CLI 运行落一份 JSONL trace（--no-trace 可关）。
-# 是诊断与评测的 artifact，不是源码 —— 要留证据请显式复制到 评测/ 下。
-.workagent-runs
-
-# 阶段 2：SQLite 库（transcript / run_specs / agent_spec_snapshots / runs）。
-# 它是本机的 Runtime 状态，不是源码；-wal / -shm 是 WAL 模式的伴生文件。
+# 跨 workspace 的注册表与 MCP 启动配置，不是源码。
 .workagent-state
 
 # eval:suite 的 trial artifact（trace / manifest / report.json）。

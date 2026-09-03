@@ -37,7 +37,6 @@ import { DriftDetector, EndpointDriftError } from "../model/capability/drift-det
 import { RunInterrupts } from "./interrupt/index.js";
 import { ProgressGuard } from "./progress-guard.js";
 import { makeError } from "../types/error.js";
-import { MODEL_INVOCATION_AUDIT_SCHEMA_VERSION } from "../types/model-audit.js";
 import { FailOpenModelInvocationAudit } from "./model-audit.js";
 
 export interface RunLoopDeps {
@@ -604,7 +603,6 @@ export async function* runLoop(
     const audit = new FailOpenModelInvocationAudit(
       ports.modelAudit,
       {
-        schemaVersion: MODEL_INVOCATION_AUDIT_SCHEMA_VERSION,
         runId,
         invocationId: frame.invocationId,
         frameId: frame.id,

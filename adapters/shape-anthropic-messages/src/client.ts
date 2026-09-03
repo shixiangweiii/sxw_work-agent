@@ -16,6 +16,7 @@ import type {
   ModelStreamEvent,
   ModelUsage,
   ProviderFailureObservation,
+  UsageFieldKey,
 } from "@workagent/harness-runtime";
 import { assertCredentialGoesWhereIntended } from "./credential-guard.js";
 import { readAnthropicErrorFacts } from "./error-facts.js";
@@ -257,7 +258,7 @@ export function readUsagePartial(
 ): Partial<ModelUsage> {
   if (!u) return {};
   const map = p.tokens.usageFieldMap;
-  const pick = (k: string, fallback: string): number | undefined => {
+  const pick = (k: UsageFieldKey, fallback: string): number | undefined => {
     const field = map[k] ?? fallback;
     const raw = u[field] ?? u[fallback];
     return raw === undefined || raw === null ? undefined : Number(raw);

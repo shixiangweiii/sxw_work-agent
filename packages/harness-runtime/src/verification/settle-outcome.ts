@@ -201,8 +201,7 @@ function splitArtifactChecks(facts: ArtifactCheckFact[]): {
        * 把它列进交付集合，等于让 role 在失败方向上有意义（检查失败时分流）、
        * 在成功方向上没意义 —— 而 §17 的 Deliverable 语义两个方向都要成立。
        *
-       * 【定】`RESULT` 也不进。它与 `INTERMEDIATE` 在失败分流上同档，
-       * 这里保持同一条线，别让第三个值有第三种行为。
+       * 不再保留没有独立语义的第三种 role；非交付物统一是 `INTERMEDIATE`。
        */
       if (isFinal && f.role === "DELIVERABLE" && !delivered.includes(f.artifactId)) {
         delivered.push(f.artifactId);
@@ -263,25 +262,69 @@ export function settleWallOutcome(
     RunOutcome["kind"],
     "BUDGET_EXHAUSTED" | "CONTEXT_EXHAUSTED" | "QUOTA_EXHAUSTED" | "CANCELLED" | "FAILED"
   >,
-  input: SettleInput & { handoff?: string },
+  input: SettleInput,
 ): RunOutcome {
   const art = splitArtifactChecks(input.artifactChecks ?? []);
+  const incompleteItems = [
+    ...unmetRequired(input.verifications),
+    ...art.failedDeliverables,
+    ...art.failedOthers,
+    ...input.recoveryItems.map((r) => ({
+      what: r.what,
+      why: `副作用状态 ${r.sideEffectState}`,
+      actionId: r.actionId,
+    })),
+  ];
   return {
     kind,
-    summary: input.handoff ?? input.summary,
+    summary: deterministicWallHandoff(kind, input, art.delivered, incompleteItems),
     // 撞墙也可能已经产出了合格的交付物 —— 撞墙的是 Run，不是那份产物。
     // 恒空会让「跑到一半没预算了，但清单已经写好了」在 outcome 上看不出来。
     deliveredArtifactIds: art.delivered,
     recoveryItems: input.recoveryItems,
-    incompleteItems: [
-      ...unmetRequired(input.verifications),
-      ...art.failedDeliverables,
-      ...art.failedOthers,
-      ...input.recoveryItems.map((r) => ({
-        what: r.what,
-        why: `副作用状态 ${r.sideEffectState}`,
-        actionId: r.actionId,
-      })),
-    ],
+    incompleteItems,
   };
+}
+
+/**
+ * 撞墙后不能再为“写一段漂亮总结”调用模型。这里仅把已经存在的事实按固定模板
+ * 排列成 handoff：墙的种类、通过的验证、交付物、未完成项与停止前已落盘的摘要。
+ */
+function deterministicWallHandoff(
+  kind: RunOutcome["kind"],
+  input: SettleInput,
+  deliveredArtifactIds: string[],
+  incompleteItems: IncompleteItem[],
+): string {
+  const wall: Record<RunOutcome["kind"], string> = {
+    SUCCESS: "正常完成",
+    COMPLETED_WITH_LIMITS: "带限制完成",
+    USER_REJECTED: "用户拒绝",
+    BUDGET_EXHAUSTED: "预算硬限制",
+    CONTEXT_EXHAUSTED: "上下文硬限制",
+    QUOTA_EXHAUSTED: "端点配额耗尽",
+    CANCELLED: "取消",
+    FAILED: "运行失败",
+  };
+  const passedActions = input.verifications
+    .filter((v) => v.status === "PASSED")
+    .map((v) => String(v.actionId));
+  const lines = [`Run 因${wall[kind]}停止；以下 handoff 由已落盘事实生成。`];
+  lines.push(
+    passedActions.length > 0
+      ? `已通过验证的 Action：${passedActions.join("、")}。`
+      : "没有已通过验证的 Action。",
+  );
+  lines.push(
+    deliveredArtifactIds.length > 0
+      ? `已验证交付物：${deliveredArtifactIds.join("、")}。`
+      : "没有已验证交付物。",
+  );
+  if (incompleteItems.length > 0) {
+    lines.push(`未完成或待确认：${incompleteItems.map((i) => `${i.what}（${i.why}）`).join("；")}。`);
+  } else {
+    lines.push("没有额外的未完成项或待确认副作用。");
+  }
+  if (input.summary?.trim()) lines.push(`停止前记录：${input.summary.trim()}`);
+  return lines.join("\n");
 }

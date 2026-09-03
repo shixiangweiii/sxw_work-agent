@@ -72,7 +72,6 @@ const IGNORED_DIRS = new Set([
   ".next",
   ".cache",
   ".workagent-state",
-  ".workagent-runs",
 ]);
 
 const BINARY_EXTENSIONS = new Set([
@@ -136,7 +135,7 @@ export const searchDefinition: ToolDefinition = {
   recoveryObservation: { requiresPreFingerprint: false },
 };
 
-export interface SearchMatch {
+interface SearchMatch {
   path: string;
   line?: number;
   before?: string[];

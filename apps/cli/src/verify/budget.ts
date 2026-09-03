@@ -18,6 +18,7 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
+  ActionId,
   BudgetAxis,
   ContextMessage,
   ModelInvocationObserver,
@@ -33,7 +34,9 @@ import {
   applyBudgetOverrides,
   asId,
   readRunFacts,
+  settleWallOutcome,
   type RunId,
+  type SettleInput,
 } from "@workagent/harness-runtime";
 import { listDirSnapshot, writeFileSnapshot } from "@workagent/tools-common";
 import { compose, DEFAULT_SYSTEM_PROMPT } from "../compose.js";
@@ -201,7 +204,6 @@ async function main(): Promise<void> {
   );
 
   const tmp = mkdtempSync(join(tmpdir(), "workagent-budget-"));
-  const results: Array<{ name: string; ok: boolean }> = [];
 
   try {
     // ────────────────────────────────────────────── A. 逐轴撞墙
@@ -253,7 +255,6 @@ async function main(): Promise<void> {
         ? "六条轴各自撞墙一次，Terminal 与 BudgetHardLimitReached.axis 一一对应 —— 不变量 11 不再只在 turns 上成立"
         : "有轴没拦住，或撞的不是它自己那条轴",
     );
-    results.push({ name: "A", ok: axesOk });
 
     // ────────────────────────────────────────────── A2. 生产默认值
     section("A2. R-1 的另一半：DEFAULT_BUDGETS 里这些轴真的有值吗");
@@ -261,8 +262,8 @@ async function main(): Promise<void> {
       "   【定】A 段证明的是**读取点**能用，不是这条轴在真实 Run 里开着 ——\n" +
         "   它给每条轴都注入了一个 Partial 覆盖。而生产装配用的是 DEFAULT_BUDGETS，\n" +
         "   `limit === undefined` 的轴会被 checkBudgets 直接 continue 掉。\n\n" +
-        "   R-1 修的是前者，后者一直空着：两条 token 轴长期没有默认值，\n" +
-        "   **八条轴在生产里只有五条活着**，而 A 段照样全绿。\n" +
+        "   R-1 修复前，两条 token 轴长期没有默认值，\n" +
+        "   今天除了故意留空的 total wall 之外，其余七条轴都有生产默认值。\n" +
         "   代价是 2026-08-28 摸底考试题 1 单次 run 烧掉 420,784 billed input token，\n" +
         "   一条轴都没拦住。\n",
     );
@@ -291,7 +292,6 @@ async function main(): Promise<void> {
           ? "maxTotalWallClockMs 被补上了默认值 —— 隔夜 resume 会在第一次迭代就撞墙"
           : "token 轴在 DEFAULT_BUDGETS 里没有值，生产装配拦不住 token 失控",
     );
-    results.push({ name: "A2", ok: a2Ok });
 
     // ────────────────────────────────────────────── B. 软限
     section("B. U-5：软限触发，且每条轴只报一次");
@@ -341,7 +341,6 @@ async function main(): Promise<void> {
           ? `软限提示没有进上下文（找到 ${injected.length} 条）—— 只发事件的话模型不知道自己快撞墙`
           : `软限行为不符（turns 报了 ${turnsSoftCount} 次，terminal=${soft.terminal}）`,
     );
-    results.push({ name: "B", ok: bOk });
 
     // ────────────────────────────────────────────── C. 等审批不算 active
     section("C. R-2：等审批的时间不计入 active 墙钟");
@@ -373,7 +372,6 @@ async function main(): Promise<void> {
         ? `active 墙钟（${active}ms）小于审批等待本身（${APPROVAL_MS}ms）—— 等待的时间确实被扣掉了`
         : `active 墙钟 ${active}ms ≥ 审批等待 ${APPROVAL_MS}ms，说明等待仍被计入`,
     );
-    results.push({ name: "C", ok: cOk });
 
     // ────────────────────────────────────────────── D. 时间事实段级冻结
     section("D. 决 3：受信时间事实在段内冻结，不随每轮墙钟漂移");
@@ -390,7 +388,6 @@ async function main(): Promise<void> {
     // 所以退一步只断言帧数与轮数一致，真正的判据在 E 段。
     const dOk = frames.length >= 2;
     verdict(dOk, dOk ? `编译了 ${frames.length} 帧，可供 E 段比对` : "帧数不足，无法比对");
-    results.push({ name: "D", ok: dOk });
 
     // ────────────────────────────────────────────── E. 跨段重新冻结
     section("E. 决 3：跨执行段重新冻结 —— 隔夜 resume 不写昨天的日期");
@@ -416,7 +413,6 @@ async function main(): Promise<void> {
         ? "时间事实读的是本段起始时刻，且每段（含 resume）重新冻结 —— 段内稳定、段间如实"
         : "时间事实的冻结粒度不对",
     );
-    results.push({ name: "E", ok: eOk });
 
     // ────────────────────────────────────────────── F. 在途调用可被打断
     section("F. 墙钟能不能打断**在途**的模型调用");
@@ -469,7 +465,6 @@ async function main(): Promise<void> {
             ? `跑满了 ${elapsed}ms 才结算 —— 墙钟没有打断在途调用，只是在下一轮入口发现的`
             : `Terminal=${slow.terminal} / 轴=${slow.hardAxis}`,
     );
-    results.push({ name: "F", ok: fOk });
 
     // ──────────────────── G. 预算轴做成真参数：命令行 → compose → spec.budgets
     section("G. `--max-turns` 这条链路：参数真的走到了 spec.budgets（而不是只被解析了）");
@@ -553,7 +548,6 @@ async function main(): Promise<void> {
           ? "合法值也被拒了 —— 这不是校验，是拒绝一切"
           : "有非法值被静默接受 —— M-5 的形态：被吞掉的参数与生效的参数不可区分",
     );
-    results.push({ name: "G1", ok: allRejected && legalOk });
 
     // G2：端到端。这一条是本段的重点 —— 它跨的是 A–F 都跨不过去的那一跳。
     const e2e = await runViaProductionPath({ workspace: join(tmp, "ws-e2e"), startup: { turns: 3 } });
@@ -568,7 +562,6 @@ async function main(): Promise<void> {
         : `链路断了：spec.budgets.maxTurns=${e2e.budgets.maxTurns} / ${e2e.terminal} / ${e2e.turns} 轮` +
           `（期望 3 / MAX_TURNS / 3）`,
     );
-    results.push({ name: "G2", ok: e2eOk });
 
     // G3：三层合并的优先级。逐 Run 压启动档，启动档压 DEFAULT。
     const layered = await runViaProductionPath({
@@ -595,7 +588,6 @@ async function main(): Promise<void> {
           `modelCalls=${layered.budgets.maxModelCalls}（期望 7）、` +
           `toolCalls=${layered.budgets.maxToolCalls}（期望 ${DEFAULT_BUDGETS.maxToolCalls}）`,
     );
-    results.push({ name: "G3", ok: layerOk });
 
     /**
      * G4：`maxTotalWallClockMs` 没人传时**仍然是 undefined**。
@@ -617,16 +609,69 @@ async function main(): Promise<void> {
         ? "开了参数，但没传时仍然是 undefined —— 「可以传」与「有默认值」是两件事"
         : "被顺手补全了 —— 隔夜 resume 会在第一次迭代就撞墙（R-2 换个字段再犯一次）",
     );
-    results.push({ name: "G4", ok: emptyOk });
 
-    // ────────────────────────────────────────────── 总判定
-    section("总判定");
-    const ok = results.every((r) => r.ok);
+    // ────────────────────────────────────────────── H. 撞墙交接
+    section("H. 撞墙后的 handoff 只由已落盘事实确定生成");
+    const wallInput = {
+      verifications: [
+        {
+          id: "verification_passed",
+          actionId: asId<ActionId>("act_passed"),
+          mode: "REOBSERVE" as const,
+          required: true,
+          status: "PASSED" as const,
+          detail: "清单已写入",
+          at: 1,
+        },
+        {
+          id: "verification_unmet",
+          actionId: asId<ActionId>("act_unmet"),
+          mode: "REOBSERVE" as const,
+          required: true,
+          status: "FAILED" as const,
+          detail: "第二份文件尚未生成",
+          at: 2,
+        },
+      ],
+      recoveryItems: [
+        {
+          what: "外部写入是否生效",
+          sideEffectState: "UNKNOWN",
+          actionId: asId<ActionId>("act_unknown"),
+        },
+      ],
+      artifactChecks: [
+        {
+          artifactId: "artifact_report",
+          logicalId: "report",
+          role: "DELIVERABLE" as const,
+          ok: true,
+          checksRun: ["exists"],
+          detail: "存在且非空",
+          at: 3,
+        },
+      ],
+      summary: "已完成第一部分。",
+    } satisfies SettleInput;
+    const firstHandoff = settleWallOutcome("BUDGET_EXHAUSTED", wallInput);
+    const secondHandoff = settleWallOutcome("BUDGET_EXHAUSTED", wallInput);
+    const handoff = firstHandoff.summary ?? "";
+    const handoffOk =
+      JSON.stringify(firstHandoff) === JSON.stringify(secondHandoff) &&
+      firstHandoff.kind === "BUDGET_EXHAUSTED" &&
+      firstHandoff.deliveredArtifactIds.includes("artifact_report") &&
+      handoff.includes("act_passed") &&
+      handoff.includes("artifact_report") &&
+      handoff.includes("第二份文件尚未生成") &&
+      handoff.includes("外部写入是否生效") &&
+      handoff.includes("已完成第一部分");
+    fact("两次相同事实生成的 outcome", JSON.stringify(firstHandoff) === JSON.stringify(secondHandoff) ? "逐字相同" : "不一致");
+    fact("handoff", handoff.replaceAll("\n", " ｜ "));
     verdict(
-      ok,
-      ok
-        ? "预算八条轴由一个纯函数统一判定，软限每轴一次，active 墙钟不含等待，时间事实按执行段冻结"
-        : `失败段：${results.filter((r) => !r.ok).map((r) => r.name).join(" ")}`,
+      handoffOk,
+      handoffOk
+        ? "撞墙路径不再调用模型补总结；墙、已完成 Action、交付物、未完成项、未知副作用与既有摘要都由同一组事实确定生成"
+        : "确定性交接遗漏了事实，或相同输入产生了不同 outcome",
     );
   } finally {
     rmSync(tmp, { recursive: true, force: true });

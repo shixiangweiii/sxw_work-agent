@@ -73,16 +73,19 @@ export class WorkspaceHosts {
     this.registry = new WorkspaceRegistry(opts.registryFile);
 
     /**
-     * 启动时把命令行指的那个 workspace 登记 ＋ 激活。
-     *
-     * 【定】显式传了 `--workspace` 就以它为准；没传则沿用注册表里上次用的那个。
-     * 「没传时不要改变用户上次的选择」是这条的重点 —— 一个每次启动都跳回
-     * 默认目录的界面，会让「切换」这个功能形同虚设。
+     * `bootstrap.path` 已由入口按“显式参数 > 注册表 active > 首次默认值”选定。
+     * 这里仍做一次登记与激活，使验收脚本等直接调用 `startService()` 的入口也
+     * 只有一条初始化路径。
      */
     const created = this.registry.create(opts.bootstrap.path);
-    if (created.ok && created.entry) {
-      this.bootstrapRealPath = created.entry.realPath;
-      this.registry.activate(created.entry.id);
+    if (!created.ok || !created.entry) {
+      throw new Error(
+        `无法启用启动 workspace ${opts.bootstrap.path}：${created.error ?? "未知错误"}`,
+      );
+    }
+    this.bootstrapRealPath = created.entry.realPath;
+    if (!this.registry.activate(created.entry.id)) {
+      throw new Error(`workspace 登记成功但激活失败：${created.entry.id}`);
     }
   }
 

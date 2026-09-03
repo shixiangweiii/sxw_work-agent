@@ -41,13 +41,9 @@ export const DEFAULT_CONTEXT_POLICY: ContextBudgetPolicy = {
 /**
  * ── R-1 只修了一半，补齐的那一半也值得记 ──────────────────────────────────
  *
- * R-1 当初的症状是「八条轴里五条有声明、无读取点」。读取点后来接上了
- * （就是下面的 `checkBudgets`），但两条 token 轴与 `maxTotalWallClockMs`
- * 在 `RunBudgets` 里是**可选**的，这份默认值一个都没给 ——
- * `limit === undefined` 就 `continue`，于是**生产装配里八条轴只有五条活着**。
- *
- * 而 `verify:budget` 是逐轴注入 `Partial` 覆盖来撞墙的，它证明的是读取点能用，
- * 不是这条轴在真实 Run 里开着。两件事被同一段绿字掩盖了一个阶段。
+ * R-1 当初的症状是部分预算轴有声明、无读取点。读取点后来统一接入
+ * `checkBudgets`；两条 token 轴也已有生产默认值。`maxTotalWallClockMs`
+ * 仍刻意不设默认值，因为它跨关机累计，隔夜 resume 不应立刻撞墙。
  *
  * 代价是实测的：2026-08-28 摸底考试题 1 单次 run 烧掉 420,784 billed input token
  * 与 46,563 output token，八条轴一条都没拦。

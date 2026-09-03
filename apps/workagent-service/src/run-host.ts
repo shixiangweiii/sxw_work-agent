@@ -48,7 +48,6 @@ import {
   fullAccessWarning,
   gitProvenance,
   hostOf,
-  REPO_ROOT,
   type ApprovalMode,
   type Composed,
   type ComposeOptions,
@@ -71,7 +70,7 @@ export interface RunHostOptions {
   workspaceRoot: string;
   dbPath: string;
   endpoint: EndpointChoice;
-  /** trace JSONL 的目录。与 CLI 同一个约定（`.workagent-runs/<runId>.jsonl`）。 */
+  /** trace JSONL 的目录。与 CLI 同一个约定（`.workagent/runs/<runId>.jsonl`）。 */
   traceDir: string;
   /** 模型调用审计目录；writer 与 Layer 2 reader 必须共用这一份绝对路径。 */
   modelAuditDir: string;
@@ -114,7 +113,7 @@ interface LiveRun {
   runId: string;
   /** 逐 Run 的取消源。审批等待挂在它上面（见 human-channels 的 signalFor）。 */
   aborter: AbortController;
-  /** 本段的事件缓冲，供 SSE 重连按 `since` 续拉。 */
+  /** 本进程观察到的跨段事件缓冲，供 SSE 重连按 `since` 续拉。 */
   events: RunEvent[];
   outcome?: RunOutcome;
   /** 【定】只装 `terminal.reason` 这个字符串，名字跟着实际内容走。 */
@@ -177,13 +176,13 @@ export class RunHost {
   private readonly pendingHub = new PendingHub();
   private readonly runs = new Map<string, LiveRun>();
   private readonly listeners = new Map<string, Set<EventListener>>();
-  /** runId → 任务原文，供 trace header 用（RunSpec 在库里，但 header 要同步写）。 */
-  private readonly taskCache = new Map<string, string>();
+  /** runId → 冻结 RunSpec，供同步写入 trace header。 */
+  private readonly specCache = new Map<string, RunSpec>();
   /**
-   * 「已开始、还不知道 runId」那个窗口里的任务原文。见 `startRun` 的说明。
+   * 「已开始、还不知道 runId」那个窗口里的冻结 RunSpec。见 `startRun` 的说明。
    * 单槽的前提是前台槽位保证同时只有一个 Run 处在这个窗口里。
    */
-  private pendingTask: string | undefined;
+  private pendingSpec: RunSpec | undefined;
   /**
    * 【定】同时只跑一个 Run（§6.4「v0.1 一个 Session 同时只允许一个
    * Foreground Active Run」，D-09）。
@@ -423,7 +422,7 @@ export class RunHost {
    * 一个 Run 的完整白盒视图。
    *
    * 事件的来源有两个，**并集**：盘上的 trace（历史的全部段）∪ 本进程缓冲
-   * （这一段正在发生的、可能还没 flush 的）。按 `sequence` 去重 ——
+   * （本进程观察到的、可能还没 flush 的全部执行段）。按 `sequence` 去重 ——
    * D-2 的全局单调序列保证这件事是安全的。
    *
    * 【定】这里原本是**二选一**（`live.events.length ? live.events : trace`），
@@ -670,7 +669,6 @@ export class RunHost {
       switch (record.kind) {
         case "request":
           out.request = {
-            schemaVersion: record.schemaVersion,
             runId: String(record.runId),
             invocationId: String(record.invocationId),
             frameId: String(record.frameId),
@@ -834,9 +832,10 @@ export class RunHost {
     this.claimForeground(STARTING);
     /**
      * ══════════════════════════════════════════════════════════════════
-     * 【定】task 必须在**第一个事件之前**登记，否则 trace header 写的是「(未知)」。
+     * 【定】冻结 RunSpec 必须在**第一个事件之前**登记，否则 trace header 无法
+     * 准确写出 task、timezone 与 executionPrivilege。
      *
-     * 原来 `taskCache.set()` 排在 `await this.drive(gen)` **之后**，而
+     * 原来 task cache 的写入排在 `await this.drive(gen)` **之后**，而
      * header 是第一个事件到达时由 `sinkFor()` 生成的 —— 那时 drive 还没返回。
      * 于是纯 Web 起跑的 Run，JSONL 第一行永远是 `task:"(未知)"`，而下一行
      * `RunStarted` 与 SQLite 里都有正确任务：**同一个文件里前后矛盾**。
@@ -847,21 +846,20 @@ export class RunHost {
      * 将来放开并发（S4-4）时这里要跟着改成按某个请求级 key 索引。
      * ══════════════════════════════════════════════════════════════════
      */
-    this.pendingTask = task;
     try {
       // 【定】入口身份从这里传进去。此前 makeRunSpec 写死 CLI，
       // 于是 Web 起的 Run 在 RunSpec 里自称 CLI，而 trace header 写着 web。
       const spec: RunSpec = this.composed.makeRunSpec(task, "WEB", budgetOverrides);
+      this.pendingSpec = spec;
       const gen = this.composed.runtime.start(spec);
       const r = await this.drive(gen);
-      this.taskCache.set(r.runId, task);
       return r;
     } catch (err) {
       this.releaseForeground(STARTING);
       throw err;
     } finally {
-      // 认领完就清 —— 留着它会让下一个 Run 在 runId 未知的窗口里读到上一个的任务。
-      this.pendingTask = undefined;
+      // 认领完就清 —— 留着会让下一个 Run 在 runId 未知的窗口里读到上一个 spec。
+      this.pendingSpec = undefined;
     }
   }
 
@@ -872,7 +870,7 @@ export class RunHost {
   ): Promise<{ runId: string }> {
     this.claimForeground(runId);
     const spec = await this.composed.ports.runs.getRunSpec(asId<RunId>(runId));
-    if (spec) this.taskCache.set(runId, spec.input.task);
+    if (spec) this.specCache.set(runId, spec);
     const gen = this.composed.runtime.resume(asId<RunId>(runId), {
       ...(recoveryDecision ? { recoveryDecision } : {}),
       ...(recoveryNote ? { recoveryNote } : {}),
@@ -1188,6 +1186,9 @@ export class RunHost {
    */
   private onEvent(e: RunEvent): void {
     const runId = String(e.runId);
+    if (this.pendingSpec && !this.specCache.has(runId)) {
+      this.specCache.set(runId, this.pendingSpec);
+    }
     const rec = this.ensureRecord(runId);
     /**
      * 【定】`ModelStreamDelta` 不进缓冲区，只实时转发。
@@ -1235,13 +1236,13 @@ export class RunHost {
         nodeVersion: process.version,
         endpointProfile: `${this.composed.profile.id}@${this.composed.profile.observedAt}`,
         modelId: this.composed.profile.modelId,
-        // 任务原文由 header 承载；Web 段起跑时它已经在 RunSpec 里。
-        task: this.taskOf(rec.runId),
+        // header 描述这一执行段，但任务与时区等 Run 语义必须读冻结的 RunSpec。
+        task: this.specForTrace(rec.runId).input.task,
         workspaceRoot: this.opts.workspaceRoot,
         // 【定】与 CLI header 同一个字段（P2-5）。两个入口的 trace 要能
         // 用同一套字段读，否则「Web 段有没有沙箱」得去翻另一处。
-        executionPrivilege: this.executionPrivilege(),
-        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        executionPrivilege: executionPrivilegeOf(this.specForTrace(rec.runId).agentSpec),
+        timezone: this.specForTrace(rec.runId).agentSpec.timezone,
         startedAt: new Date().toISOString(),
         // 【定】标出这一段是谁跑的。CLI 段与 Web 段在同一个文件里，
         // 事后要能分得清「这几轮是在浏览器里点出来的」。
@@ -1270,14 +1271,11 @@ export class RunHost {
     }
   }
 
-  /**
-   * 任务原文。取不到就如实写 unknown —— header 是审计用的，不要猜。
-   *
-   * 【定】`pendingTask` 是第二档而不是第一档：runId 已经登记过的，
-   * 以登记的那一份为准。反过来的话，一个 resume 段会被在途的新任务串味。
-   */
-  private taskOf(runId: string): string {
-    return this.taskCache.get(runId) ?? this.pendingTask ?? "(未知)";
+  /** Trace header 只能写冻结事实；缺失时让该诊断轨道失败，不能猜当前配置。 */
+  private specForTrace(runId: string): RunSpec {
+    const spec = this.specCache.get(runId) ?? this.pendingSpec;
+    if (!spec) throw new Error(`写 trace header 时找不到 RunSpec：${runId}`);
+    return spec;
   }
 
   /**
@@ -1399,6 +1397,3 @@ function invocationIdOf(event: RunEvent): string | undefined {
       return undefined;
   }
 }
-
-
-export { REPO_ROOT };

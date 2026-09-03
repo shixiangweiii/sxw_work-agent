@@ -12,13 +12,9 @@
  *
  * ── F 段的来历 ────────────────────────────────────────────────────────
  *
- * 批 1 结束时 F 段必然失败，批 2（R-2 墙钟拆分）做完才转绿。这是刻意的：
- * 缺口应当在它被引入的那一批就可见。两个进程挨着跑撞不到 10 分钟墙，
- * 只有把时间推回去才暴露得出来 —— 不专门测，它会一直藏到用户第一次
- * 真的隔夜 resume。
- *
- * 批 2 之后它就是普通硬判据。**当时给它开的退出码豁免却留在了代码里**，
- * 直到二次评审才被发现 —— 见「总判定」那段注释。
+ * F 段把崩溃时盘上最后一条 RUN_FACTS 的 `startedAt`
+ * 推到 12 小时前，再让另一个进程 resume。这样不用真等一夜，
+ * 也能从终态区分「累计 active」与「当前时间 − startedAt」两种实现。
  */
 
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -83,8 +79,6 @@ async function main(): Promise<void> {
   const dbPath = join(tmp, "runs.db");
   const workspace = join(tmp, "ws");
   const tracePath = join(tmp, "run.jsonl");
-  const results: Array<{ seg: string; ok: boolean }> = [];
-
   try {
     // ─────────────────────────────────────────────────────────── A
     section("A. 两个进程接力跑完同一个 Run");
@@ -128,6 +122,11 @@ async function main(): Promise<void> {
         "     所以下一段必须走三条分支之一，而不是想当然地重试。\n",
     );
 
+    // 若主循环回退为 `now - startedAt`，下面的 resume 会在
+    // 第一次迭代直接撞 active wall 硬限。
+    const forcedStartedAt = Date.now() - 12 * 3600_000;
+    rewriteLatestRunStartedAt(dbPath, runId, forcedStartedAt);
+
     const seg2 = runSegment({
       workerPath: WORKER,
       dbPath,
@@ -162,7 +161,6 @@ async function main(): Promise<void> {
         ? "两个进程接力把 Run 跑到终态，且两份产物都在磁盘上 —— 崩溃点那次写由恢复观察发现「没发生」并被补上"
         : `跨进程恢复没走通（killed=${seg1.killed} unpaired=${unpairedAfterCrash.length} terminal=${seg2.terminal} a=${existsSync(aTxt)} b=${existsSync(bTxt)}）`,
     );
-    results.push({ seg: "A", ok: aOk });
 
     if (seg2.outcome === "COMPLETED_WITH_LIMITS") {
       console.log(
@@ -196,7 +194,6 @@ async function main(): Promise<void> {
         ? "跨进程之后两条轨道仍是同一条单调序列：零重号、并集连续 —— 崩溃没有让计数器回退去重发已用掉的号"
         : "序列在跨进程处断了（重号或不连续）",
     );
-    results.push({ seg: "B", ok: bOk });
 
     // ─────────────────────────────────────────────────────────── C
     section("C. 不变量 8：没有无 result 的 tool_use");
@@ -212,7 +209,6 @@ async function main(): Promise<void> {
         ? "恢复过程补齐了崩溃点留下的未配对 tool_use，最终 transcript 配对完好"
         : `配对被破坏（未配对 ${unpaired.length} / orphan ${orphans.length}）`,
     );
-    results.push({ seg: "C", ok: cOk });
 
     // ─────────────────────────────────────────────────────────── D
     /**
@@ -289,7 +285,6 @@ async function main(): Promise<void> {
         : `旧库没有被完整挡住：\n  缺列库 → ${missingErr.slice(0, 120) || "（没抛）"}` +
             `\n  多表库 → ${extraErr.slice(0, 120) || "（没抛）"}`,
     );
-    results.push({ seg: "D", ok: dOk });
 
     /**
      * ── D2：坏 payload 必须抛，不许退化成「这些事实从未存在」──────────────
@@ -325,7 +320,6 @@ async function main(): Promise<void> {
             "让 resume 把预算、恢复项与执行前指纹当成「从未存在」"
         : `坏 payload 被静默吞掉，或错误里说不出是哪一条：${badErr.slice(0, 140) || "（没抛）"}`,
     );
-    results.push({ seg: "D2", ok: d2Ok });
 
     // ─────────────────────────────────────────────────────────── E
     section("E. M-4：RunSpec 能原样读回 ＋ 深冻结逐层生效");
@@ -357,32 +351,29 @@ async function main(): Promise<void> {
         ? "冻结的 RunSpec 原样读回（含 toolSnapshots —— 三条恢复分支的判定依据），深冻结每一层都拒写"
         : `M-4 未达成：spec=${!!spec} 冻结 ${layers.frozen}/${layers.total} runs=${listed.length}`,
     );
-    results.push({ seg: "E", ok: eOk });
 
     // ─────────────────────────────────────────────────────────── F
     section("F. 跨天 resume 不得因关机时间撞预算墙（R-2，批 2 已转绿）");
     const facts = readRunFacts(entries);
     const startedAt = facts?.budgetUsage.startedAt ?? 0;
     const active = facts?.budgetUsage.activeWallClockMs ?? 0;
-    /**
-     * 主循环判的是 `now() - state.budgetUsage.startedAt`（run-loop.ts:261），
-     * 而 `startedAt` 由 RUN_META 原样继承。所以「12 小时后 resume」时
-     * elapsed 会是 12 小时，远超 10 分钟的 maxActiveWallClockMs。
-     */
-    const elapsedIfResumedTomorrow = Date.now() + 12 * 3600_000 - startedAt;
+    const elapsedSinceStart = Date.now() - startedAt;
     fact("RUN_META.startedAt", new Date(startedAt).toISOString());
     fact("累计 activeWallClockMs", `${active} ms`);
-    fact("若 12 小时后 resume，elapsed", `${Math.round(elapsedIfResumedTomorrow / 1000)} s`);
+    fact("墙上时间差", `${Math.round(elapsedSinceStart / 1000)} s`);
     fact("maxActiveWallClockMs", `${WALL_LIMIT_MS} ms`);
-    const fOk = active <= WALL_LIMIT_MS && elapsedIfResumedTomorrow > WALL_LIMIT_MS ? isActiveBased() : false;
+    const fOk =
+      startedAt === forcedStartedAt &&
+      elapsedSinceStart > WALL_LIMIT_MS &&
+      active <= WALL_LIMIT_MS &&
+      (seg2.terminal === "COMPLETED" || seg2.terminal === "COMPLETED_WITH_LIMITS");
     verdict(
       fOk,
       fOk
-        ? "预算判定基于累计 active 而非墙上时间差 —— 跨天 resume 不会因为关机的那 12 小时撞墙"
-        : "【已知红】判定仍是 now() - startedAt，关机时间被算进 active，" +
-            "隔夜 resume 会在第一次迭代就 BUDGET_EXHAUSTED —— 这正是 R-2，由批 2 的 S7 修",
+        ? "盘上 startedAt 被推到 12 小时前后仍能 resume 到完成，预算只扣累计 active"
+        : `跨天 resume 语义失败：startedAt保留=${startedAt === forcedStartedAt} ` +
+          `elapsed=${elapsedSinceStart} active=${active} terminal=${seg2.terminal ?? "无"}`,
     );
-    results.push({ seg: "F", ok: fOk });
 
     // ─────────────────────────────────────────────────────────── G
     section("G. N-1：跨进程的 Trace 是一个文件，段号连续");
@@ -402,24 +393,7 @@ async function main(): Promise<void> {
         ? "两个进程的事件写进了同一个文件，段号 0、1 连续 —— 一个 Run 一份可审计轨迹"
         : `Trace 没有正确续写（headers=${JSON.stringify(segs.headers)}）`,
     );
-    results.push({ seg: "G", ok: gOk });
 
-    // ─────────────────────────────────────────────────────── 总判定
-    section("总判定");
-    /**
-     * F 段曾被排除在硬判据外：批 1 期间它是「已知红」，等批 2 的 S7 修 R-2。
-     * S7 落地后这个豁免就该撤掉，但它留在了代码里 —— 一条**已经能通过**的判据
-     * 继续被排除在退出码之外，是最难发现的那种失效：它常年打绿勾，没人会去看。
-     * 现在所有段一视同仁。
-     */
-    const allOk = results.every((r) => r.ok);
-    verdict(
-      allOk,
-      allOk
-        ? "跨进程恢复成立：真 SIGKILL 之后另一个进程只凭 SQLite 接上并跑到终态，" +
-            "序列、配对、schema 降级、深冻结、跨天预算、Trace 续写全部守住"
-        : `失败段：${results.filter((r) => !r.ok).map((r) => r.seg).join(" ")}`,
-    );
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -523,18 +497,32 @@ function probeFrozenLayers(): { frozen: number; total: number } {
 }
 
 /**
- * 预算判定是不是基于「累计 active」而不是「now − startedAt」。
- *
- * 判据落在源码上而不是行为上，是因为要在**不真的等 12 小时**的前提下
- * 回答这个问题。R-2 修完后 run-loop 里那行会从 `now() - startedAt`
- * 变成读累计值，届时这里返回 true，F 段自动转绿。
+ * 将最新可恢复事实的起点推到过去，构造真实的跨天 resume 输入。
  */
-function isActiveBased(): boolean {
-  const src = readFileSync(
-    resolve(fileURLToPath(new URL(".", import.meta.url)), "../../../../packages/harness-runtime/src/loop/run-loop.ts"),
-    "utf8",
-  );
-  return !/const elapsed = now\(\) - state\.budgetUsage\.startedAt/.test(src);
+function rewriteLatestRunStartedAt(dbPath: string, runId: RunId, startedAt: number): void {
+  const db = openDb({ path: dbPath });
+  try {
+    const row = db.prepare(
+      `SELECT sequence, payload_json FROM transcript_entries
+         WHERE run_id = ? AND kind = 'RUN_META'
+         ORDER BY sequence DESC LIMIT 1`,
+    ).get(String(runId)) as { sequence: number; payload_json: string } | undefined;
+    if (!row) throw new Error("崩溃后缺少 RUN_META，无法构造跨天 resume 夹具");
+
+    const payload = JSON.parse(row.payload_json) as {
+      meta?: { metaKind?: string; facts?: { budgetUsage?: { startedAt?: number } } };
+    };
+    const usage = payload.meta?.facts?.budgetUsage;
+    if (payload.meta?.metaKind !== "RUN_FACTS" || !usage) {
+      throw new Error("最新 RUN_META 不是可恢复事实");
+    }
+    usage.startedAt = startedAt;
+    db.prepare(
+      "UPDATE transcript_entries SET payload_json = ? WHERE run_id = ? AND sequence = ?",
+    ).run(JSON.stringify(payload), String(runId), row.sequence);
+  } finally {
+    db.close();
+  }
 }
 
 void runVerify(main);

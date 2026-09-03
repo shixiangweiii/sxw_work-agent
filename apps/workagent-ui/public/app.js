@@ -213,7 +213,7 @@ function renderService() {
       s.approvalModeId === "AUTO"
         ? "AUTO（不会停下来问）"
         : s.approvalModeId === "CONFIRM"
-          ? "逐次确认"
+          ? "需要审批的操作逐次确认"
           : "默认",
       s.approvalModeId === "AUTO" ? "warn" : "",
     ),
@@ -249,7 +249,7 @@ function renderService() {
     if (!n.detail) continue;
     box.appendChild(
       el("details", {}, [
-        el("summary", { text: "工具原名清单（写 mcp.json 的 tools 段时展开）" }),
+        el("summary", { text: "详情" }),
         el("div", { class: "body", text: n.detail }),
       ]),
     );
@@ -346,6 +346,7 @@ function renderWorkspaces() {
   if (active) {
     pathLine.appendChild(el("div", { text: active.realPath }));
     pathLine.appendChild(el("div", { class: "muted", text: "库 " + active.dbPath }));
+    pathLine.appendChild(el("div", { class: "muted", text: "Trace " + active.traceDir }));
   }
 }
 
@@ -393,6 +394,12 @@ function renderRuns() {
           r.liveInThisProcess ? el("span", { class: "chip ok", text: "在跑" }) : null,
         ]),
         el("div", { class: "rtask", text: r.task }),
+        el("div", {
+          class: "muted",
+          text:
+            "创建 " + new Date(r.createdAt).toLocaleString() +
+            " · 更新 " + new Date(r.updatedAt).toLocaleString(),
+        }),
       ],
     );
     list.appendChild(li);
@@ -743,6 +750,7 @@ function renderEntry(e) {
     renderToolActivity(box, head, e);
   } else if (e.kind === "APPROVAL") {
     head.appendChild(el("span", { class: "tag", text: "审批" }));
+    head.appendChild(el("span", { class: "mono muted", text: e.actionId }));
     head.appendChild(
       e.approved === undefined
         ? el("span", { class: "chip warn", text: "等待中" })
@@ -777,6 +785,7 @@ function renderEntry(e) {
   } else if (e.kind === "INTERACTION") {
     head.appendChild(el("span", { class: "tag", text: "人工接管" }));
     head.appendChild(el("span", { class: "toolname", text: e.toolName }));
+    head.appendChild(el("span", { class: "mono muted", text: e.actionId }));
     if (e.answered !== undefined) {
       // 【定】措辞跟着 §20.3 走：`answered` 说的是「人应答了没有」，
       // **不是**「任务成功了没有」。写成「已完成」会把这条纪律教反。
@@ -792,6 +801,7 @@ function renderEntry(e) {
     head.appendChild(el("span", { class: "tag", text: "产物" }));
     head.appendChild(el("span", { class: "toolname", text: e.logicalId + " v" + e.version }));
     head.appendChild(el("span", { class: "chip", text: e.role }));
+    head.appendChild(el("span", { class: "chip", text: e.artifactKind }));
     if (e.verified) {
       head.appendChild(
         el("span", {
@@ -816,6 +826,7 @@ function renderEntry(e) {
 
 function renderToolActivity(box, head, e) {
   head.appendChild(el("span", { class: "toolname", text: e.toolName }));
+  head.appendChild(el("span", { class: "mono muted", text: e.toolCallId }));
   if (e.effect) head.appendChild(el("span", { class: "chip", text: e.effect }));
   if (e.status) {
     head.appendChild(
@@ -971,7 +982,7 @@ function renderTurns(view, d) {
 function modelCallSummary(call) {
   const parts = [
     "模型调用 #" + call.ordinal,
-    call.invocationId ? traceClip(call.invocationId, 30) : "旧 Trace（无 invocationId）",
+    traceClip(call.invocationId, 30),
     call.traceStatus || "STARTED",
   ];
   if (call.billedInputTokens !== undefined || call.outputTokens !== undefined) {
@@ -994,15 +1005,6 @@ function modelAuditTime(value) {
 
 function renderModelCallRow(turn, call) {
   const cell = el("td", { colspan: 8, class: "model-call-cell" }, []);
-  if (!call.invocationId) {
-    cell.appendChild(el("div", { class: "model-call-legacy", text: modelCallSummary(call) }));
-    cell.appendChild(el("div", {
-      class: "muted",
-      text: "这条历史事件没有调用标识，保留统计但不能安全关联审计文件。",
-    }));
-    return el("tr", { class: "model-call-row" }, [el("td", {}), cell]);
-  }
-
   const ui = S.modelAuditUi;
   const key = S.runId + ":" + call.invocationId;
   let entry = ui.entries.get(key);
@@ -1363,7 +1365,15 @@ function renderBudget(view, d) {
   );
   view.appendChild(el("h4", { text: "审批策略（随 RunSpec 冻结）" }));
   view.appendChild(
-    el("p", { class: "mono", text: d.spec.approvalPolicy.requiresApprovalFor.join(", ") || "（无）" }),
+    el("p", {
+      class: "mono",
+      text:
+        (d.spec.approvalPolicy.requiresApprovalFor.join(", ") || "（无）") +
+        "\ntimeout " +
+        (d.spec.approvalPolicy.approvalTimeoutMs === undefined
+          ? "未设"
+          : d.spec.approvalPolicy.approvalTimeoutMs + " ms"),
+    }),
   );
   /**
    * ── 执行特权：**这个 Run 当时**的档位（ADR-0012，二次评审 P2-5）─────────
@@ -1395,6 +1405,17 @@ function renderBudget(view, d) {
    */
   view.appendChild(el("h4", { text: "入口（RunSpec.origin）" }));
   view.appendChild(el("p", { class: "mono", text: d.spec.origin || "（未知）" }));
+  view.appendChild(el("h4", { text: "模型与冻结环境" }));
+  view.appendChild(
+    el("p", {
+      class: "mono",
+      text:
+        d.spec.endpointId + " / " + d.spec.modelId + "\n" +
+        "profile " + d.spec.endpointProfileRef + "\n" +
+        "timezone " + d.spec.timezone + " · tools " + d.spec.toolCount + "\n" +
+        "created " + new Date(d.spec.createdAt).toLocaleString(),
+    }),
+  );
 }
 
 function fmt(n, unit) {
@@ -1461,6 +1482,7 @@ function renderArtifacts(view, d) {
         : el("span", { class: "chip " + (a.verified ? "ok" : "bad"), text: a.verified ? "已验证" : "未通过" }),
     ]);
     const box = el("div", { class: "entry ARTIFACT" }, [head]);
+    box.appendChild(el("div", { class: "kv", text: "登记于 " + new Date(a.createdAt).toLocaleString() }));
     if (a.verifyDetail) box.appendChild(el("div", { class: "kv", text: a.verifyDetail }));
     box.appendChild(el("div", { class: "kv mono", text: "hash " + a.contentHash }));
     if (a.path) {

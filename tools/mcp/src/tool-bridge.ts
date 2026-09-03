@@ -46,11 +46,11 @@ export const atlasToolName = (server: string, tool: string): string =>
   `mcp__${sanitize(server)}__${sanitize(tool)}`;
 
 /** 每个 MCP 工具一条 Resolver 注册项的 key。 */
-export const resolverRefFor = (atlasName: string, version: string) => ({
+const resolverRefFor = (atlasName: string, version: string) => ({
   id: `mcp:${atlasName}`,
   version,
 });
-export const resolverKey = (ref: { id: string; version: string }) => `${ref.id}@${ref.version}`;
+const resolverKey = (ref: { id: string; version: string }) => `${ref.id}@${ref.version}`;
 
 /**
  * 一个 MCP 工具的 Effect Resolver。**每个工具一个实例。**

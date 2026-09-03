@@ -51,7 +51,7 @@ export function digest(s: string): string {
   return createHash("sha256").update(s).digest("hex").slice(0, 32);
 }
 
-export interface VersionedRef<_T> {
+export interface VersionedRef {
   id: string;
   version: string;
 }

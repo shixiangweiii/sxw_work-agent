@@ -7,7 +7,7 @@
  * 「不做定制」这句话必须有机械判据，否则半年后没人能复核。本脚本是那三道
  * 机械闸门里的前两道（第三道是 S13 的跨场景 smoke，它在批 4）：
  *
- *   A 段  七条边界 grep —— 通用工具不得依赖任何 Case 包
+ *   A 段  中央边界表 grep —— 通用工具不得依赖任何 Case 包
  *   B 段  两类声明     —— 场景工具写三场景用例，机制工具写它服务哪条机制
  *
  * 其余各段验的是「工具本身的形态约束」：
@@ -18,22 +18,12 @@
  *   E 段  组合器**三个**方法都路由（不得绕过 #10）
  *   F 段  读黑名单同时覆盖 read_file 与 search（不得绕过 #13）
  *   G 段  固定开销基线 —— 工具数膨胀的免费警报
- *   H 段  大结果外置（**批 1 的已知红，批 2 S6 之后已转绿**）
- *
- * ── H 段曾经是红的，这是刻意的 ──────────────────────────────────────
- *
- * `read_file`（批 1 S3）就能产大结果，而 Blob 外置在批 2 S6 ——
- * 也就是说批 1 结束时存在一个已知空窗：**能读大文件但没有外置机制**，
- * 大内容会直接灌进 Context 撞上下文墙。
- *
- * 用一条「已知红」把这个欠账标出来，比推到下一批再说更诚实：
- * **缺口应当在它被引入的那一批就可见。**（形态照抄阶段 2 verify:persistence F 段）
- * 批 2 接上 Materialization 之后它转绿，**判据保留** —— 它现在是防回归的那道线。
+ *   H 段  大结果外置（超阈值正文不得直接进入 Context）
  * ══════════════════════════════════════════════════════════════════════
  */
 
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -153,8 +143,8 @@ interface ProgressDeclaration {
  * 方案 S9 承诺的「大文件读取周期性回报」从来没实现过，
  * 而读代码的人会以为那两个工具是被监控的。判别力不用另造：它刚抓到两个。
  *
- * 扫描范围是**两个包** —— `slow_write` 在 cases/ 里，而它恰恰是
- * 全仓唯一的 HEARTBEAT 生产者，漏掉它这条规则就只查了没有生产者的那一半。
+ * 扫描范围是**两个包**：`slow_write` 在 cases/ 里，`run_shell`
+ * 在 tools/common/ 里，两个 HEARTBEAT 生产者都必须被纳入。
  */
 function scanProgressDeclarations(): ProgressDeclaration[] {
   const out: ProgressDeclaration[] = [];
@@ -232,7 +222,7 @@ async function main(): Promise<void> {
   );
 
   // ── A. 全部边界 grep ＋ 第 6b 条的判别力实测
-  //    （阶段 4 的第 8 / 9 / 10 条各有自己的判别力实测，在 verify:ui A 段）
+  //    （阶段 4 新增边界的判别力实测在 verify:ui A 段）
   section(
     `A. 边界 grep —— 编号 1…${BOUNDARIES[BOUNDARIES.length - 1]!.id} 共 ${BOUNDARIES.length} 条规则（6b 是第 6 条的同族）`,
   );
@@ -280,13 +270,14 @@ async function main(): Promise<void> {
     }
   }
   const canaryCaught = canaryHits.some((h) => h.includes("__boundary_canary.ts"));
+  const canaryCleaned = !existsSync(canary);
   fact("注入后第 6b 条命中", canaryHits.length === 0 ? "0（没抓到）" : canaryHits.join(" | "));
-  fact("注入文件已清理", "是");
+  fact("注入文件已清理", canaryCleaned ? "是" : "否（文件仍存在）");
   verdict(
-    canaryCaught,
-    canaryCaught
+    canaryCaught && canaryCleaned,
+    canaryCaught && canaryCleaned
       ? "往 tools/common 注入一行对 Case 包的 import，第 6b 条当场翻红并指出行号 —— 它有判别力"
-      : "注入了违规却没被抓到 —— 第 6b 条是一个永远绿的闸门",
+      : `边界判别力失败：抓到=${canaryCaught} 清理=${canaryCleaned}`,
   );
 
   // ── B. 两类声明
@@ -579,8 +570,8 @@ async function main(): Promise<void> {
      * `.envrc` 是 direnv 的配置，正文常常就是一排 `export SECRET=…`。
      *
      * 【定】它此前**漏网**：前缀规则判的是「等于 `.env`」或「以 `.env.` 开头」，
-     * 两条都不中，而 `readGuardRules()` 打印的却是 `basename .env*` ——
-     * 看上去像挡住了（阶段 3 收口批补上）。
+     * 两条都不中；阶段 3 收口批把它加入精确名单，并删除了会夸大覆盖面的
+     * 规则打印器。这里用真实读路径验，不再靠描述字符串自证。
      */
     writeFileSync(join(fws.root, ".envrc"), "export AWS_SECRET=CANARY-DIRENV-VALUE\n", "utf8");
     mkdirSync(join(fws.root, ".workagent"), { recursive: true });
@@ -662,11 +653,11 @@ async function main(): Promise<void> {
   // 等于在没有证据的情况下先给能力面画一条线；真正的判据是评测阶段的收益比。
   verdict(
     allOverhead > 0 && commonSceneTools.length >= 7,
-    `批 1 结束时 ${commonSceneTools.length} 个场景工具、起步价 ${allOverhead} tokens（读数已记录，本段不设阈值）`,
+    `当前 ${commonSceneTools.length} 个场景工具、起步价 ${allOverhead} tokens（读数已记录，本段不设阈值）`,
   );
 
-  // ── H. 大结果外置（批 1 的已知红，现已转绿；保留为防回归）
-  await sectionKnownRedBlob();
+  // ── H. 大结果外置
+  await sectionBlobExternalization();
 }
 
 /**
@@ -860,20 +851,14 @@ async function sectionCompositeRouting(): Promise<void> {
 }
 
 /**
- * H 段：**批 1 结束时预期为红**，批 2 S6（Blob 外置）之后转绿。
- *
- * 【定】它不是回归，是**欠账的可见形态**。
- * `read_file` 在批 1 就能产大结果，而外置机制在批 2 —— 缺口应当在它被
- * 引入的那一批就可见，而不是等到下一批才第一次被提起。
+ * H 段：大结果必须外置为 Blob 引用，避免正文直接占满 Context。
  */
-async function sectionKnownRedBlob(): Promise<void> {
-  section("H. 大结果外置（批 1 的已知红，批 2 S6 之后已转绿）");
+async function sectionBlobExternalization(): Promise<void> {
+  section("H. 大结果外置");
   console.log(
     `   inlineToolResultLimitTokens 默认 ${DEFAULT_CONTEXT_POLICY.inlineToolResultLimitTokens}。\n` +
-      "   批 1 结束时它有默认值、有定义、**零消费点**，而 read_file 已经能产出\n" +
-      "   远超它的结果 —— 这条判据当时是红的，记录的是那一批的**已知欠账**。\n" +
-      "   批 2 S6 接上 Materialization 之后转绿。\n" +
-      "   【定】保留这条判据而不是删掉：它现在是防回归的那道线。\n",
+      "   read_file 能产出远超阈值的结果；Materialization 必须把正文存入 Blob，\n" +
+      "   只让包含 ref 的结构化 stub 进入 Context。\n",
   );
 
   const ws = tempWorkspace();
@@ -889,10 +874,10 @@ async function sectionKnownRedBlob(): Promise<void> {
     const approxTokens = Math.ceil(raw.length / 2.5);
     const limit = DEFAULT_CONTEXT_POLICY.inlineToolResultLimitTokens;
 
-    // 外置发生的标志：帧里留下的是结构合法的 stub（带 blobRef / ref），而不是全文。
+    // 外置发生的标志：帧里留下的是结构合法的 stub（带 ref），而不是全文。
     const parsed = parseResult(raw);
     const externalized =
-      approxTokens <= limit && (parsed["blobRef"] !== undefined || parsed["ref"] !== undefined);
+      approxTokens <= limit && parsed["ref"] !== undefined;
 
     fact("tool_result 正文长度", `${raw.length} 字符 ≈ ${approxTokens} tokens`);
     fact("inlineToolResultLimitTokens", limit);
@@ -901,10 +886,8 @@ async function sectionKnownRedBlob(): Promise<void> {
     verdict(
       externalized,
       externalized
-        ? "大结果已被外置成 stub，全文没有进帧（批 2 S6 已接线）"
-        : `【已知红】超阈值结果（${approxTokens} > ${limit}）原样灌进了 Context —— ` +
-          `BlobStorePort 与 §11.4 的 Materialization 在批 2 S6 才接线。` +
-          `这条红是批 1 的已知欠账，不是回归。`,
+        ? "大结果已被外置成 stub，全文没有进帧"
+        : `超阈值结果（${approxTokens} > ${limit}）原样灌进了 Context，Blob 外置失效。`,
     );
   } finally {
     ws.cleanup();

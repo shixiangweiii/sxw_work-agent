@@ -184,7 +184,7 @@ export type UiTranscriptEntry =
 export interface UiTurn {
   turn: number;
   startedAtSequence: number;
-  /** 兼容主行：同一轮有重试时是最后一次编译帧；精确帧在 modelCalls[].frame。 */
+  /** 主行展示同一轮最后一次编译帧；每次调用的精确帧在 modelCalls[].frame。 */
   frame?: UiModelFrame;
   /**
    * 这一轮里的**每一次**模型调用。
@@ -203,11 +203,11 @@ export interface UiTurn {
 }
 
 export interface UiModelCall {
-  /** 只用于投影与 DOM 的稳定 id；旧 Trace 没有 invocationId 时由事件 sequence 推出。 */
+  /** 只用于投影与 DOM 的稳定 id，由 invocationId 推出。 */
   id: string;
   ordinal: number;
   startedAtSequence: number;
-  invocationId?: string;
+  invocationId: string;
   frameId?: string;
   frame?: UiModelFrame;
   /** 只是事件轨道观察结果；调用真实 outcome 以 sidecar invocation_end 为准。 */
@@ -232,7 +232,6 @@ export interface UiModelFrame {
   items: number;
   totalTokens: number;
   fixedOverheadTokens: number;
-  compacted: boolean;
   hasExternalUntrusted: boolean;
   untrustedItems: number;
 }
@@ -241,7 +240,6 @@ export interface UiModelInvocationAudit {
   state: "COMPLETE" | "INCOMPLETE" | "CORRUPT" | "NOT_CAPTURED";
   errors: Array<{ line: number; message: string }>;
   request?: {
-    schemaVersion: 1;
     runId: string;
     invocationId: string;
     frameId: string;
@@ -449,13 +447,9 @@ export interface UiRunListItem {
 export interface UiWorkspace {
   id: string;
   name: string;
-  path: string;
   realPath: string;
   dbPath: string;
   traceDir: string;
-  createdAt: number;
-  lastUsedAt: number;
-  active: boolean;
 }
 
 export interface UiStateResponse {
@@ -487,9 +481,8 @@ export interface UiRunDetail {
   spec: {
     runSpecId: string;
     /**
-     * 这个 Run 是谁发起的（`RunOrigin.kind`）。
-     * 它与 trace header 的 `entry` 说的是同一件事，两处必须一致 ——
-     * 曾经不一致：header 写 `web`，RunSpec 写 `CLI`。
+     * 这个 Run 是谁发起的（`RunOrigin.kind`）。trace header 的 `entry` 则记录
+     * 每个执行段实际由哪个入口运行；只有首段必然与这里对应。
      */
     origin: string;
     endpointId: string;

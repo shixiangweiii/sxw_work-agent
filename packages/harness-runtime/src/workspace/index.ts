@@ -12,8 +12,8 @@
  *
  * `--db` 与 `--workspace` 是**分开**的两个参数，同一个库里可以躺着来自不同
  * 目录的 Run。而 `resume()` 用的 `workspaceRoot` 来自**当前 compose**，
- * 不是 RunSpec 里冻结的那个 —— 因为 `makeRunSpec()` 压根没填 `spec.workspace`
- * （那个字段从阶段 1 起就在类型里，一直是 undefined）。
+ * 不是 RunSpec 里冻结的那个 —— 当时 `makeRunSpec()` 没有填 `spec.workspace`，
+ * 该字段虽然已在类型里，却没有生产者。
  *
  * 后果：在 `/A` 起的 Run，用 `--workspace /B` 恢复，**未配对工具的观察、
  * 幂等重试、后续所有相对路径的读写、以及自动放行的 workspace 判定，
@@ -175,9 +175,8 @@ export function assertResumeWorkspaceMatches(
  *     更糟：一条**在有沙箱的前提下被批准过**的计划，后半段跑在没有沙箱的
  *     机器上。人当时批准的那次审批，批的不是这件事。
  *
- * 【定】没有 `UNKNOWN_LEGACY` 这一档。旧库里读不到这个字段时
- * `executionPrivilegeOf()` 返回 `SANDBOXED`，而那是一条**事实**不是猜测
- * （那一档之前不存在）—— 所以这里永远拿得到一个确定的值可比。
+ * 【定】没有未知或缺省档。RunSpec 缺失/损坏该字段时在读取处 fail-fast；
+ * 到这里的两侧都必须是可直接比较的确定值。
  * ══════════════════════════════════════════════════════════════════════
  */
 export function assertResumeExecutionPrivilegeMatches(

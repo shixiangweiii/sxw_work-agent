@@ -24,6 +24,7 @@
 
 import type {
   ObservationResult,
+  JsonValue,
   PreparedAction,
   ToolExecutionContext,
   ToolExecutionOutcome,
@@ -116,7 +117,7 @@ export class CompositeVerifier implements VerificationPort {
   async observePost(
     action: PreparedAction,
     ctx: ToolExecutionContext,
-    preFingerprint: never,
+    preFingerprint: JsonValue,
   ): Promise<{ applied: boolean; detail: string } | undefined> {
     const target = this.routeFor(action.toolName);
     return target?.observePost?.(action, ctx, preFingerprint);

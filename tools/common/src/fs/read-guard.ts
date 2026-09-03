@@ -39,10 +39,10 @@ import { basename, sep } from "node:path";
 /**
  * 路径中出现即拒绝的**目录名**。
  *
- * `.git` 里有完整历史（含曾经提交过的凭证）；`.workagent-state` 是
- * Runtime 自己的 SQLite 库（里面有全部 transcript，也就有全部工具输出）；
- * `.workagent` 是 Runtime 的调用审计目录（里面有完整模型请求、reasoning、
- * Provider 原始事件与工具参数）。这些运行态事实源只能供宿主侧观察，不能再被
+ * `.git` 里有完整历史（含曾经提交过的凭证）；`.workagent-state` 放跨 workspace
+ * 的注册表与 MCP 启动配置；`.workagent` 放 SQLite、Run Trace 与模型调用审计
+ * （含完整模型请求、reasoning、Provider 原始事件与工具参数）。这些宿主侧事实
+ * 与配置不能再被
  * read_file / search / run_shell 喂回模型，否则既泄露敏感内容，也会形成上下文
  * 自引用膨胀。其余条目是通用的凭证目录。
  */
@@ -83,7 +83,7 @@ export const DENIED_BASENAMES = new Set([
   ".git-credentials",
 ]);
 
-export interface ReadDenial {
+interface ReadDenial {
   /** 命中的规则，写进错误信息 —— 拒绝必须说得出理由，否则模型只会反复重试。 */
   rule: string;
 }
@@ -136,19 +136,4 @@ export function checkReadAllowed(absolutePath: string): ReadDenial | undefined {
  */
 export function isReadDeniedPath(absolutePath: string): boolean {
   return checkReadAllowed(absolutePath) !== undefined;
-}
-
-/**
- * 供 verify 段打印，证明黑名单不是一个空集合。
- *
- * 【定】打印的写法必须与**实现**一致。这里此前写的是 `basename .env*`，
- * 而实现是「等于 `.env` 或以 `.env.` 开头」—— 于是 `.envrc` 明明漏网，
- * 验收输出看上去却像挡住了。一个骗人的打印比不打印更糟。
- */
-export function readGuardRules(): string[] {
-  return [
-    ...DENIED_BASENAME_PREFIXES.flatMap((p) => [`basename ${p}`, `basename ${p}.*`]),
-    ...[...DENIED_BASENAMES].map((n) => `basename ${n}`),
-    ...[...DENIED_SEGMENTS].map((s) => `segment ${s}/`),
-  ];
 }

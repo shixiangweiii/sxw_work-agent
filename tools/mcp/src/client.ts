@@ -234,7 +234,7 @@ async function listAllTools(client: Client, timeout: number): Promise<McpToolDef
   throw new Error(`MCP tools/list 超过 ${MAX_LIST_PAGES} 页，判定为分页没有终点`);
 }
 
-export interface CallResult {
+interface CallResult {
   /** 拼好的文本。image / resource 块会在这里留下一句说明，见 `renderContent`。 */
   text: string;
   isError: boolean;

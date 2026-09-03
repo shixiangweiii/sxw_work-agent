@@ -60,7 +60,7 @@ const SHELL_METACHARS = /[|&;<>$`(){}*?[\]~!\\\n\r]/;
  */
 const READONLY_PROGRAMS = new Set([
   "ls", "cat", "head", "tail", "wc", "stat", "file", "grep",
-  "diff", "du", "df", "pwd", "echo", "date", "which", "basename", "dirname",
+  "diff", "du", "df", "pwd", "echo", "which", "basename", "dirname",
 ]);
 
 /**
@@ -105,14 +105,13 @@ const READONLY_PROGRAMS = new Set([
  *
  * 【定】这是白名单**之外**的第二道，不是替代品。
  *
- * 白名单回答「这个程序通常只读吗」，而几乎每个只读程序都留了一个写出口
- * （`-o` / `--output` / `-fprint`）。两道都过了才算只读。
+ * 参数必须按程序解释。同一个 `-o`，对 `grep` 是「只输出命中部分」，
+ * 对 `sort` 才是写文件；把所有 flag 混成一张全局黑名单会把常规查询误报成写操作。
  *
  * 与白名单同样的纪律：**宁可多列**。多列一个参数的代价是那条命令多问一次。
  */
-const WRITE_OUTLET_FLAGS = new Set([
-  "-o", "--output", "--output-file", "-fprint", "-fprintf", "-delete",
-  "--write", "-w", "--in-place", "-i", "--pre", "--exec", "-exec", "-execdir",
+const WRITE_OUTLET_FLAGS = new Map<string, ReadonlySet<string>>([
+  ["diff", new Set(["--output"])],
 ]);
 
 export interface CommandAnalysis {
@@ -177,9 +176,10 @@ export function analyzeCommand(command: string): CommandAnalysis {
    * 【定】`--output=x` 这种带等号的写法要一起抓 —— 只比对整个 token
    * 会漏掉它，而漏掉的方向是**判成只读**，正是不能漏的那一侧。
    */
+  const writeFlags = WRITE_OUTLET_FLAGS.get(head);
   for (const tok of argv.slice(1)) {
     const flag = tok.includes("=") ? tok.slice(0, tok.indexOf("=")) : tok;
-    if (WRITE_OUTLET_FLAGS.has(flag)) {
+    if (writeFlags?.has(flag)) {
       return { readOnly: false, programs, why: `参数 "${tok}" 是写出口 / 执行出口` };
     }
   }

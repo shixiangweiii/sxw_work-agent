@@ -291,8 +291,6 @@ async function main(): Promise<void> {
       "   下面这个扫描是唯一会发现违反的东西。",
   );
 
-  let allOk = true;
-
   for (const sc of scenarios) {
     section(sc.name);
     console.log(`   路径：${sc.path}`);
@@ -364,7 +362,6 @@ async function main(): Promise<void> {
         r.value.terminal.reason === sc.expectTerminal && outcomeKind === sc.expectOutcome;
       const ok = pairingOk && settlementOk;
 
-      if (!ok) allOk = false;
       verdict(
         ok,
         ok
@@ -375,7 +372,6 @@ async function main(): Promise<void> {
               `实际 ${r.value.terminal.reason} / ${outcomeKind}）`,
       );
     } catch (err) {
-      allOk = false;
       verdict(false, `场景抛出异常：${(err as Error).message.slice(0, 160)}`);
     } finally {
       ws.cleanup();
@@ -515,20 +511,10 @@ async function main(): Promise<void> {
           ? "注入一条锚点错配的 tool_result 后检查器立刻报出它 —— 前面那些「== 0」的断言因此是有判别力的"
           : "findOrphanResults 没有报出注入的 orphan，前面所有断言都失去意义",
       );
-      if (!ok) allOk = false;
     } finally {
       ws.cleanup();
     }
   }
-
-  section("总判定");
-  verdict(
-    allOk,
-    allOk
-      ? `${scenarios.length} 个场景的合成 result 都收敛到了 settle-batch.ts 的 finalize()，` +
-        "且 outcome 与实际执行事实一致（必需操作没做成就不判 SUCCESS）"
-      : "存在违反：配对有缺口，或 outcome 与实际执行事实不一致",
-  );
   console.log(
     "\n   R-4 那四条的判别力是验证过的：把 guard() 改成 rethrow，四条全部翻红，\n" +
       "   报错形态正是「场景抛出异常」—— 异常穿透 generator，runLoop 收不到 BatchOutcome。\n" +

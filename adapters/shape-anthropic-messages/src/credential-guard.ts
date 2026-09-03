@@ -71,7 +71,7 @@ export function assertCredentialGoesWhereIntended(c: CredentialBoundaryCheck): v
 }
 
 /** 打日志时用。永远不要打印完整 key。 */
-export function maskKey(apiKey: string): string {
+function maskKey(apiKey: string): string {
   if (apiKey.length <= 12) return "****";
   return `${apiKey.slice(0, 6)}…${apiKey.slice(-4)}`;
 }

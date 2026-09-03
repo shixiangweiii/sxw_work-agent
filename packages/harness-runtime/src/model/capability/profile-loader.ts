@@ -35,6 +35,42 @@ export function parseProfile(raw: Record<string, unknown>): EndpointCapabilityPr
     throw new Error(`端点能力声明缺少必需字段：${missing.join(", ")}`);
   }
 
+  const tokens = raw["tokens"] as Record<string, unknown>;
+  const usageFieldMap = tokens?.["usageFieldMap"];
+  if (!usageFieldMap || typeof usageFieldMap !== "object" || Array.isArray(usageFieldMap)) {
+    throw new Error("端点能力声明的 tokens.usageFieldMap 必须是对象");
+  }
+  const usageKeys = new Set([
+    "inputTokens",
+    "outputTokens",
+    "cacheCreationInputTokens",
+    "cacheReadInputTokens",
+  ]);
+  for (const [key, value] of Object.entries(usageFieldMap)) {
+    if (!usageKeys.has(key)) {
+      throw new Error(`端点能力声明含未知 usageFieldMap 键：${key}`);
+    }
+    if (typeof value !== "string" || value.length === 0) {
+      throw new Error(`端点能力声明的 usageFieldMap.${key} 必须是非空字符串`);
+    }
+  }
+  const limits = raw["limits"] as Record<string, unknown> | undefined;
+  if (limits !== undefined) {
+    if (typeof limits !== "object" || Array.isArray(limits)) {
+      throw new Error("端点能力声明的 limits 必须是对象");
+    }
+    if (typeof limits["quotaBeforeContextLimit"] !== "boolean") {
+      throw new Error("端点能力声明的 limits.quotaBeforeContextLimit 必须是 boolean");
+    }
+    for (const key of ["maxContextTokens", "observedMaxSingleRequestTokens"] as const) {
+      const value = limits[key];
+      if (value !== undefined &&
+          (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0)) {
+        throw new Error(`端点能力声明的 limits.${key} 必须是正整数`);
+      }
+    }
+  }
+
   const p = raw as unknown as EndpointCapabilityProfile;
   return {
     ...p,
@@ -134,6 +170,7 @@ function behaviorFingerprint(p: EndpointCapabilityProfile): string {
         context: p.context,
         tokens: p.tokens,
         errors: p.errors ?? null,
+        limits: p.limits ?? null,
       }),
     )
     .digest("hex")

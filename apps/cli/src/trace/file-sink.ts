@@ -4,8 +4,8 @@
  * ══════════════════════════════════════════════════════════════════════
  * 起因：2026-08-24 的评测报告在「可观测与可审计」一项上扣分，理由是
  * CLI 当时装的是 `NullTraceSink`，进程退出后只剩一句「transcript: 21 条」，
- * 没有任何可重读的 run artifact —— 而 `CollectingTraceSink` 早就存在，
- * 三条 verify 脚本都在用。**唯一没有 trace 的路径，恰好是唯一跑真实端点的路径。**
+ * 没有任何可重读的 run artifact —— 而 `CollectingTraceSink` 早已被验收脚本广泛使用。
+ * **唯一没有 trace 的路径，恰好是唯一跑真实端点的路径。**
  * 这个不对称没有理由。
  *
  * 所以这里补的是 trace 落盘，不是持久化 transcript。两者不要混为一谈：
@@ -25,11 +25,15 @@
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import type { RunEvent, TraceSinkPort } from "@workagent/harness-runtime";
+import type { ExecutionPrivilege, RunEvent, TraceSinkPort } from "@workagent/harness-runtime";
 
 export interface TraceHeader {
-  runId?: string;
+  runId: string;
   commit: string;
+  gitDirty: boolean | "unknown";
+  nodeVersion: string;
+  /** 执行这一段的入口；与创建 Run 的 `RunSpec.origin` 不是同一事实。 */
+  entry: "cli" | "web" | "eval";
   endpointProfile: string;
   modelId: string;
   task: string;
@@ -42,7 +46,7 @@ export interface TraceHeader {
    * 「可审计的唯一 artifact」。见 `RunStarted.executionPrivilege` 那段：
    * 唯一看起来能替代它的东西（界面上的当前服务档位）在重启换档之后就是错的。
    */
-  executionPrivilege: string;
+  executionPrivilege: ExecutionPrivilege;
   timezone: string;
   startedAt: string;
   /**
@@ -52,9 +56,7 @@ export interface TraceHeader {
    * 时间**命名，于是一个 Run 跨三个进程就是三个互不相干的 JSONL。
    * 而「Trace 是可审计的唯一 artifact」这个说法，在文件分裂之后自己就不成立了。
    */
-  segmentIndex?: number;
-  /** 本段是恢复而来时，上一段结束时的 transcript 末尾序号。 */
-  resumedFrom?: number;
+  segmentIndex: number;
 }
 
 export class FileTraceSink implements TraceSinkPort {

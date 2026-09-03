@@ -5,7 +5,7 @@
  * 验证：**前三阶段的执行事实，能不能只靠既有的事件流、transcript 与三个 Port
  * 注入点，投影出一个完整的白盒界面 —— 而 Runtime Core 一行不改？**
  *
- *   A 段  三条新边界的**判别力实测**（注入即翻红）
+ *   A 段  阶段 4 新增边界的**判别力实测**（注入即翻红）
  *   B 段  投影的确定性与 id 稳定性
  *   C 段  白盒完整性：来源可追溯、两条轨道缺一不可、数字不自己算
  *   D 段  三条「等人」通道走 HTTP 真跑一遍（决 4 的判别力所在）
@@ -30,6 +30,7 @@ import {
   CollectingTraceSink,
   DEFAULT_BUDGETS,
   asId,
+  canonicalWorkspacePath,
   type ModelInvocationObserver,
   type ModelInvocationResult,
   type ModelPort,
@@ -47,6 +48,7 @@ import {
   projectTurns,
 } from "../../../workagent-service/src/projection.js";
 import { startService, type RunningService } from "../../../workagent-service/src/server.js";
+import { selectStartupWorkspace } from "../../../workagent-service/src/workspace-registry.js";
 import { BOUNDARIES, grepBoundary, type Boundary } from "./boundaries.js";
 import { ScriptedModelPort, banner, fact, runVerify, section, verdict } from "./harness.js";
 
@@ -180,13 +182,13 @@ function injectionTest(
   boundaryId: string,
   relPath: string,
   content: string,
-): { hit: string | undefined; cleaned: boolean } {
+): { hit: string | undefined } {
   const abs = resolve(REPO_ROOT, relPath);
   const b = BOUNDARIES.find((x) => x.id === boundaryId) as Boundary;
   writeFileSync(abs, content, "utf8");
   try {
     const hits = grepBoundary(b);
-    return { hit: hits.find((h) => h.includes(relPath)), cleaned: false };
+    return { hit: hits.find((h) => h.includes(relPath)) };
   } finally {
     unlinkSync(abs);
   }
@@ -327,13 +329,18 @@ async function readSse(svc: RunningService, runId: string, since: number): Promi
  * 「写 transcript」的后门。测量装置不得长在被测对象身上。
  * ══════════════════════════════════════════════════════════════════════
  */
-async function buildRecoveryFixture(workspaceRoot: string, dbPath: string): Promise<string> {
+async function buildRecoveryFixture(
+  workspaceRoot: string,
+  dbPath: string,
+  timezone?: string,
+): Promise<string> {
   const composed = compose({
     workspaceRoot,
     dbPath,
     approvalDecider: async () => ({ approved: true }),
     trace: { emit: () => {} },
     tools: toolsFor(["append_log"]),
+    ...(timezone ? { timezone } : {}),
     // 一轮就收尾：我们只需要一个**存在且可 resume**的 Run 骨架。
     modelPortOverride: new ScriptedModelPort([{ text: "先到这里。", toolCalls: [] }]),
   });
@@ -385,7 +392,7 @@ async function main(): Promise<void> {
     "执行事实能不能只靠既有的事件流与注入点投影成界面，而 Runtime 一行不改？",
   );
 
-  // ════════════════════════════════════════════════ A. 三条新边界的判别力
+  // ════════════════════════════════════════════ A. 阶段 4 新增边界的判别力
   section("A. 阶段 4 新增边界的判别力实测（注入即翻红）");
   console.log(
     "   前面 verify:tools 里那句「干净」只证明现在没有违规，不证明**发现得了**违规。\n" +
@@ -1248,15 +1255,33 @@ async function main(): Promise<void> {
         | undefined;
       const kinds = (traceLines ?? []).map((l) => String(l["kind"]));
       const header = (traceLines ?? []).find((l) => l["kind"] === "header");
+      const headerFieldsOk =
+        header?.["runId"] === gid &&
+        typeof header["commit"] === "string" &&
+        String(header["commit"]).length > 0 &&
+        (typeof header["gitDirty"] === "boolean" || header["gitDirty"] === "unknown") &&
+        header["nodeVersion"] === process.version &&
+        header["entry"] === "web" &&
+        typeof header["endpointProfile"] === "string" &&
+        String(header["endpointProfile"]).length > 0 &&
+        typeof header["modelId"] === "string" &&
+        String(header["modelId"]).length > 0 &&
+        header["task"] === "G 段夹具" &&
+        header["workspaceRoot"] === canonicalWorkspacePath(workspaceRoot) &&
+        header["executionPrivilege"] === "SANDBOXED" &&
+        header["timezone"] === "Asia/Shanghai" &&
+        typeof header["startedAt"] === "string" &&
+        Number.isFinite(Date.parse(String(header["startedAt"]))) &&
+        header["segmentIndex"] === 0;
       fact("Web 段的 trace 行构成", `header ${kinds.filter((k) => k === "header").length} / event ${kinds.filter((k) => k === "event").length} / footer ${kinds.filter((k) => k === "footer").length}`);
       fact("header 的 provenance", header ? `commit ${String(header["commit"]).slice(0, 10)} · gitDirty ${header["gitDirty"]} · entry ${header["entry"]}` : "（缺）");
+      fact("header 必填运行身份", headerFieldsOk ? "完整且取值正确" : JSON.stringify(header));
       verdict(
         kinds.includes("header") &&
           kinds.includes("footer") &&
           kinds.every((kind) => kind === "header" || kind === "event" || kind === "footer") &&
-          !!header?.["commit"],
-        "Web 入口跑的段也写 header / event / footer 三种行，且带 commit ＋ gitDirty —— " +
-          "「Trace 按段分组、每段可审计」对 Web 段成立；模型调用 sidecar 没有混成未知行",
+          headerFieldsOk,
+        "Web 入口跑的段写 header / event / footer 三种行；header 的 run、代码、Node、入口、端点、任务、workspace、权限、时区、时间与段号均为必填且取值正确",
       );
 
       /**
@@ -1451,7 +1476,7 @@ async function main(): Promise<void> {
           modelCalls: Array<{
             id: string;
             ordinal: number;
-            invocationId?: string;
+            invocationId: string;
             frameId?: string;
             traceStatus: string;
             billedInputTokens?: number;
@@ -1605,15 +1630,6 @@ async function main(): Promise<void> {
           "API 先验证 invocation 的 Run 归属并使用 sidecar 文件名白名单；跨 Run 与编码斜杠均读不到正文",
         );
 
-        const secondRunEvents = svcAudit.host.eventsSince(secondRunId, 0).map((event) => {
-          if (event.type !== "ContextFrameCompiled" && event.type !== "ModelInvocationCompleted") return event;
-          const payload = { ...event.payload } as Record<string, unknown>;
-          delete payload["invocationId"];
-          delete payload["frameId"];
-          return { ...event, payload } as unknown as RunEvent;
-        });
-        const legacyTurns = projectTurns({ entries: [], events: secondRunEvents });
-        const legacyCall = legacyTurns.flatMap((turn) => turn.modelCalls)[0];
         const malformedAuditFailure = {
           type: "ModelInvocationAuditFailed",
           runId: secondRunId,
@@ -1624,14 +1640,15 @@ async function main(): Promise<void> {
         const malformedAuditCalls = projectTurns({
           entries: [],
           events: [
-            ...secondRunEvents.filter((event) => event.type === "TurnStarted").slice(0, 1),
+            ...svcAudit.host.eventsSince(secondRunId, 0)
+              .filter((event) => event.type === "TurnStarted")
+              .slice(0, 1),
             malformedAuditFailure,
           ],
         }).flatMap((turn) => turn.modelCalls);
         verdict(
-          legacyCall?.invocationId === undefined && legacyCall?.billedInputTokens === 111 &&
-            malformedAuditCalls.length === 0,
-          "旧 Trace 缺少 invocationId 时仍保留 usage；损坏的审计失败事件也不补造可读取 sidecar 的假调用",
+          malformedAuditCalls.length === 0,
+          "损坏的审计失败事件不会补造可读取 sidecar 的假调用",
         );
 
         const uiSrc = readFileSync(resolve(REPO_ROOT, "apps/workagent-ui/public/app.js"), "utf8");
@@ -1891,7 +1908,9 @@ async function main(): Promise<void> {
     {
       const recoveryDb = join(tmp, "recovery.db");
       const recoveryTrace = join(tmp, "runs-recovery");
-      const runIdR = await buildRecoveryFixture(workspaceRoot, recoveryDb);
+      const frozenTimezone = "Pacific/Auckland";
+      const currentServiceTimezone = "America/Los_Angeles";
+      const runIdR = await buildRecoveryFixture(workspaceRoot, recoveryDb, frozenTimezone);
       const svcR = await startService({
         workspaceRoot,
         storageOverride: { dbPath: recoveryDb, traceDir: recoveryTrace },
@@ -1900,6 +1919,7 @@ async function main(): Promise<void> {
         composeOverrides: {
           modelPortOverride: new ScriptedModelPort([{ text: "不该走到这里。", toolCalls: [] }]),
           tools: toolsFor(["append_log"]),
+          timezone: currentServiceTimezone,
         },
       });
       try {
@@ -1918,6 +1938,26 @@ async function main(): Promise<void> {
           items.length > 0 && items.some((i) => i.what.includes("append_log")),
           "停在 RECOVERY_REQUIRED 时，界面拿得到「要确认哪几件事」（点名到工具），而不是一个空列表",
         );
+
+        const resumedTrace = await call(svcR, `/api/runs/${runIdR}/trace`);
+        const resumedHeader = ((resumedTrace.body["lines"] as Array<Record<string, unknown>> | undefined) ?? [])
+          .find((line) => line["kind"] === "header");
+        const resumedDetail = await call(svcR, `/api/runs/${runIdR}`);
+        const resumedSpec = resumedDetail.body["spec"] as Record<string, unknown> | undefined;
+        fact(
+          "resume trace 的 task / timezone",
+          `${String(resumedHeader?.["task"])} / ${String(resumedHeader?.["timezone"])}（当前服务 ${currentServiceTimezone}）`,
+        );
+        verdict(
+          resumedHeader?.["runId"] === runIdR &&
+            resumedHeader["task"] === "I 段夹具：制造未配对 tool_use" &&
+            resumedHeader["timezone"] === frozenTimezone &&
+            resumedHeader["timezone"] === resumedSpec?.["timezone"] &&
+            resumedHeader["executionPrivilege"] === resumedSpec?.["executionPrivilege"] &&
+            resumedHeader["entry"] === "web" &&
+            resumedHeader["segmentIndex"] === 0,
+          "resume 段的 task、timezone 与执行权限来自旧 Run 冻结的 RunSpec，而不是当前服务配置或占位值",
+        );
       } finally {
         await svcR.close();
       }
@@ -1928,8 +1968,8 @@ async function main(): Promise<void> {
     console.log(
       "   「选目录 → 切换 workspace」这个功能的**前提**，不是它本身。\n" +
         "   `--db` 与 `--workspace` 是分开的两个参数，同一个库里可以躺着来自不同目录的 Run；\n" +
-        "   而 resume 用的 workspaceRoot 一直来自**当前 compose**（`RunSpec.workspace`\n" +
-        "   从阶段 1 起就在类型里、一直是 undefined）。于是在 /A 起的 Run 用 /B 恢复，\n" +
+      "   这个闸门落地前，resume 的 workspaceRoot 只来自**当前 compose**，\n" +
+      "   `RunSpec.workspace` 虽在类型里却没有生产者。于是在 /A 起的 Run 用 /B 恢复，\n" +
         "   未配对工具的观察、幂等重试、后续所有相对路径的读写、以及自动放行的\n" +
         "   workspace 判定，**全部以 /B 为根** —— 旧 Run 在错误的地方产生副作用，盘上看不出来。\n" +
         "   界面把它从「要手打 runId」变成「列表里一个按钮」，所以闸门必须先在。\n",
@@ -2067,6 +2107,7 @@ async function main(): Promise<void> {
       const wsC = join(tmp, "ws-c");
       const wsD = join(tmp, "ws-d");
       const registry = join(tmp, "workspaces.json");
+      let wsDId = "";
       const svcW = await startService({
         workspaceRoot: wsC,
         storageOverride: {
@@ -2087,7 +2128,7 @@ async function main(): Promise<void> {
           method: "POST",
           body: { path: wsD, name: "D" },
         });
-        const wsDId = (created.body["workspace"] as { id: string } | undefined)?.id ?? "";
+        wsDId = (created.body["workspace"] as { id: string } | undefined)?.id ?? "";
         fact("新建 workspace", `HTTP ${created.status} · id=${wsDId} · 目录已建=${existsSync(wsD)}`);
         verdict(
           created.status === 200 && !!wsDId && existsSync(wsD),
@@ -2125,14 +2166,17 @@ async function main(): Promise<void> {
           "切回 C，它自己的 Run 还在 —— 隔离不是丢失",
         );
 
-        // ⑤ 注册表落盘：两个都在
+        // ⑤ 把 D 留作最后选择，再检查注册表落盘。
+        await call(svcW, `/api/workspaces/${wsDId}/activate`, { method: "POST" });
         const persisted = JSON.parse(readFileSync(registry, "utf8")) as {
+          activeId: string;
           workspaces: Array<{ realPath: string }>;
         };
         fact("注册表里的 workspace", persisted.workspaces.length);
+        fact("注册表 activeId", persisted.activeId);
         verdict(
-          persisted.workspaces.length === 2,
-          "注册表落盘（Layer 2 产品状态，独立于 Layer 3 的库）—— 重启服务后选择还在",
+          persisted.workspaces.length === 2 && persisted.activeId === wsDId,
+          "注册表同时落盘 workspace 列表与最后选择的 activeId",
         );
 
         // ⑥ 越界拒绝
@@ -2145,6 +2189,41 @@ async function main(): Promise<void> {
       } finally {
         await svcW.close();
       }
+
+      // ⑦ 模拟生产入口不带 --workspace 的重启：fallback 是 C，但必须恢复 D。
+      const restored = selectStartupWorkspace({ registryFile: registry, fallbackPath: wsC });
+      const svcRestarted = await startService({
+        workspaceRoot: restored.realPath,
+        registryFile: registry,
+        endpoint: "bailian",
+        token: TOKEN,
+        composeOverrides: {
+          modelPortOverride: new ScriptedModelPort([{ text: "什么都不做。", toolCalls: [] }]),
+          tools: toolsFor(["now"]),
+        },
+      });
+      try {
+        const restartedState = await call(svcRestarted, "/api/state");
+        fact("不带 --workspace 重启后的 activeId", String(restartedState.body["activeWorkspaceId"]));
+        verdict(
+          restored.id === wsDId && restartedState.body["activeWorkspaceId"] === wsDId,
+          "重启服务且未指定 workspace 时恢复上次选择的 D，而不是跳回 fallback C",
+        );
+      } finally {
+        await svcRestarted.close();
+      }
+
+      // 配对判据：显式指定 C 必须覆盖上次 active，防止“永远恢复旧值”也通过。
+      const explicitlySelected = selectStartupWorkspace({
+        registryFile: registry,
+        requestedPath: wsC,
+        fallbackPath: wsD,
+      });
+      fact("显式选择 C", explicitlySelected.realPath);
+      verdict(
+        explicitlySelected.realPath === canonicalWorkspacePath(wsC),
+        "显式 --workspace 仍然优先于注册表 active —— 与无参数恢复判据成对",
+      );
     }
 
     // ══════════════════════════════════════ L. 逐 Run 的预算覆盖走 HTTP
@@ -2759,7 +2838,7 @@ async function main(): Promise<void> {
         { kind: "header", segmentIndex: 0, modelId: "m1" },
         { kind: "event", sequence: 1, occurredAt: 1, type: "RunStarted", payload: {} },
         { kind: "footer", segmentIndex: 0, terminal: null },
-        { kind: "header", segmentIndex: 1, modelId: "m2", resumedFrom: 1 },
+        { kind: "header", segmentIndex: 1, modelId: "m2" },
         { kind: "event", sequence: 2, occurredAt: 2, type: "ResumeStarted", payload: { fromSequence: 1, rebuiltMessages: 1 } },
         { kind: "event", sequence: 3, occurredAt: 3, type: "TurnStarted", payload: { turn: 2 } },
       ]);
@@ -2853,10 +2932,15 @@ async function main(): Promise<void> {
       );
 
       const uiCss = readFileSync(resolve(REPO_ROOT, "apps/workagent-ui/public/app.css"), "utf8");
+      const traceCssStart = uiCss.indexOf("/* ── Trace Inspector */");
+      const traceCssEnd = uiCss.indexOf("/* ── 时间线 */");
+      const traceCssAnchorsOk = traceCssStart >= 0 && traceCssEnd > traceCssStart;
       const traceCss = uiCss
-        .slice(uiCss.indexOf("/* ── Trace Inspector */"), uiCss.indexOf("/* ── 时间线 */"))
+        .slice(traceCssStart, traceCssEnd)
         .replace(/\/\*[\s\S]*?\*\//g, "");
+      fact("Trace CSS 切片锚点", traceCssAnchorsOk ? `${traceCssStart}..${traceCssEnd}` : "缺失或顺序错误");
       const n9 =
+        traceCssAnchorsOk &&
         uiSrc.includes("逐轮检查器") &&
         uiSrc.includes("原始事件") &&
         uiSrc.includes("显示流式增量") &&

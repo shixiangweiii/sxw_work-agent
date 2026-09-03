@@ -208,6 +208,9 @@ async function runTrial(
     () => tracePath,
     () => ({
       commit: git(["rev-parse", "HEAD"]) || "unknown",
+      gitDirty: git(["status", "--porcelain"]).length > 0,
+      nodeVersion: process.version,
+      entry: "eval",
       /**
        * 【定】记**真实**端点名，不是写死的 "eval"。
        *

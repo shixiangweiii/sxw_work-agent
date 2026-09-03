@@ -89,8 +89,8 @@ export interface BatchDeps {
   /**
    * 大结果外置（阶段 3 S6，§11.4）。
    *
-   * 不传就退化成「一律 inline」—— 那正是批 1 结束时的状态，
-   * `verify:tools` H 段的那条已知红说的就是它。
+   * 不传时结果只能 inline；生产组合器始终注入 BlobStorePort，允许不传是为了
+   * 让只验证批结算本身的独立调用不必同时搭建持久化设施。
    */
   blobs?: BlobStorePort;
   /** Artifact 登记与第二层 Verification（阶段 3 S8，§17 / §10.4）。 */
@@ -398,8 +398,8 @@ export async function* executeBatch(
       /**
        * ── 决 6：执行**前**拍一张外部世界的指纹 ────────────────────────
        *
-       * 只对声明了 `recoveryObservation` 的工具做。拍到了就落一条
-       * `ACTION_FACT`，恢复时据此判断「那次执行到底发生没发生」——
+       * 每个当前工具都声明 `recoveryObservation`；有 `observePre` 能力时尝试拍。
+       * 拍到了就落一条 `ACTION_FACT`，恢复时据此判断「那次执行到底发生没发生」——
        * §18.2 窗口 A/B 的「不可区分」只有靠这个才变得可区分。
        *
        * 【定】拍不到不是错误。拍不到就意味着这个 Action 崩溃后不可观察，
@@ -412,7 +412,7 @@ export async function* executeBatch(
        * 恰恰是最需要它的场景（工具没跑，只有靠前置状态才判得出「没发生」）。
        * 指纹描述的是「attempt 开始之前的世界」，位置错了语义就错了。
        */
-      if (snapshot.definition.recoveryObservation && deps.verification.observePre) {
+      if (deps.verification.observePre) {
         try {
           const pre = await deps.verification.observePre(action, {
             signal: deps.signal,
@@ -706,8 +706,7 @@ export async function* executeBatch(
        * ══════════════════════════════════════════════════════════════════
        * 【定】**已经记下的成因要附到这条验证事实上**，否则它到不了任何地方。
        *
-       * 这是补给一个真洞的：上面第 605 行左右的
-       * `if (!outcome.ok) causeByCall.set(call.toolCallId, "TOOL_FAILED")`
+       * 这是补给一个真洞的：上方记录 `TOOL_FAILED` 成因的分支
        * 看起来是接好的，实际**在正常路径上从来没有消费者** ——
        * `causeByCall` 唯一的读者是 `recordUnmetRequired()`，而它只处理
        * **不在** `verifiedCallIds` 里的 call。一个工具失败了却仍然走到
@@ -982,7 +981,8 @@ export async function* executeBatch(
  * 只做 stub 不给 `read_blob`，是**比静默截断更糟的信息阻断**：
  * 静默截断至少给了错误的完整感，阻断是明知有东西而拿不到。
  * 所以 `deps.blobs` 不存在时这里原样返回 —— 宁可撞上下文墙，
- * 也不给一个取不回来的 ref。批 1 结束时就是这个状态。
+ * 也不给一个取不回来的 ref。当前装配提供 blob 存储和 `read_blob`；
+ * 这个分支保留给显式不装配 blob 能力的嵌入方。
  *
  * ── 阈值为什么不是协议上限 ──────────────────────────────────────────────
  *
@@ -1157,10 +1157,9 @@ function recordUnmetRequired(
  * 也就是说：不变量 8 的兜底代码跑了，兜底的结果却没人收 —— 最坏的一种形态，
  * 因为它看起来是有保护的。
  *
- * 定级要说清楚：这**不是当前的活跃 bug**。阶段 1 那四个实现都在内部吞掉了异常
- * （SimpleRedaction 与 MicroCaseVerifier 各有 try/catch，DeclarativeEffectResolver
- * 只在非 DECLARATIVE 时抛而阶段 1 没有这类工具）。**但阶段 2 一换实现就会变成活跃 bug**，
- * 所以必须赶在换 Port 实现之前修 —— 这也是它被列为阶段 2 前置的原因。
+ * 这段保护最初是在替换阶段 1 的简单 Port 实现前补上的：早期实现大多会在内部
+ * 吞掉异常，因而缺口尚不活跃；可替换实现接入后，异常来源不再受 Runtime 控制。
+ * 当前所有 Port 调用仍统一走这里，避免以后换实现时重新出现同一种悬空状态。
  * ══════════════════════════════════════════════════════════════════════
  */
 type Guarded<T> = { ok: true; value: T } | { ok: false; error: RuntimeErrorRecord };
@@ -1281,7 +1280,6 @@ function renderError(e: RuntimeErrorRecord): string {
     retryable: e.retryability !== "NEVER",
   });
 }
-
 
 function ev<T extends RunEvent["type"]>(
   deps: BatchDeps,

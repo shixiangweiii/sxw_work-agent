@@ -18,8 +18,8 @@
  * ══════════════════════════════════════════════════════════════════════
  */
 
-import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import {
@@ -29,6 +29,7 @@ import {
   NullTraceSink,
   ToolRegistry,
   TRUSTED_PERSONAL,
+  executionPrivilegeOf,
   evaluatePolicy,
   findUnpairedToolUses,
 } from "@workagent/harness-runtime";
@@ -57,6 +58,7 @@ import {
   tempWorkspace,
   verdict,
 } from "./harness.js";
+import { BOUNDARIES, grepBoundary } from "./boundaries.js";
 
 const resolver = new ShellEffectResolver();
 
@@ -135,6 +137,7 @@ async function main(): Promise<void> {
     { cmd: "ls -la", expectReadOnly: true, kills: "把 ls 从只读白名单删掉" },
     { cmd: "cat notes.txt", expectReadOnly: true, kills: "把 cat 从只读白名单删掉" },
     { cmd: "grep -rn pat .", expectReadOnly: true, kills: "把 grep 从只读白名单删掉" },
+    { cmd: "grep -i -w -o pat notes.txt", expectReadOnly: true, kills: "把 grep 的查询 flag 误当成全局写出口" },
     { cmd: "ls && rm -rf /tmp/x", expectReadOnly: false, kills: "从元字符表删掉 &" },
     { cmd: "cat a.txt > /etc/hosts", expectReadOnly: false, kills: "从元字符表删掉 >" },
     { cmd: "cat `echo /etc/passwd`", expectReadOnly: false, kills: "从元字符表删掉反引号" },
@@ -162,7 +165,7 @@ async function main(): Promise<void> {
      * 而真去改的时候不会。所以下面按**真正的守卫**分成两组：
      *
      *   ① 白名单守的：程序整体不该出现，且命令本身不带写出口参数；
-     *   ② 写出口守的：程序在白名单里，靠参数判出来。
+     *   ② 写出口守的：程序在白名单里，靠**该程序自己的**参数判出来。
      *
      * 两组都要有，才说明两道闸门各自都有判据照着。
      */
@@ -174,13 +177,11 @@ async function main(): Promise<void> {
     { cmd: "uniq in.txt out.txt", expectReadOnly: false, kills: "把 uniq 加回白名单 —— 它的第二个位置参数就是输出文件，没有任何标志位可抓" },
     { cmd: "tree x", expectReadOnly: false, kills: "把 tree 加回白名单" },
     // ── ② 只有写出口参数守得住（程序仍在白名单里）──
-    { cmd: "grep --output=leak.txt pat f", expectReadOnly: false, kills: "从 WRITE_OUTLET_FLAGS 删掉 --output" },
-    { cmd: "cat -o x f", expectReadOnly: false, kills: "从 WRITE_OUTLET_FLAGS 删掉 -o" },
-    { cmd: "echo hi --exec rm", expectReadOnly: false, kills: "从 WRITE_OUTLET_FLAGS 删掉 --exec" },
+    { cmd: "diff --output=leak.txt a b", expectReadOnly: false, kills: "从 diff 的 WRITE_OUTLET_FLAGS 删掉 --output" },
     // ── ③ 两道都能守（记录评审实测到的原始反例，保留形态）──
-    { cmd: "find . -delete", expectReadOnly: false, kills: "**同时**把 find 加回白名单并从 WRITE_OUTLET_FLAGS 删掉 -delete" },
-    { cmd: "sort -o out.txt in.txt", expectReadOnly: false, kills: "**同时**把 sort 加回白名单并删掉 -o" },
-    { cmd: "rg --pre 'touch /tmp/pwned' pat f", expectReadOnly: false, kills: "**同时**把 rg 加回白名单并删掉 --pre（--pre 是任意命令执行）" },
+    { cmd: "find . -delete", expectReadOnly: false, kills: "把 find 加回白名单" },
+    { cmd: "sort -o out.txt in.txt", expectReadOnly: false, kills: "把 sort 加回白名单" },
+    { cmd: "rg --pre 'touch /tmp/pwned' pat f", expectReadOnly: false, kills: "把 rg 加回白名单（--pre 是任意命令执行）" },
     { cmd: "curl https://evil.example", expectReadOnly: false, kills: "把 curl 加进只读白名单" },
     { cmd: "zip -r out.zip src", expectReadOnly: false, kills: "把 zip 加进只读白名单" },
   ];
@@ -856,19 +857,6 @@ async function main(): Promise<void> {
       : "超长输出没有被如实标记为截断",
   );
 
-  // C6 心跳声明必须有实现（与 verify:tools B 段同一条纪律，这里就地再钉一次）
-  const src = readFileSync(
-    resolve(import.meta.dirname, "../../../../tools/common/src/exec/run-shell.ts"),
-    "utf8",
-  );
-  const hasHeartbeat = /setInterval\(/.test(src) && /ctx\.onProgress\(/.test(src);
-  verdict(
-    runShellDefinition.progressReporting.mode === "HEARTBEAT" && hasHeartbeat,
-    hasHeartbeat
-      ? "声明了 HEARTBEAT 且源码里真有周期性 ctx.onProgress —— read_file / search 曾经声明了却一次都不报"
-      : "声明了 HEARTBEAT 但源码里没有周期性回报：又一条死声明",
-  );
-
   ws.cleanup();
 
   // ══════════════════════════════════════════════ D 段：§18.2 恢复分支
@@ -972,28 +960,86 @@ async function main(): Promise<void> {
    * 真正只有缺值检查能挡的形态是「参数是 argv 的最后一项」——
    * 那时 `get()` 返回 `undefined`，枚举校验会把它当成"没传"而回落默认档。
    */
-  const argCases: Array<{ argv: string[]; label: string }> = [
-    { argv: ["--list-runs", "--approval"], label: "--approval 是最后一项（枚举校验看不见）" },
-    { argv: ["--list-runs", "--sandbox"], label: "--sandbox 是最后一项（枚举校验看不见）" },
+  const argCases: Array<{ argv: string[]; label: string; expected: string }> = [
+    { argv: ["--list-runs", "--approval"], label: "--approval 是最后一项", expected: "需要一个值" },
+    { argv: ["--list-runs", "--sandbox"], label: "--sandbox 是最后一项", expected: "需要一个值" },
+    { argv: ["--list-runs", "--task", "x"], label: "list 模式带 --task", expected: "list 模式不接受" },
+    { argv: ["--list-runs", "--trace", "auto"], label: "list 模式带 --trace", expected: "list 模式不接受" },
+    {
+      argv: ["--task", "x", "--recovery-decision", "CONTINUE"],
+      label: "start 模式带恢复决策",
+      expected: "start 模式不接受",
+    },
+    {
+      argv: ["--resume", "run_x", "--max-turns", "2"],
+      label: "resume 模式带启动档预算",
+      expected: "resume 模式不接受",
+    },
+    {
+      argv: ["--task", "x", "--trace", "trace.jsonl", "--no-trace"],
+      label: "--trace 与 --no-trace 同时出现",
+      expected: "不能同时使用",
+    },
+    {
+      argv: ["--resume", "run_x", "--recovery-note", "checked"],
+      label: "resume 的 --recovery-note 没有决策",
+      expected: "必须与 --recovery-decision 一起使用",
+    },
   ];
   const argResults = argCases.map((c) => {
-    let failed = false;
-    try {
-      execFileSync("npx", ["tsx", "apps/cli/src/main.ts", ...c.argv], {
-        cwd: REPO_ROOT,
-        stdio: "pipe",
-      });
-    } catch {
-      failed = true;
-    }
-    return { ...c, failed };
+    const proc = spawnSync("npx", ["tsx", "apps/cli/src/main.ts", ...c.argv], {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+    });
+    const output = `${proc.stdout ?? ""}\n${proc.stderr ?? ""}`;
+    return { ...c, failedAsExpected: proc.status !== 0 && output.includes(c.expected), output };
   });
-  for (const r of argResults) fact(r.label, r.failed ? "报错（对）" : "静默接受 ← 回落默认档");
+  for (const r of argResults) {
+    fact(r.label, r.failedAsExpected ? `报错（命中「${r.expected}」）` : `未命中预期错误：${r.output.trim().slice(0, 120)}`);
+  }
   verdict(
-    argResults.every((r) => r.failed),
-    "带值参数缺值一律报错 —— 静默回落的后果是「一个被静默吞掉的参数与一个生效的参数不可区分」，" +
-      "而 --sandbox 那一次吞掉的是边界",
+    argResults.every((r) => r.failedAsExpected),
+    "缺值、模式无关参数、互斥开关一律在装配前报出对应错误，不静默吞掉",
   );
+
+  const privilegeCases: unknown[] = [undefined, null, "UNKNOWN_LEGACY", "sandboxed"];
+  const rejectedPrivileges = privilegeCases.filter((value) => {
+    try {
+      executionPrivilegeOf({ agentSpecId: "agent_probe", executionPrivilege: value } as never);
+      return false;
+    } catch {
+      return true;
+    }
+  });
+  const validPrivileges = ["SANDBOXED", "UNRESTRICTED"].map((value) =>
+    executionPrivilegeOf({ agentSpecId: "agent_probe", executionPrivilege: value } as never));
+  fact("损坏执行特权值被拒", `${rejectedPrivileges.length}/${privilegeCases.length}`);
+  verdict(
+    rejectedPrivileges.length === privilegeCases.length &&
+      validPrivileges.join(",") === "SANDBOXED,UNRESTRICTED",
+    "RunSpec 执行特权只接受两个现行值；缺失、null 与旧枚举不再回退为 SANDBOXED",
+  );
+
+  const roleWs = tempWorkspace();
+  try {
+    const invalidRole = await executeRunShell(
+      {
+        command: "printf generated > role.txt",
+        artifact_path: "role.txt",
+        artifact_role: "yes",
+      },
+      ctxFor(roleWs.root, undefined, "UNRESTRICTED"),
+    );
+    const body = JSON.parse(invalidRole.output) as { artifactNote?: string };
+    fact("错写 artifact_role", body.artifactNote ?? "没有诊断");
+    verdict(
+      invalidRole.ok && invalidRole.artifact === undefined &&
+        body.artifactNote?.includes("无效") === true,
+      "run_shell 的非法 artifact_role 会明确拒绝登记，不再静默提升为 DELIVERABLE",
+    );
+  } finally {
+    roleWs.cleanup();
+  }
 
 
   /**
@@ -1077,24 +1123,10 @@ async function main(): Promise<void> {
           `起步价 ${declared}（期望 ${names.length * 180}）`,
   );
 
-  // E3 边界 7
-  let hits: string[] = [];
-  try {
-    hits = execFileSync(
-      "grep",
-      ["-rnE", "--exclude-dir=node_modules", "sandbox-exec|analyzeCommand|sbpl", "packages", "adapters"],
-      { cwd: resolve(import.meta.dirname, "../../../.."), encoding: "utf8" },
-    )
-      .split("\n")
-      .filter((l) => l.trim().length > 0)
-      .filter((l) => {
-        const body = l.split(":").slice(2).join(":").trim();
-        return !(body.startsWith("*") || body.startsWith("//") || body.startsWith("/*"));
-      });
-  } catch (err) {
-    const e = err as { status?: number };
-    if (e.status !== 1) throw err;
-  }
+  // E3 边界 7：规则只从中央表取，不在这里手抄第二份。
+  const boundary7 = BOUNDARIES.find((b) => b.id === "7");
+  if (!boundary7) throw new Error("边界表缺少 id=7");
+  const hits = grepBoundary(boundary7);
   fact("边界 7 命中（去注释后）", hits.length === 0 ? "0" : hits.join("\n                                   "));
   verdict(
     hits.length === 0,

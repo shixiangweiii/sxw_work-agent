@@ -155,7 +155,7 @@ export class PendingHub {
      * `ApprovalDecider` 只收一个 `PreparedAction`，而它自带 runId —— 于是审批
      * 的归属是精确的，不需要「当前 Run」这种晚绑定。接管与提问两条通道没有这个
      * 字段（`HandoffChannel.await` 只收 instructions / expectedCompletion / signal），
-     * 那两条才必须靠 `currentRunId` 兜，也因此才需要「同时只跑一个 Run」的限制。
+     * 那两条才必须靠前台槽位兜，也因此才需要「同时只跑一个 Run」的限制。
      *
      * 【定】等待要挂在**逐 Run 的 signal** 上。`ApprovalDecider` 的签名里没有
      * signal（CLI 那边挂的是进程级 SIGINT），所以由调用方按 runId 提供 ——
@@ -291,12 +291,12 @@ export class PendingHub {
    * 【定】返回值不是「任务成功了」，只是「人说他做完了」——
    * §20.3 要求随后重新 Observation。这里只负责把人的信号递回去。
    */
-  handoffChannel(currentRunId: () => string): HandoffChannel {
+  handoffChannel(currentRunHolder: () => string): HandoffChannel {
     return {
       await: async (request) => {
         const pending: UiPending = {
           pendingId: randomUUID(),
-          runId: currentRunId(),
+          runId: currentRunHolder(),
           kind: "HANDOFF",
           requestedAt: Date.now(),
           handoff: {
@@ -319,7 +319,7 @@ export class PendingHub {
    * 两者的失败语义相反：没人接管是失败（那件事真的没做），
    * 没人回答不是失败（模型自己定）。合并的第一天就会有人把它们写成同一种。
    */
-  questionChannel(currentRunId: () => string, approvalMode: () => ApprovalMode): QuestionChannel {
+  questionChannel(currentRunHolder: () => string, approvalMode: () => ApprovalMode): QuestionChannel {
     return {
       ask: async (request) => {
         /**
@@ -337,7 +337,7 @@ export class PendingHub {
         if (approvalMode() === "AUTO") return undefined;
         const pending: UiPending = {
           pendingId: randomUUID(),
-          runId: currentRunId(),
+          runId: currentRunHolder(),
           kind: "QUESTION",
           requestedAt: Date.now(),
           question: {

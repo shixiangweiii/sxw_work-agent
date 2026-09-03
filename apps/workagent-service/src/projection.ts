@@ -500,25 +500,23 @@ export function projectTurns(input: ProjectionInput): UiTurn[] {
   const appendCall = (
     turn: UiTurn,
     sequence: number,
-    invocationId?: string,
+    invocationId: string,
   ): UiModelCall => {
     const call: UiModelCall = {
-      id: invocationId ? `model:${invocationId}` : `model-event:${sequence}`,
+      id: `model:${invocationId}`,
       ordinal: turn.modelCalls.length + 1,
       startedAtSequence: sequence,
-      ...(invocationId ? { invocationId } : {}),
+      invocationId,
       traceStatus: "STARTED",
       runtimeErrors: [],
     };
     turn.modelCalls.push(call);
-    if (invocationId) callsByInvocation.set(invocationId, call);
+    callsByInvocation.set(invocationId, call);
     return call;
   };
 
-  const callFor = (turn: UiTurn, sequence: number, invocationId?: string): UiModelCall =>
-    invocationId
-      ? (callsByInvocation.get(invocationId) ?? appendCall(turn, sequence, invocationId))
-      : appendCall(turn, sequence);
+  const callFor = (turn: UiTurn, sequence: number, invocationId: string): UiModelCall =>
+    callsByInvocation.get(invocationId) ?? appendCall(turn, sequence, invocationId);
 
   // 两条轨道按同一条序列合并（决 5）。这里只需要 RUN_META 那一种条目。
   const facts = sorted(input.entries)
@@ -547,20 +545,14 @@ export function projectTurns(input: ProjectionInput): UiTurn[] {
           items: ev.payload.items,
           totalTokens: ev.payload.totalTokens,
           fixedOverheadTokens: ev.payload.fixedOverheadTokens,
-          compacted: ev.payload.compacted,
           hasExternalUntrusted: ev.payload.trust.hasExternalUntrusted,
           untrustedItems: ev.payload.trust.untrustedItems,
         };
         t.frame = frame;
-        // 旧 Trace 没有这两个字段：保留轮级 frame，等 completed 事件创建兼容调用。
-        const invocationId = typeof ev.payload.invocationId === "string"
-          ? String(ev.payload.invocationId)
-          : undefined;
-        if (invocationId) {
-          const call = callFor(t, ev.sequence, invocationId);
-          call.frame = frame;
-          if (typeof ev.payload.frameId === "string") call.frameId = String(ev.payload.frameId);
-        }
+        const invocationId = ev.payload.invocationId;
+        const call = callFor(t, ev.sequence, invocationId);
+        call.frame = frame;
+        call.frameId = ev.payload.frameId;
         break;
       }
       case "ContextCompacted":
@@ -585,9 +577,7 @@ export function projectTurns(input: ProjectionInput): UiTurn[] {
          * 于是这一行自己对不上自己，而「这一轮为什么花了这么多」恰恰是
          * 白盒要回答的问题。
          */
-        const invocationId = typeof ev.payload.invocationId === "string"
-          ? String(ev.payload.invocationId)
-          : undefined;
+        const invocationId = ev.payload.invocationId;
         const call = callFor(t, ev.sequence, invocationId);
         call.traceStatus = "RETURNED";
         call.inputTokens = u.inputTokens;
@@ -613,7 +603,7 @@ export function projectTurns(input: ProjectionInput): UiTurn[] {
         break;
       }
       case "ModelInvocationAuditFailed": {
-        // 事件由本地 JSONL 读回后只做了类型断言；损坏或未来旧形状不能被
+        // 事件由本地 JSONL 读回后只做了类型断言；损坏形状不能被
         // String(undefined) 投影成一个可点击的 `model:undefined` 假调用。
         if (typeof ev.payload.invocationId !== "string") break;
         const t = ensure(current?.turn ?? 0, ev.sequence);

@@ -13,7 +13,7 @@
  *     「给出**每个子目录的**文件数与总大小」
  *
  * ——「总大小」被「每个子目录」限定了。**全局合计字节数在任务原文里没有出现过。**
- * 而 grader 第 4 组恰恰硬查了它（`archive-inventory.ts:119-121`），
+ * 而 grader 第 4 组恰恰硬查了它（`eval/graders/archive-inventory.ts`），
  * 又**没有**任何一条去查任务真正要求的「每个子目录的总大小」。
  *
  * 于是同一件事有两个互斥的解释，而且分数、pass^5、乃至「要不要给 Harness
@@ -235,11 +235,9 @@ interface Endpoint {
 /**
  * 打开一个端点并做最便宜的一次连通性调用。
  *
- * 【注意】modelId 取 `.env` 的值而不是 `profile.modelId`。二者当前不一致
- * （回归评测 P1-1：百炼声明写 qwen3.7-plus，`.env` 写 deepseek-v4-flash），
- * 生产路径会被 M-5 闸门挡下 —— 那是**对的**，声明的粒度是端点 × 模型。
- * 探针不是 Run：不结算 outcome、不落 transcript、不驱动主循环，
- * 用实际部署的模型名直连，并在标签里如实写出这件事。
+ * modelId 取端点配置的实际部署值；生产路径会同时校验它与 profile 声明一致。
+ * 探针不是 Run：不结算 outcome、不落 transcript、不驱动主循环，但仍按
+ * 同一个端点配置连接，避免用源码里的静态模型名替代实际部署。
  */
 async function openEndpoint(choice: "deepseek" | "bailian"): Promise<Endpoint> {
   const cfg = readEndpointConfig(false, choice);
@@ -304,7 +302,7 @@ async function main(): Promise<void> {
     "任务原文中不存在「全部文件的总字节数」这类全局合计要求",
   );
   console.log(
-    "\n   对照 grader（archive-inventory.ts:116-121）：\n" +
+    "\n   对照 grader（eval/graders/archive-inventory.ts 的「合计、空目录、最大文件」段）：\n" +
       "     ✓ 硬查「合计文件数 6」      ← 任务在**日志**那句里要求了「共多少个文件」\n" +
       "     ✓ 硬查「合计字节数 20223」   ← 任务原文找不到对应要求\n" +
       "     ✗ 没有任何一条查「每个子目录的总大小」← 任务明确要求了",
@@ -330,8 +328,8 @@ async function main(): Promise<void> {
   if (!live.ok) {
     console.log(
       `\n   ⚠ Trial 1 所用的 DeepSeek 端点此刻不可用，B/C 段改在「${primary.label}」上跑。\n` +
-        "     模型名相同（.env 的 deepseek-v4-flash），但**是另一个平台的部署**，\n" +
-        "     按本项目的端点纪律，这不等于同一个端点 —— 结论要相应收窄。",
+        "     这是另一个端点配置下的模型与平台，按本项目的端点纪律不等于同一端点 ——\n" +
+        "     结论要相应收窄。",
     );
   }
 

@@ -232,7 +232,7 @@ export function writeBoundaryRefusal(
   return outsideWorkspaceError(shownPath, op);
 }
 
-export function outsideWorkspaceError(path: string, op: string): RuntimeErrorRecord {
+function outsideWorkspaceError(path: string, op: string): RuntimeErrorRecord {
   return makeError({
     code: "TOOL_PATH_ESCAPE",
     source: "TOOL_INPUT",

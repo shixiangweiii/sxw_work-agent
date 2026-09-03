@@ -378,7 +378,7 @@ function assertSchemaShape(db: Db, path: string): void {
       `本项目**没有 migration 机制**（单人本地库，删了重建比维护一套演化机制便宜）。\n` +
       `处置：删掉这个文件再跑一次。\n` +
       `  rm ${path}\n` +
-      `Trace（.workagent-runs/*.jsonl）是独立轨道，不会受影响。`,
+      `Trace（.workagent/runs/*.jsonl）是独立轨道，不会受影响。`,
   );
 }
 

@@ -97,6 +97,14 @@ export interface CreateResult {
   warnings: string[];
 }
 
+export interface StartupWorkspaceOptions {
+  registryFile: string;
+  /** 用户显式传入的目录；缺省时恢复注册表中的 active workspace。 */
+  requestedPath?: string;
+  /** 注册表为空时使用的首个 workspace。 */
+  fallbackPath: string;
+}
+
 export class WorkspaceRegistry {
   private data: RegistryFile;
 
@@ -249,6 +257,25 @@ export class WorkspaceRegistry {
     mkdirSync(dirname(this.file), { recursive: true });
     writeFileSync(this.file, `${JSON.stringify(this.data, null, 2)}\n`, "utf8");
   }
+}
+
+/**
+ * 决定一次服务启动真正使用的 workspace，并在连接 MCP 之前完成校验。
+ *
+ * 【定】`requestedPath` 存在时以用户选择为准；没有时恢复上次 active 项；
+ * 只有空注册表才落到 `fallbackPath`。这里同时负责登记与激活，避免入口先按
+ * 默认目录启动 MCP、Layer 2 随后却恢复到另一个目录，造成两套“当前目录”。
+ */
+export function selectStartupWorkspace(opts: StartupWorkspaceOptions): WorkspaceEntry {
+  const registry = new WorkspaceRegistry(opts.registryFile);
+  const selectedPath = opts.requestedPath ?? registry.active()?.realPath ?? opts.fallbackPath;
+  const created = registry.create(selectedPath);
+  if (!created.ok || !created.entry) {
+    throw new Error(`无法启用 workspace ${selectedPath}：${created.error ?? "未知错误"}`);
+  }
+  const activated = registry.activate(created.entry.id);
+  if (!activated) throw new Error(`workspace 登记成功但激活失败：${created.entry.id}`);
+  return activated;
 }
 
 function expandHome(p: string): string {

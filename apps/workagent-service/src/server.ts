@@ -210,13 +210,9 @@ async function handle(
       workspaces: workspaces.list().map((w) => ({
         id: w.id,
         name: w.name,
-        path: w.path,
         realPath: w.realPath,
         // 【定】现算，与注册表无关 —— 派生值不落盘（见 WorkspaceEntry）。
         ...workspaceStorage(w.realPath),
-        createdAt: w.createdAt,
-        lastUsedAt: w.lastUsedAt,
-        active: w.id === activeId,
       })),
       activeWorkspaceId: activeId,
     };
@@ -278,9 +274,8 @@ async function handle(
      *
      * `[^/]+` 拦不住 **percent-encoded** 的斜杠：`new URL()` 不解码 pathname，
      * 于是 `..%2f..%2fx` 整段被当成一个 runId 捕获，随后 `decodeURIComponent`
-     * 把它变成 `../../x`，再拼进 `traceFileFor()` —— 实测
-     * `..%2f.workagent-runs%2frun_9610d44d3a62/trace` **返回了 367 行**，
-     * 逃出 traceDir 又绕了回来。也就是说盘上任意 `*.jsonl` 都读得到。
+     * 把它变成 `../../x`，再拼进 `traceFileFor()`。修复前，带编码 `../` 的
+     * runId 能逃出 traceDir 并读到另一个 JSONL；也就是说盘上同类文件可被越界读取。
      *
      * 校验放在这里而不是各个 handler 里：路由是唯一的收口点，
      * 分散到 handler 就会有下一个忘了加的（这正是「一条闸门排在另一条
