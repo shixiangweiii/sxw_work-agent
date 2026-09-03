@@ -536,12 +536,12 @@ async function main(): Promise<void> {
   );
 
   // ═══════════════════════════════════════════════ I. image 块
-  section("I. image 块：不假装成功，也不静默丢弃");
+  section("I. image 块：字节走 Resource 通道，不进上下文也不静默丢弃");
   console.log(
     "   与 fetch_url 对二进制的处置同一条纪律：把 base64 图片塞进上下文，\n" +
       "   得到的是几十万个无意义 token，而模型没有办法看出那是解码垃圾；\n" +
       "   静默丢掉同样糟 —— 模型会以为自己看到了截图的全部内容。\n" +
-      "   所以：丢掉正文，但**说出来丢了什么**。（ADR-0010 同族的洞，v1 不补通道。）",
+      "   所以：正文进入不透明 Resource，只把元数据与引用交给模型。",
   );
   const imgOut = await tiered.handler.execute(
     actionFor(tiered.snapshots.find((s) => s.definition.name.endsWith("returns_image"))!.definition.name, {}),
@@ -549,11 +549,72 @@ async function main(): Promise<void> {
   );
   fact("返回文本", imgOut.output.replace(/\n/g, " ⏎ ").slice(0, 160));
   const saidSo = imgOut.output.includes("没有进入上下文") && imgOut.output.includes("image");
+  const imageResource = imgOut.resources?.find(
+    (resource) => resource.kind === "binary" && resource.mediaType === "image/png",
+  );
   verdict(
-    imgOut.ok && saidSo && !imgOut.output.includes("iVBORw0KGgo"),
-    saidSo
-      ? "image 块的正文没有进上下文，而且**点名说了**丢了什么（不是静默丢弃）"
-      : "image 块要么被塞进了上下文，要么被静默丢掉了 —— 两种都会让模型误判",
+    imgOut.ok && saidSo && imageResource !== undefined && !imgOut.output.includes("iVBORw0KGgo"),
+    saidSo && imageResource
+      ? "image 原始字节进入 binary Resource，base64 没进 output，并明确告诉模型没有内联"
+      : "image 块没有形成可恢复 Resource，或 base64 泄漏进了模型结果",
+  );
+
+  section("I1. text / image / embedded / structuredContent 保留块语义");
+  const resourceOut = await tiered.handler.execute(
+    actionFor(
+      tiered.snapshots.find((s) => s.definition.name.endsWith("returns_resources"))!.definition.name,
+      {},
+    ),
+    ctxFor(ws.root),
+  );
+  const produced = resourceOut.resources ?? [];
+  const kinds = produced.map((resource) => `${resource.kind}:${resource.mediaType}`);
+  const hasText = produced.some(
+    (resource) => resource.kind === "text" && resource.content === "MCP_TEXT_RESOURCE_SENTINEL",
+  );
+  const hasImage = produced.some(
+    (resource) => resource.kind === "binary" && resource.mediaType === "image/png",
+  );
+  const hasFallbackAudio = produced.some(
+    (resource) =>
+      resource.kind === "binary" &&
+      resource.label.includes("audio") &&
+      resource.mediaType === "application/octet-stream",
+  );
+  const hasEmbeddedText = produced.some(
+    (resource) => resource.kind === "text" && resource.content === "EMBEDDED_TEXT_SENTINEL",
+  );
+  const hasEmbeddedBinary = produced.some(
+    (resource) =>
+      resource.kind === "binary" &&
+      resource.mediaType === "application/octet-stream" &&
+      typeof resource.content !== "string" &&
+      Buffer.from(resource.content).equals(Buffer.from([0, 1, 2, 255])),
+  );
+  const hasStructured = produced.some(
+    (resource) =>
+      resource.kind === "text" &&
+      resource.mediaType.startsWith("application/json") &&
+      typeof resource.content === "string" &&
+      resource.content.includes('"answer":42'),
+  );
+  const linkMetadataOnly =
+    resourceOut.output.includes("fixture://linked/item") &&
+    !produced.some((resource) => resource.label.includes("linked metadata only"));
+  const invalidBase64Reported = resourceOut.output.includes("base64 无效");
+  fact("ProducedResource 类型", kinds.join(" / "));
+  fact("resource link", linkMetadataOnly ? "仅元数据" : "被误当成内容 Resource");
+  verdict(
+    resourceOut.ok &&
+      hasText &&
+      hasImage &&
+      hasFallbackAudio &&
+      hasEmbeddedText &&
+      hasEmbeddedBinary &&
+      hasStructured &&
+      linkMetadataOnly &&
+      invalidBase64Reported,
+    "MCP 已知块形成正确 Resource；缺 MIME 用标准 octet-stream，非规范 base64 明确报告，resource link 只留元数据",
   );
 
   // ═══════════════════════════════ I2. 未知 content 块不得让工具整个废掉
@@ -696,7 +757,9 @@ async function main(): Promise<void> {
       fact("resume 事件里有没有那条", payload ? `有，列了 ${payload.toolNames?.length} 个` : "没有");
       fact("其中判定为漂移的", JSON.stringify(payload?.drifted ?? []));
 
-      const versionHasIdentity = /^mcp-[^-]+-[0-9a-f]{12}$/.test(frozenMcp[0]?.version ?? "");
+      const versionHasIdentity = /^mcp-resource-v1-.+-[0-9a-f]{12}$/.test(
+        frozenMcp[0]?.version ?? "",
+      );
       verdict(
         payload !== undefined && (payload.toolNames?.length ?? 0) === frozenMcp.length,
         payload !== undefined

@@ -154,6 +154,7 @@ export interface UiArtifact extends UiEntryBase {
   version: number;
   role: string;
   artifactKind: string;
+  sourceResourceRef?: string;
   /** 【定】`checksRun` 为空 ≠ 通过，界面必须分得开（事件类型注释的原话）。 */
   verified?: { ok: boolean; checksRun: string[]; detail: string };
 }
@@ -196,7 +197,13 @@ export interface UiTurn {
    * 单值字段会让逐轮解剖显示最后一次、`budgetAfter` 显示全部 —— 同一行自相矛盾。
    */
   modelCalls: UiModelCall[];
-  compaction: Array<{ freedTokens: number; reason: string }>;
+  compaction: Array<{
+    freedTokens: number;
+    reason: string;
+    removedMessageCount: number;
+    removedToolResultCount: number;
+    recoveryIndexRef?: string;
+  }>;
   toolNames: string[];
   /** 具名 transition（循环纪律第 2 条在界面上的落点）。 */
   transition?: string;
@@ -558,6 +565,7 @@ export interface UiArtifactRecord {
   path?: string;
   contentHash: string;
   sizeBytes: number;
+  sourceResourceRef?: string;
   /** 【定】undefined ≠ false。「没验过」与「验过没通过」不是一回事。 */
   verified?: boolean;
   verifyDetail?: string;

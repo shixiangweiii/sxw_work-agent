@@ -323,8 +323,11 @@ function deterministicWallHandoff(
   if (incompleteItems.length > 0) {
     lines.push(`未完成或待确认：${incompleteItems.map((i) => `${i.what}（${i.why}）`).join("；")}。`);
   } else {
-    lines.push("没有额外的未完成项或待确认副作用。");
+    lines.push("未登记到结构化未完成项或未知副作用。");
   }
+  lines.push(
+    "Runtime 没有任务级完成契约；以上事实不能据此证明自然语言目标已全部完成。",
+  );
   if (input.summary?.trim()) lines.push(`停止前记录：${input.summary.trim()}`);
   return lines.join("\n");
 }

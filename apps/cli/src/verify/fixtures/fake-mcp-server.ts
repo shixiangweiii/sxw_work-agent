@@ -95,6 +95,11 @@ const PAGES: Array<Array<Record<string, unknown>>> = [
       inputSchema: { type: "object", properties: {} },
     },
     {
+      name: "returns_resources",
+      description: "返回 text、image、embedded resource、resource link 与 structuredContent",
+      inputSchema: { type: "object", properties: {} },
+    },
+    {
       /** 第三页存在本身就是判据：漏了分页就看不到它。 */
       name: "page3_marker",
       description: "只在第三页出现 —— 分页没做对就装不上它",
@@ -223,6 +228,41 @@ function handle(req: Rpc): void {
               data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
             },
           ],
+        });
+        return;
+      }
+      if (name === "returns_resources") {
+        ok(req.id, {
+          content: [
+            { type: "text", text: "MCP_TEXT_RESOURCE_SENTINEL" },
+            { type: "image", mimeType: "image/png", data: "iVBORw0KGgo=" },
+            { type: "audio", data: "AAE=" },
+            // "ZE==" 能被 Buffer 宽松解码，但不是字节 0x64 的规范 base64（应为 ZA==）。
+            { type: "image", data: "ZE==" },
+            {
+              type: "resource",
+              resource: {
+                uri: "fixture://documents/readme.txt",
+                mimeType: "text/plain",
+                text: "EMBEDDED_TEXT_SENTINEL",
+              },
+            },
+            {
+              type: "resource",
+              resource: {
+                uri: "fixture://assets/raw.bin",
+                mimeType: "application/octet-stream",
+                blob: "AAEC/w==",
+              },
+            },
+            {
+              type: "resource_link",
+              name: "linked metadata only",
+              uri: "fixture://linked/item",
+              mimeType: "application/json",
+            },
+          ],
+          structuredContent: { answer: 42, source: "fixture" },
         });
         return;
       }

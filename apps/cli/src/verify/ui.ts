@@ -359,6 +359,7 @@ async function buildRecoveryFixture(
     kind: "MESSAGE",
     message: {
       role: "assistant",
+      origin: "MODEL",
       turn: 9,
       content: [
         {

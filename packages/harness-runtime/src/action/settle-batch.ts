@@ -29,10 +29,13 @@ import type {
   ExecutionAttempt,
   PreparedAction,
   ProposedAction,
+  ToolDefinition,
   VerificationResult,
 } from "../types/tool.js";
 import { DEFAULT_SETTLEMENT } from "../types/tool.js";
 import type { ModelContent } from "../types/context.js";
+import type { ProducedResource, ResourceReference } from "../types/resource.js";
+import { MAX_RESOURCE_BYTES, renderToolResultForModel } from "../types/resource.js";
 import type { ArtifactCheckFact, ExecutionPrivilege, RecoveryItem } from "../types/run.js";
 import type { RunEvent } from "../types/event.js";
 import { makeError, type RuntimeErrorRecord } from "../types/error.js";
@@ -42,7 +45,7 @@ import { isPathInsideWorkspace } from "../workspace/index.js";
 import type {
   ArtifactCheckerPort,
   ArtifactStorePort,
-  BlobStorePort,
+  ResourceStorePort,
   EffectResolverPort,
   IdGeneratorPort,
   RedactionPort,
@@ -89,10 +92,10 @@ export interface BatchDeps {
   /**
    * 大结果外置（阶段 3 S6，§11.4）。
    *
-   * 不传时结果只能 inline；生产组合器始终注入 BlobStorePort，允许不传是为了
+   * 不传时结果只能 inline；生产组合器始终注入 ResourceStorePort，允许不传是为了
    * 让只验证批结算本身的独立调用不必同时搭建持久化设施。
    */
-  blobs?: BlobStorePort;
+  resources?: ResourceStorePort;
   /** Artifact 登记与第二层 Verification（阶段 3 S8，§17 / §10.4）。 */
   artifacts?: ArtifactStorePort;
   artifactChecks?: ArtifactCheckerPort;
@@ -104,6 +107,8 @@ export interface BatchDeps {
    * 也就是说端点不会替你把关，超限的代价是撞上下文墙，而不是一个 400。
    */
   inlineResultLimitTokens?: number;
+  /** 同批结果的累计 inline 上限；按模型调用给出的 call 顺序结算。 */
+  inlineResultsPerBatchLimitTokens?: number;
 }
 
 export interface ToolCallRequest {
@@ -143,13 +148,24 @@ export async function* executeBatch(
    * finalize() 会检查它是否覆盖了全部 call。
    */
   const ledger = new Map<string, ModelContent>();
-  const settle = (toolCallId: string, content: string, isError: boolean): void => {
+  const settle = (
+    toolCallId: string,
+    content: string,
+    isError: boolean,
+    resourceRefs?: ResourceReference[],
+  ): void => {
     if (ledger.has(toolCallId)) {
       // 重复结算是编码错误，不是运行时状况。直接抛，不静默覆盖 ——
       // 静默覆盖会让「恰好一个」变成「最后一个」，而模型看不出区别。
       throw new Error(`tool_call ${toolCallId} 被结算了两次，违反不变量 8`);
     }
-    ledger.set(toolCallId, { type: "tool_result", toolCallId, content, isError });
+    ledger.set(toolCallId, {
+      type: "tool_result",
+      toolCallId,
+      content,
+      isError,
+      ...(resourceRefs && resourceRefs.length > 0 ? { resourceRefs } : {}),
+    });
   };
 
   /**
@@ -679,6 +695,39 @@ export async function* executeBatch(
         continue;
       }
 
+      // ── ⑥.5 工具附带 Resource：文本再次走同一脱敏策略，二进制保持不透明。
+      const persistedResources = await persistProducedResources(
+        outcome.resources ?? [],
+        effectiveRedaction(def),
+        deps,
+      );
+      for (const ref of persistedResources.references) {
+        yield ev(deps, "ResourceStored", {
+          actionId,
+          toolName: call.name,
+          ref: ref.ref,
+          kind: ref.kind,
+          mediaType: ref.mediaType,
+          sizeBytes: ref.sizeBytes,
+          contentHash: ref.contentHash,
+          redactionDisposition: ref.redactionDisposition,
+        });
+      }
+      for (const failed of persistedResources.failures) {
+        yield ev(deps, "ResourcePersistenceFailed", {
+          actionId,
+          toolName: call.name,
+          label: failed.label,
+          reason: failed.reason,
+        });
+      }
+      const resourceNote =
+        persistedResources.failures.length === 0
+          ? ""
+          : `\n\n[Resource 未持久化] ${persistedResources.failures
+              .map((f) => `${f.label}: ${f.reason}`)
+              .join("；")}`;
+
       // ── ⑦ Verification。Tool Handler 的 "success" 不能替代它。
       const vrGuarded = await guard(() => deps.verification.verify(action, outcome, ctx), {
         code: "PORT_VERIFICATION_THREW",
@@ -694,9 +743,14 @@ export async function* executeBatch(
          * 于是 finally 里的 recordUnmetRequired() 会为声明了 requiredForSuccess
          * 的工具自动补一条 FAILED —— 「验证抛了异常」和「验证没得出通过结论」
          * 在结算层是同一件事，不该有第二套判据。这条链已经自洽，不用额外处理。
-         */
+        */
         action.stage = "SETTLED";
-        settle(call.toolCallId, renderError(vrGuarded.error), true);
+        settle(
+          call.toolCallId,
+          renderError(vrGuarded.error) + resourceNote,
+          true,
+          persistedResources.references,
+        );
         if (settlement.onActionFailure === "SKIP_REMAINING") skipRemaining = true;
         continue;
       }
@@ -816,6 +870,9 @@ export async function* executeBatch(
             kind: a.kind,
             ...(a.path === undefined ? {} : { path: a.path }),
             content: a.content,
+            ...(a.sourceResourceRef === undefined
+              ? {}
+              : { sourceResourceRef: a.sourceResourceRef }),
           });
           yield ev(deps, "ArtifactRegistered", {
             artifactId: record.artifactId,
@@ -823,6 +880,11 @@ export async function* executeBatch(
             version: record.version,
             role: record.role,
             kind: record.kind,
+            // 事件描述的是**这一次登记动作**的来源；record 上的是内容版本
+            // 首次创建时的来源，两者在复用既有版本时可以不同。
+            ...(a.sourceResourceRef === undefined
+              ? {}
+              : { sourceResourceRef: a.sourceResourceRef }),
             /**
              * 【定】这个产物是不是在一个已存在的文件上改出来的 —— 见
              * `ProducedArtifact.replacedBytes`。不带这个字段 = 它是新建的。
@@ -878,19 +940,15 @@ export async function* executeBatch(
       action.stage = "SETTLED";
       if (outcome.ok) {
         const note =
-          (vr.status === "FAILED" ? `\n\n[验证未通过] ${vr.detail}` : "") + artifactNote;
-        // §11.4：超阈值的结果在这里外置，帧里只留结构合法的 stub。
-        const materialized = await materialize(red.text, deps);
-        if (materialized.externalized) {
-          yield ev(deps, "ToolResultExternalized", {
-            actionId,
-            toolName: call.name,
-            ref: materialized.ref!,
-            sizeBytes: materialized.sizeBytes,
-            approxTokens: materialized.approxTokens,
-          });
-        }
-        settle(call.toolCallId, materialized.text + note, vr.status === "FAILED");
+          (vr.status === "FAILED" ? `\n\n[验证未通过] ${vr.detail}` : "") +
+          artifactNote +
+          resourceNote;
+        settle(
+          call.toolCallId,
+          red.text + note,
+          vr.status === "FAILED",
+          persistedResources.references,
+        );
       } else {
         /**
          * ── 【定】失败分支也要带上**脱敏后的** output ────────────────────────
@@ -913,7 +971,12 @@ export async function* executeBatch(
          * 对既有工具是 no-op：它们 `ok:false` 时 `output` 本来就是空串。
          */
         const detail = red.text.trim() ? `\n${red.text}` : "";
-        settle(call.toolCallId, renderError(errorOf(outcome, call.name)) + detail, true);
+        settle(
+          call.toolCallId,
+          renderError(errorOf(outcome, call.name)) + detail + resourceNote,
+          true,
+          persistedResources.references,
+        );
         if (settlement.onActionFailure === "SKIP_REMAINING") skipRemaining = true;
         if (settlement.onActionFailure === "ABORT_BATCH") break;
       }
@@ -943,6 +1006,75 @@ export async function* executeBatch(
     finalize(calls, ledger, deps.signal.aborted || aborted, skipRemaining);
     // 【定】result 补齐了，事实也必须补齐 —— 两者是同一条不变量的两面。
     recordUnmetRequired(calls, deps, ledger, verifiedCallIds, actionIdByCall, verifications, causeByCall);
+  }
+
+  /**
+   * 单条与批量 inline 预算统一在**调用顺序**上执行。
+   * 放在 ledger 已完整之后，所有失败、拒绝与补齐结果都不会绕过同批累计上限。
+   */
+  let inlineTokensInBatch = 0;
+  for (const call of calls) {
+    const result = ledger.get(call.toolCallId)!;
+    if (result.type !== "tool_result") continue;
+    const materialized = await materializeToolResult(
+      result.content,
+      result.resourceRefs,
+      deps,
+      inlineTokensInBatch,
+    );
+    const actionId =
+      actionIdByCall.get(call.toolCallId) ??
+      asId<ActionId>(`act_unsettled_${call.toolCallId}`);
+    let refs = materialized.externalized
+      ? [...(result.resourceRefs ?? []), materialized.reference!]
+      : [...(result.resourceRefs ?? [])];
+    const packed = await packResourceReferences(
+      materialized.text,
+      refs,
+      deps,
+      inlineTokensInBatch,
+    );
+    refs = packed.resourceRefs;
+    ledger.set(call.toolCallId, {
+      ...result,
+      content: packed.text,
+      ...(refs.length > 0 ? { resourceRefs: refs } : {}),
+    });
+    inlineTokensInBatch += modelVisibleTokens(packed.text, refs);
+    if (materialized.failureReason) {
+      yield ev(deps, "ResourcePersistenceFailed", {
+        actionId,
+        toolName: call.name,
+        label: "完整工具结果",
+        reason: materialized.failureReason,
+      });
+    }
+    if (packed.failureReason) {
+      yield ev(deps, "ResourcePersistenceFailed", {
+        actionId,
+        toolName: call.name,
+        label: "ResourceRefs 索引",
+        reason: packed.failureReason,
+      });
+    }
+    if (materialized.externalized) {
+      yield ev(deps, "ToolResultExternalized", {
+        actionId,
+        toolName: call.name,
+        ref: materialized.reference!.ref,
+        sizeBytes: materialized.sizeBytes,
+        approxTokens: materialized.approxTokens,
+      });
+    }
+    if (packed.indexReference) {
+      yield ev(deps, "ToolResourceRefsExternalized", {
+        actionId,
+        toolName: call.name,
+        indexRef: packed.indexReference.ref,
+        resourceCount: packed.resourceCount,
+        approxTokensBefore: packed.approxTokensBefore,
+      });
+    }
   }
 
   const results = calls.map((c) => ledger.get(c.toolCallId)!);
@@ -978,11 +1110,11 @@ export async function* executeBatch(
  *
  * ── 【定】没有取回通路就不要外置 ────────────────────────────────────────
  *
- * 只做 stub 不给 `read_blob`，是**比静默截断更糟的信息阻断**：
+ * 只做 stub 不给 `read_resource`，是**比静默截断更糟的信息阻断**：
  * 静默截断至少给了错误的完整感，阻断是明知有东西而拿不到。
- * 所以 `deps.blobs` 不存在时这里原样返回 —— 宁可撞上下文墙，
- * 也不给一个取不回来的 ref。当前装配提供 blob 存储和 `read_blob`；
- * 这个分支保留给显式不装配 blob 能力的嵌入方。
+ * 所以 `deps.resources` 不存在时这里原样返回 —— 宁可撞上下文墙，
+ * 也不给一个取不回来的 ref。当前装配提供 ResourceStore 与 `read_resource`；
+ * 这个分支保留给显式不装配资源能力的嵌入方。
  *
  * ── 阈值为什么不是协议上限 ──────────────────────────────────────────────
  *
@@ -992,35 +1124,74 @@ export async function* executeBatch(
  * 是**上下文预算决定**的，换端点不改这个数。
  * ══════════════════════════════════════════════════════════════════════
  */
-async function materialize(
+async function materializeToolResult(
   text: string,
+  resourceRefs: ResourceReference[] | undefined,
   deps: BatchDeps,
+  inlineTokensInBatch: number,
 ): Promise<{
   text: string;
   externalized: boolean;
-  ref?: string;
+  reference?: ResourceReference;
+  failureReason?: string;
   sizeBytes: number;
   approxTokens: number;
 }> {
   const sizeBytes = Buffer.byteLength(text, "utf8");
   // 本地估算，与 Context 层的 `estimatedTokens` 同一个系数。精确值要发一次
   // count_tokens，而这里每个 tool_result 都要判一次 —— 不值得。
-  const approxTokens = Math.ceil(text.length / 2.5);
-  const limit = deps.inlineResultLimitTokens ?? 0;
+  const approxTokens = modelVisibleTokens(text, resourceRefs);
+  const singleLimit = deps.inlineResultLimitTokens ?? 0;
+  const batchLimit = deps.inlineResultsPerBatchLimitTokens ?? 0;
+  const exceedsSingle = singleLimit > 0 && approxTokens > singleLimit;
+  const exceedsBatch = batchLimit > 0 && inlineTokensInBatch + approxTokens > batchLimit;
 
-  if (!deps.blobs || limit <= 0 || approxTokens <= limit) {
+  if ((exceedsSingle || exceedsBatch) && sizeBytes > MAX_RESOURCE_BYTES) {
+    const failureReason =
+      `工具结果 ${sizeBytes} 字节超过单个 Resource 的 ${MAX_RESOURCE_BYTES} 字节上限；` +
+      `只保留元数据与 preview，没有产生不可用引用。`;
+    return {
+      text: JSON.stringify({
+        status: "RESOURCE_TOO_LARGE",
+        sizeBytes,
+        approxTokens,
+        resourceLimitBytes: MAX_RESOURCE_BYTES,
+        resultRef: null,
+        preview: text.slice(0, 1_200),
+        note: failureReason,
+      }),
+      externalized: false,
+      failureReason,
+      sizeBytes,
+      approxTokens,
+    };
+  }
+
+  if (!deps.resources || (!exceedsSingle && !exceedsBatch)) {
     return { text, externalized: false, sizeBytes, approxTokens };
   }
 
   try {
-    const { ref } = await deps.blobs.put(text);
+    const reference = await deps.resources.put({
+      kind: "text",
+      mediaType: "application/vnd.workagent.tool-result+text; charset=utf-8",
+      label: "完整工具结果",
+      content: text,
+      redactionDisposition: "TEXT_REDACTED",
+    });
     const lines = text.split("\n");
     const stub = {
       status: "EXTERNALIZED",
       reason:
-        `这次调用**成功了**，但结果有 ${approxTokens} tokens，超过单条结果的 inline 上限 ${limit}，` +
+        `结果约 ${approxTokens} tokens，` +
+        (exceedsSingle
+          ? `超过单条 inline 上限 ${singleLimit}`
+          : `使本批 inline 累计超过 ${batchLimit}`) +
+        `，` +
         `已外置存放，没有丢失任何内容。`,
-      ref,
+      resultRef: reference.ref,
+      // `ref` 保留为分页工具的直接入参；`resultRef` 明确它不是附属资源。
+      ref: reference.ref,
       sizeBytes,
       approxTokens,
       totalLines: lines.length,
@@ -1040,13 +1211,19 @@ async function materialize(
        */
       retrieval:
         lines.length === 1
-          ? `这份结果是**一整行**，按行分页只有一页。用 read_blob({ ref: "${ref}", line_offset }) ` +
+          ? `这份结果是**一整行**。用 read_resource({ ref: "${reference.ref}", line_offset }) ` +
             `按字符续页：把返回里的 nextLineOffset 原样传回来，直到 truncated 为 false。`
-          : `调用 read_blob({ ref: "${ref}", start_line, limit }) 按行取回，分页语义与 read_file 一致；` +
+          : `调用 read_resource({ ref: "${reference.ref}", start_line, limit }) 按行取回；` +
             `返回里带 nextStartLine / nextLineOffset 时把这两个值原样传回来接着取。`,
     };
-    return { text: JSON.stringify(stub), externalized: true, ref, sizeBytes, approxTokens };
-  } catch {
+    return {
+      text: JSON.stringify(stub),
+      externalized: true,
+      reference,
+      sizeBytes,
+      approxTokens,
+    };
+  } catch (err) {
     /**
      * 【定】外置失败就 inline，不要把这次调用变成失败。
      *
@@ -1054,8 +1231,208 @@ async function materialize(
      * 报成失败，会让模型去重做一件已经做完的事 —— 对非幂等工具就是双写。
      * 撞上下文墙是可见的、可恢复的；双写不是。
      */
-    return { text, externalized: false, sizeBytes, approxTokens };
+    return {
+      text,
+      externalized: false,
+      failureReason:
+        `工具结果外置失败，已回退 inline：` +
+        String((err as Error)?.message ?? err).slice(0, 200),
+      sizeBytes,
+      approxTokens,
+    };
   }
+}
+
+function modelVisibleTokens(
+  content: string,
+  resourceRefs: ResourceReference[] | undefined,
+): number {
+  return Math.ceil(renderToolResultForModel(content, resourceRefs).length / 2.5);
+}
+
+async function packResourceReferences(
+  text: string,
+  resourceRefs: ResourceReference[],
+  deps: BatchDeps,
+  inlineTokensInBatch: number,
+): Promise<{
+  text: string;
+  resourceRefs: ResourceReference[];
+  indexReference?: ResourceReference;
+  resourceCount: number;
+  approxTokensBefore: number;
+  failureReason?: string;
+}> {
+  const approxTokensBefore = modelVisibleTokens(text, resourceRefs);
+  const exceedsSingle =
+    (deps.inlineResultLimitTokens ?? 0) > 0 &&
+    approxTokensBefore > (deps.inlineResultLimitTokens ?? 0);
+  const exceedsBatch =
+    (deps.inlineResultsPerBatchLimitTokens ?? 0) > 0 &&
+    inlineTokensInBatch + approxTokensBefore >
+      (deps.inlineResultsPerBatchLimitTokens ?? 0);
+  if (!deps.resources || resourceRefs.length <= 1 || (!exceedsSingle && !exceedsBatch)) {
+    return {
+      text,
+      resourceRefs,
+      resourceCount: resourceRefs.length,
+      approxTokensBefore,
+    };
+  }
+
+  try {
+    const indexReference = await deps.resources.put({
+      kind: "text",
+      mediaType: "application/vnd.workagent.resource-index+json; charset=utf-8",
+      label: "工具附属 ResourceRefs 索引",
+      suggestedFilename: "resource-reference-index.json",
+      content: JSON.stringify({
+        type: "RESOURCE_REFERENCE_INDEX",
+        version: 1,
+        resourceCount: resourceRefs.length,
+        resourceRefs,
+      }),
+      redactionDisposition: "TEXT_REDACTED",
+    });
+    const preview = resourceRefs.slice(0, 3).map((reference) => ({
+      ref: reference.ref,
+      kind: reference.kind,
+      ...(reference.suggestedFilename === undefined
+        ? {}
+        : { suggestedFilename: reference.suggestedFilename }),
+    }));
+    const notice = {
+      status: "EXTERNALIZED_INDEX",
+      resourceIndexRef: indexReference.ref,
+      resourceCount: resourceRefs.length,
+      preview,
+      retrieval:
+        `调用 read_resource({ ref: "${indexReference.ref}" }) 读取完整 ResourceRefs 索引，` +
+        `不要重新执行原工具。`,
+    };
+    return {
+      text: appendResourceIndexNotice(text, notice),
+      resourceRefs: [indexReference],
+      indexReference,
+      resourceCount: resourceRefs.length,
+      approxTokensBefore,
+    };
+  } catch (err) {
+    return {
+      text,
+      resourceRefs,
+      resourceCount: resourceRefs.length,
+      approxTokensBefore,
+      failureReason:
+        `ResourceRefs 索引外置失败，已保留原引用：` +
+        String((err as Error)?.message ?? err).slice(0, 200),
+    };
+  }
+}
+
+function appendResourceIndexNotice(
+  text: string,
+  notice: Record<string, unknown>,
+): string {
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    if (
+      parsed !== null &&
+      typeof parsed === "object" &&
+      !Array.isArray(parsed) &&
+      !("__atlasResourceIndex" in parsed)
+    ) {
+      return JSON.stringify({
+        ...(parsed as Record<string, unknown>),
+        __atlasResourceIndex: notice,
+      });
+    }
+  } catch {
+    // 非 JSON 工具结果用文本附录，原文保持不变。
+  }
+  return `${text}\n\n[Runtime ResourceRefs 已索引]\n${JSON.stringify(notice)}`;
+}
+
+async function persistProducedResources(
+  produced: ProducedResource[],
+  redaction: ToolDefinition["redaction"],
+  deps: BatchDeps,
+): Promise<{
+  references: ResourceReference[];
+  failures: Array<{ label: string; reason: string }>;
+}> {
+  const references: ResourceReference[] = [];
+  const failures: Array<{ label: string; reason: string }> = [];
+  if (produced.length === 0) return { references, failures };
+  if (!deps.resources) {
+    return {
+      references,
+      failures: produced.map((_resource, index) => ({
+        label: `resource #${index + 1}`,
+        reason: "ResourceStorePort 未装配",
+      })),
+    };
+  }
+
+  for (const [resourceIndex, resource] of produced.entries()) {
+    try {
+      // ResourceReference 会进入模型可见轨道，因此文字元数据同样不能绕过脱敏。
+      const redLabel = deps.redaction.redact(resource.label, redaction);
+      const redMediaType = deps.redaction.redact(resource.mediaType, redaction);
+      const redFilename =
+        resource.suggestedFilename === undefined
+          ? undefined
+          : deps.redaction.redact(resource.suggestedFilename, redaction);
+      if (
+        !redLabel.ok ||
+        !redMediaType.ok ||
+        (redFilename !== undefined && !redFilename.ok)
+      ) {
+        throw new Error("Resource 元数据脱敏失败");
+      }
+      const metadata = {
+        mediaType: redMediaType.text.slice(0, 256),
+        label: redLabel.text.slice(0, 500),
+        ...(redFilename === undefined
+          ? {}
+          : { suggestedFilename: redFilename.text.slice(0, 240) }),
+      };
+      if (resource.kind === "text") {
+        if (typeof resource.content !== "string") {
+          throw new Error("text Resource 的 content 不是 string");
+        }
+        const red = deps.redaction.redact(resource.content, redaction);
+        if (!red.ok) throw new Error(red.error?.safeMessage ?? "Resource 文本脱敏失败");
+        references.push(
+          await deps.resources.put({
+            kind: "text",
+            ...metadata,
+            content: red.text,
+            redactionDisposition: "TEXT_REDACTED",
+          }),
+        );
+      } else {
+        if (typeof resource.content === "string") {
+          throw new Error("binary Resource 的 content 不是 Uint8Array");
+        }
+        references.push(
+          await deps.resources.put({
+            kind: "binary",
+            ...metadata,
+            content: resource.content,
+            redactionDisposition: "OPAQUE_BINARY_NOT_TEXT_SCANNED",
+          }),
+        );
+      }
+    } catch (err) {
+      failures.push({
+        // 原始 label 也来自工具，不能在脱敏失败分支里反过来绕过脱敏。
+        label: `resource #${resourceIndex + 1}`,
+        reason: String((err as Error)?.message ?? err).slice(0, 240),
+      });
+    }
+  }
+  return { references, failures };
 }
 
 /**

@@ -55,7 +55,14 @@ export type RunEvent =
         compacted: boolean;
         trust: { hasExternalUntrusted: boolean; untrustedItems: number };
       }>
-  | Ev<"ContextCompacted", { freedTokens: number; reason: string }>
+  | Ev<"ContextCompacted",
+      {
+        freedTokens: number;
+        reason: string;
+        removedMessageCount: number;
+        removedToolResultCount: number;
+        recoveryIndexRef?: string;
+      }>
   | Ev<"ModelStreamDelta", { text: string }>
   | Ev<"ModelInvocationCompleted",
       {
@@ -115,10 +122,31 @@ export type RunEvent =
    *
    * 【定】它必须发。外置在 transcript 上表现为「一条很短的 stub」——
    * 与「工具本来就只返回了这么点」在盘上无法区分，而两者对读 trace 的人
-   * 意义完全不同：前者有几百 KB 内容躺在 blob 里等着被取回。
+   * 意义完全不同：前者有几百 KB 内容躺在 ResourceStore 里等着被取回。
    */
   | Ev<"ToolResultExternalized",
       { actionId: ActionId; toolName: string; ref: string; sizeBytes: number; approxTokens: number }>
+  | Ev<"ToolResourceRefsExternalized",
+      {
+        actionId: ActionId;
+        toolName: string;
+        indexRef: string;
+        resourceCount: number;
+        approxTokensBefore: number;
+      }>
+  | Ev<"ResourceStored",
+      {
+        actionId: ActionId;
+        toolName: string;
+        ref: string;
+        kind: "text" | "binary";
+        mediaType: string;
+        sizeBytes: number;
+        contentHash: string;
+        redactionDisposition: "TEXT_REDACTED" | "OPAQUE_BINARY_NOT_TEXT_SCANNED";
+      }>
+  | Ev<"ResourcePersistenceFailed",
+      { actionId: ActionId; toolName: string; label: string; reason: string }>
   /** Artifact 登记（阶段 3 S8，§17）。它是第二层 Verification 的触发点。 */
   /**
    * `replacedBytes`：执行前同名文件的字节数。**不带这个字段 = 它是新建的。**
@@ -134,6 +162,7 @@ export type RunEvent =
         version: number;
         role: string;
         kind: string;
+        sourceResourceRef?: string;
         replacedBytes?: number;
       }>
   /**

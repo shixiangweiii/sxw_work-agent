@@ -137,7 +137,7 @@ const TABLES: TableSpec[] = [
    * 不靠调用方自觉。D-2 的唯一取号点是 nextSequence()，撞主键就说明取号
    * 出了第二条路径 —— 让它当场炸，不要静默覆盖。
    *
-   * payload_json 装 message / compactSummary / meta 三者之一，按 kind 解释。
+   * payload_json 按 kind 装 message、compactSummary + compactKept snapshot 或 meta。
    *
    * 【定】**没有 schema_version 列。** 逐行版本＋跳过未来版本那套前向兼容
    * 挡的是一种不可能存在的数据（全仓只有一个生产者、只写常量 1），
@@ -180,7 +180,7 @@ const TABLES: TableSpec[] = [
       );`,
   },
   /**
-   * Blob：大结果外置（§11.4）。内容寻址。
+   * Resource 字节：文本与二进制共用内容寻址存储。
    *
    * 【定】主键是内容 hash，不是 ref。同一份内容被两个工具产出两次时
    * 只存一份，而两次的 ref 都指得到它。
@@ -190,28 +190,41 @@ const TABLES: TableSpec[] = [
    * Artifact 是「这是本次 Run 的交付物」。
    */
   {
-    name: "blobs",
+    name: "resource_blobs",
     columns: ["content_hash", "size_bytes", "content"],
     ddl: `
-      CREATE TABLE IF NOT EXISTS blobs (
+      CREATE TABLE IF NOT EXISTS resource_blobs (
         content_hash TEXT PRIMARY KEY,
         size_bytes   INTEGER NOT NULL,
-        content      TEXT    NOT NULL
+        content      BLOB    NOT NULL
       );`,
   },
   /**
-   * ref → hash 的映射。ref 是模型看得见的句柄（read_blob 的入参），
-   * hash 是内容的身份。分开是因为同一份内容可以有多个 ref
-   * （两次调用碰巧结果相同），而模型引用的是「那一次调用的结果」。
+   * ref → hash 与资源元数据。相同字节可有多个独立 ref。
    */
   {
-    name: "blob_refs",
-    columns: ["ref", "content_hash"],
+    name: "resource_refs",
+    columns: [
+      "ref",
+      "content_hash",
+      "kind",
+      "media_type",
+      "label",
+      "suggested_filename",
+      "redaction_disposition",
+      "created_at",
+    ],
     ddl: `
-      CREATE TABLE IF NOT EXISTS blob_refs (
-        ref          TEXT PRIMARY KEY,
-        content_hash TEXT NOT NULL,
-        FOREIGN KEY (content_hash) REFERENCES blobs (content_hash)
+      CREATE TABLE IF NOT EXISTS resource_refs (
+        ref                   TEXT PRIMARY KEY,
+        content_hash          TEXT    NOT NULL,
+        kind                  TEXT    NOT NULL,
+        media_type            TEXT    NOT NULL,
+        label                 TEXT    NOT NULL,
+        suggested_filename    TEXT,
+        redaction_disposition TEXT    NOT NULL,
+        created_at            INTEGER NOT NULL,
+        FOREIGN KEY (content_hash) REFERENCES resource_blobs (content_hash)
       );`,
   },
   /**
@@ -235,6 +248,7 @@ const TABLES: TableSpec[] = [
       "path",
       "content_hash",
       "size_bytes",
+      "source_resource_ref",
       "verified",
       "verify_detail",
       "created_at",
@@ -250,10 +264,12 @@ const TABLES: TableSpec[] = [
         path          TEXT,
         content_hash  TEXT    NOT NULL,
         size_bytes    INTEGER NOT NULL,
+        source_resource_ref TEXT,
         verified      INTEGER,
         verify_detail TEXT,
         created_at    INTEGER NOT NULL,
-        UNIQUE (logical_id, version)
+        UNIQUE (logical_id, version),
+        FOREIGN KEY (source_resource_ref) REFERENCES resource_refs (ref)
       );`,
     indexes: ["CREATE INDEX IF NOT EXISTS idx_artifacts_run ON artifacts (run_id)"],
     indexNames: ["idx_artifacts_run"],

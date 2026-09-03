@@ -33,6 +33,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import type { McpServerConfig } from "./config.js";
 import { resolveServerCwd } from "./config.js";
+import type { ProducedResource } from "@workagent/harness-runtime";
 
 /** 一个 MCP 工具的声明（`tools/list` 的一项）。 */
 export interface McpToolDef {
@@ -238,6 +239,7 @@ interface CallResult {
   /** 拼好的文本。image / resource 块会在这里留下一句说明，见 `renderContent`。 */
   text: string;
   isError: boolean;
+  resources: ProducedResource[];
   /**
    * 【定】这里**没有** `droppedBlocks`。
    *
@@ -312,7 +314,12 @@ export async function callTool(
 
   // `ResultSchema` 是 passthrough，字段原样保留 —— 按开放对象读。
   const open = result as Record<string, unknown>;
-  return { text: renderContent(open), isError: open["isError"] === true };
+  const rendered = renderContent(open);
+  return {
+    text: rendered.text,
+    resources: rendered.resources,
+    isError: open["isError"] === true,
+  };
 }
 
 /**
@@ -326,33 +333,125 @@ export async function callTool(
  * **没有任何办法看出那是解码垃圾**。反过来，静默丢掉它同样糟 ——
  * 模型会以为自己看到了截图的全部内容。所以：丢掉正文，但说出来丢了什么。
  *
- * 这是 ADR-0010 那个洞的同族（二进制在类型层进不去），登记待办，v1 不补。
+ * 二进制现在经 ProducedResource 进入本地不透明 ResourceStore；这里只把元数据
+ * 说明放进字符串结果，base64 本身不会进入模型通道。
  */
-function renderContent(result: Record<string, unknown>): string {
+function renderContent(result: Record<string, unknown>): {
+  text: string;
+  resources: ProducedResource[];
+} {
   const blocks = Array.isArray(result["content"]) ? (result["content"] as unknown[]) : [];
   const texts: string[] = [];
-  const dropped: string[] = [];
+  const resources: ProducedResource[] = [];
+  const unknown: string[] = [];
 
-  for (const b of blocks) {
-    const block = b as { type?: string; text?: string; mimeType?: string };
+  for (let index = 0; index < blocks.length; index++) {
+    const b = blocks[index];
+    const block = b as Record<string, unknown>;
     if (block.type === "text" && typeof block.text === "string") {
-      texts.push(block.text);
+      texts.push(block.text as string);
+      resources.push({
+        kind: "text",
+        label: `MCP text block ${index + 1}`,
+        mediaType: "text/plain; charset=utf-8",
+        content: block.text as string,
+      });
       continue;
     }
-    dropped.push(block.type ?? "(未声明类型)");
+    if (
+      (block.type === "image" || block.type === "audio") &&
+      typeof block.data === "string"
+    ) {
+      const decoded = decodeBase64(block.data);
+      if (!decoded) {
+        unknown.push(`${block.type}(base64 无效)`);
+        continue;
+      }
+      resources.push({
+        kind: "binary",
+        label: `MCP ${block.type} block ${index + 1}`,
+        mediaType:
+          typeof block.mimeType === "string"
+            ? block.mimeType
+            : "application/octet-stream",
+        content: decoded,
+      });
+      texts.push(
+        `[Atlas] MCP 返回了 ${block.type} 块；原始字节已转为不透明 Resource，没有进入上下文。`,
+      );
+      continue;
+    }
+    if (block.type === "resource" && isRecord(block.resource)) {
+      const embedded = block.resource;
+      const uri = typeof embedded.uri === "string" ? embedded.uri : "(无 URI)";
+      const declaredMediaType =
+        typeof embedded.mimeType === "string" ? embedded.mimeType : undefined;
+      if (typeof embedded.text === "string") {
+        resources.push({
+          kind: "text",
+          label: `MCP embedded text resource ${index + 1}`,
+          mediaType: declaredMediaType ?? "text/plain; charset=utf-8",
+          ...filenameFromUri(uri),
+          content: embedded.text,
+        });
+        texts.push(`[Atlas] MCP 返回了文本 embedded resource：${uri}。`);
+        continue;
+      }
+      if (typeof embedded.blob === "string") {
+        const decoded = decodeBase64(embedded.blob);
+        if (!decoded) {
+          unknown.push("resource(base64 无效)");
+          continue;
+        }
+        resources.push({
+          kind: "binary",
+          label: `MCP embedded binary resource ${index + 1}`,
+          mediaType: declaredMediaType ?? "application/octet-stream",
+          ...filenameFromUri(uri),
+          content: decoded,
+        });
+        texts.push(
+          `[Atlas] MCP 返回了二进制 embedded resource：${uri}；字节未进入上下文。`,
+        );
+        continue;
+      }
+    }
+    if (block.type === "resource_link") {
+      texts.push(
+        `[Atlas] MCP resource link 元数据：${JSON.stringify({
+          name: block.name,
+          title: block.title,
+          uri: block.uri,
+          description: block.description,
+          mimeType: block.mimeType,
+          size: block.size,
+        })}`,
+      );
+      continue;
+    }
+    unknown.push(typeof block.type === "string" ? block.type : "(未声明类型)");
   }
 
-  // 细节 ④：没有任何 content 块但有结构化结果时，把它 stringify 回去。
-  if (texts.length === 0 && dropped.length === 0 && result["structuredContent"] !== undefined) {
-    texts.push(JSON.stringify(result["structuredContent"]));
+  if (result["structuredContent"] !== undefined) {
+    const structured = JSON.stringify(result["structuredContent"]);
+    resources.push({
+      kind: "text",
+      label: "MCP structuredContent",
+      mediaType: "application/json; charset=utf-8",
+      suggestedFilename: "structured-content.json",
+      content: structured,
+    });
+    if (texts.length === 0) texts.push(structured);
+    else texts.push("[Atlas] structuredContent 已作为独立文本 Resource 保留。");
   }
 
-  if (dropped.length > 0) {
-    const counted = [...new Set(dropped)].map((k) => `${k}×${dropped.filter((d) => d === k).length}`);
+  if (unknown.length > 0) {
+    const counted = [...new Set(unknown)].map(
+      (k) => `${k}×${unknown.filter((d) => d === k).length}`,
+    );
     texts.push(
-      `\n[Atlas] 这次返回里还有 ${dropped.length} 个非文本块（${counted.join("、")}），` +
-        `它们**没有进入上下文** —— Atlas 的工具结果通道当前只装得下文本。` +
-        `不要假设你看到了它们的内容。`,
+      `\n[Atlas] 这次返回里有 ${unknown.length} 个未知内容块（${counted.join("、")}）。` +
+        `Atlas 不认识其语义，未静默丢弃：类型已在此明确记录，但正文没有进入上下文。`,
     );
   }
 
@@ -370,7 +469,33 @@ function renderContent(result: Record<string, unknown>): string {
 
   // 【定】只返回文本。被丢弃的块**已经以模型看得懂的形式**拼在上面那段说明里，
   // 再单独交一份结构化副本没有读者 —— 见 `CallResult` 里那段。
-  return texts.join("\n");
+  return { text: texts.join("\n"), resources };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function decodeBase64(value: string): Uint8Array | undefined {
+  const compact = value.replace(/\s/g, "");
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(compact) || compact.length % 4 === 1) {
+    return undefined;
+  }
+  const decoded = Buffer.from(compact, "base64");
+  const canonical = decoded.toString("base64").replace(/=+$/g, "");
+  if (canonical !== compact.replace(/=+$/g, "")) return undefined;
+  return new Uint8Array(decoded);
+}
+
+function filenameFromUri(uri: string): { suggestedFilename?: string } {
+  try {
+    const name = new URL(uri).pathname.split("/").filter(Boolean).at(-1);
+    return name
+      ? { suggestedFilename: decodeURIComponent(name).replace(/[\\/]/g, "_").slice(0, 240) }
+      : {};
+  } catch {
+    return {};
+  }
 }
 
 export async function closeConnection(conn: McpConnection): Promise<void> {

@@ -4,7 +4,7 @@
  * ══════════════════════════════════════════════════════════════════════
  * 验证：**大结果外置得回来吗？产物验得出真假吗？外发在 Trace 上查得到吗？**
  *
- *   A 段  外置发生、stub 协议合法、`read_blob` 逐字取回
+ *   A 段  外置发生、stub 协议合法、`read_resource` 逐字取回
  *   B 段  外置前后 validateFrame() 都通过，配对不变量不被破坏
  *   C 段  `fetch_url` 的内容标 EXTERNAL_UNTRUSTED，且 Trace 上有对应事实
  *   D 段  URL scope 的 riskFact ＋ dataMovement；私网与 localhost 被拒
@@ -106,23 +106,23 @@ function lastToolResult(request: ModelRequest): Record<string, unknown> | undefi
 }
 
 /**
- * 一个**会看上一轮结果**的脚本化模型，专门用来把 blob 翻到底。
+ * 一个**会看上一轮结果**的脚本化模型，专门用来把 Resource 翻到底。
  *
  * ── 【定】为什么 A 段不能用 ScriptedModelPort ──────────────────────────
  *
  * ref 带随机后缀、续页偏移要从上一页的 `nextLineOffset` 里读 —— 两者都只有
- * 跑起来才知道。写死脚本就只能绕过工具层直接调 `ports.blobs.get()`，
+ * 跑起来才知道。写死脚本就只能绕过工具层直接调 `ports.resources.getTextPage()`，
  * 而 **那一跳恰恰是出过事的地方**：`line_offset` 在 `CommonToolHandler` 里
- * 被丢掉，`read_blob` 对单行 blob 完全失效，2026-08-28 办公任务实跑的题 1 因此
+ * 被丢掉，旧分页工具对单行结果完全失效，2026-08-28 办公任务实跑的题 1 因此
  * 3/3 全灭 —— 而这一段当时是**绿的**，因为它测的是 bug 下面那一层。
  *
- * 段标题写着「read_blob 逐字取回」，断言打的却是 Port。抬头与断言不符，
+ * 段标题写着「逐字取回」，断言打的却是 Port。抬头与断言不符，
  * 与阶段 3 收口批修掉的那四条是同一个形态。
  *
  * 它模仿的就是真实模型的动作：拿到 stub → 用 ref 取第一页 →
  * 看到 truncated 就把 nextStartLine / nextLineOffset 原样传回去接着取。
  */
-class BlobPagingModelPort implements ModelPort {
+class ResourcePagingModelPort implements ModelPort {
   private seq = 0;
 
   async *invoke(
@@ -139,14 +139,14 @@ class BlobPagingModelPort implements ModelPort {
       this.seq += 1;
       call = {
         toolCallId: `p${this.seq}`,
-        name: "read_blob",
+        name: "read_resource",
         input: { ref: String(last["ref"]), start_line: 1, limit: 2_000 },
       };
     } else if (last["truncated"] === true) {
       this.seq += 1;
       call = {
         toolCallId: `p${this.seq}`,
-        name: "read_blob",
+        name: "read_resource",
         input: {
           ref: String(last["ref"]),
           start_line: Number(last["nextStartLine"] ?? 1),
@@ -188,7 +188,7 @@ async function runScript(
   turns: Array<{ text?: string; toolCalls: ToolCall[] }>,
   /** F 段用它注入一个「会谎报产物内容」的 Handler。见那一段的说明。 */
   toolsOverride?: ToolHandlerPort,
-  /** A 段用它注入会看上一轮结果的翻页模型。见 BlobPagingModelPort 的说明。 */
+  /** A 段用它注入会看上一轮结果的翻页模型。见 ResourcePagingModelPort 的说明。 */
   modelOverride?: ModelPort,
   /**
    * I 段用它让**两个 Run 共用一个库** —— 跨 Run 的 Artifact 去重语义只有在
@@ -976,9 +976,9 @@ async function sectionBinaryMagic(): Promise<void> {
   }
 }
 
-/** A ＋ B 段：外置 → stub → read_blob 逐字取回；配对与协议不被破坏。 */
+/** A ＋ B 段：外置 → stub → read_resource 逐字取回；配对与协议不被破坏。 */
 async function sectionBlobRoundTrip(): Promise<void> {
-  section("A. 外置 → stub → read_blob 逐字取回");
+  section("A. 外置 → stub → read_resource 逐字取回");
   console.log(
     "   只做 stub 不给取回通路，是**比静默截断更糟的信息阻断**：\n" +
       "   静默截断至少给了错误的完整感，阻断是明知有东西而拿不到。\n" +
@@ -1008,12 +1008,12 @@ async function sectionBlobRoundTrip(): Promise<void> {
     // 第一轮读大文件（触发外置），第二轮把 ref 取回来。
     /**
      * 【定】一个 Run 走完「读大文件 → 外置 → 逐页取回」，
-     * 而且**每一页都是真的 `read_blob` 工具调用**（经 CommonToolHandler）。
+     * 而且**每一页都是真的 `read_resource` 工具调用**（经 CommonToolHandler）。
      *
-     * 此前这里是两个 Run ＋ 直接调 `ports.blobs.get()`：store 层一直是对的，
+     * 此前这里是两个 Run ＋ 直接调底层 Store：store 层一直是对的，
      * 所以那样测永远绿 —— 而真实事故就发生在被跳过的那一跳上。
      */
-    const r1 = await runScript(ws.root, [], undefined, new BlobPagingModelPort());
+    const r1 = await runScript(ws.root, [], undefined, new ResourcePagingModelPort());
     const stub = parse(r1.results.get("a1")?.content);
     const ref = String(stub["ref"] ?? "");
     const ext = r1.trace.byType("ToolResultExternalized")[0]?.payload;
@@ -1052,7 +1052,7 @@ async function sectionBlobRoundTrip(): Promise<void> {
        * 【定】页面正文从 **transcript 里的 tool_result** 收，
        * 不再自己调 store —— 收的是模型真正看见的那些字节。
        *
-       * 翻页动作由 `BlobPagingModelPort` 发起：它照真实模型的做法，
+       * 翻页动作由 `ResourcePagingModelPort` 发起：它照真实模型的做法，
        * 把上一页的 `nextStartLine` / `nextLineOffset` 原样传回去。
        */
       const pageBodies: string[] = [];
@@ -1098,7 +1098,7 @@ async function sectionBlobRoundTrip(): Promise<void> {
       // pages > 1 是判据的一部分：只有真的翻了页，才证明字符预算那一层存在。
       // distinctPages === pages 钉住「每一页都往前走了」——见上面那段说明。
       roundTripOk = pages > 1 && distinctPages === pages && reassembled.content === original;
-      fact("read_blob 翻页次数", pages);
+      fact("read_resource 翻页次数", pages);
       fact("取回总长度", `${fetched.length} 字符`);
       fact("重组后可解析为 JSON", reassembled.content !== undefined ? "是" : "否");
       fact(

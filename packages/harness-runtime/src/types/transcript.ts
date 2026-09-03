@@ -1,8 +1,8 @@
 /**
  * transcript：恢复的唯一来源（V05 §18.5）。
  *
- * append-only。只追加，不改写 —— Compact 通过写入 COMPACT_BOUNDARY 表达，
- * 重建时从最后一个 boundary 之后开始取，boundary 之前的原文保留供 Trace 使用。
+ * append-only。只追加，不改写 —— Compact 通过一条带 summary + kept snapshot 的
+ * COMPACT_BOUNDARY 原子表达；重建从该 snapshot 接续，旧原文保留供 Trace 使用。
  *
  * ══════════════════════════════════════════════════════════════════════
  * 【定】**条目不带版本号。** schema 变了就删库重建（见 store-sqlite/db.ts）。
@@ -20,10 +20,19 @@ import type { ModelContent } from "./context.js";
 
 export type MessageRole = "user" | "assistant" | "system";
 
+/**
+ * 消息是谁产生的。role 是 Provider 协议载体，不能拿来冒充 provenance：
+ * tool_result 与 Runtime notice 都可能以 user role 发给模型，但都不是用户输入。
+ */
+export type ContextMessageOrigin = "USER" | "MODEL" | "TOOL" | "RUNTIME";
+
 /** 进入模型上下文的一条消息。已脱敏（不变量 13）。 */
 export interface ContextMessage {
   role: MessageRole;
+  origin: ContextMessageOrigin;
   content: ModelContent[];
+  /** Runtime Compact 摘要携带的恢复索引；旧摘要被再次压缩时写入新索引形成链。 */
+  recoveryIndexRefs?: string[];
   /** 该消息是哪一轮产生的。用于 Trace 与 resume 时的定位。 */
   turn: number;
 }
@@ -48,6 +57,11 @@ export interface TranscriptEntry {
   message?: ContextMessage;
   /** COMPACT_BOUNDARY 用：这条边界之前的内容已被摘要取代。 */
   compactSummary?: ContextMessage;
+  /**
+   * 与 compactSummary 同一条 boundary 原子落盘的保留集。
+   * 若拆成后续多次 append，崩在中间会让 boundary 遮蔽旧历史、却只留下部分 kept。
+   */
+  compactKept?: ContextMessage[];
   meta?: Record<string, unknown>;
   createdAt: Timestamp;
 }

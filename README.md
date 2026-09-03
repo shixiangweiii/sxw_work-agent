@@ -183,12 +183,12 @@ RUNNING 敲一句话回车 = 插话；等审批时回车 = 应答；等接管时
 
 ---
 
-## 16 条验收脚本
+## 17 条验收脚本
 
 不写单测（D-25）。验收以**可运行脚本**交付，输出可读证据供人判断，与 Spike 0 的探针形态一致。
 
 ```bash
-npm run verify:all                 # 16 条脚本；每条打印可读证据与判据合计
+npm run verify:all                 # 17 条脚本；每条打印可读证据与判据合计
 ```
 
 | 脚本 | 挂了意味着 |
@@ -208,6 +208,7 @@ npm run verify:all                 # 16 条脚本；每条打印可读证据与�
 | `verify:ui` | ★阶段 4：Layer 2 开始推进执行语义、投影自己算数、本地通信边界破了、自动放行的正分支回退、失败的 resume 留幻影、或 RECOVERY_REQUIRED 的项看不见 |
 | `verify:mcp` | ★ADR-0011：MCP 跑进 Runtime、默认档不保守、开放 schema 被裁剪、分页/失败分流/生命周期/resume 漂移处理失效 |
 | `verify:model-audit` | 实际请求、SDK 解码 Provider 事件或独立错误没有落盘，或审计故障改变了 Run |
+| `verify:resource` | Resource 字节不保真、批量外置失效、二进制泄漏进模型轨道，或原样物化失去来源 |
 | `verify:scenarios` | 三个场景不再共用同一套工具（过拟合警报） |
 
 `verify:scenarios -- --live` 与 `verify:drift -- --live` 用真实端点跑，**花钱，不在 `verify:all` 里**。
@@ -222,6 +223,7 @@ Eval 层（不复用生产结算路径，§24.1【定】）：
 npm run eval:suite                 # 脚本化，不花钱，验管路（夹具→Run→manifest→grader→报告）
 npm run eval:suite -- --live 5     # 真实端点跑 5 次，出 pass@1 / pass^5 / token 与时延分布
 npm run eval:suite -- --endpoint deepseek
+npm run eval:resource-archive      # 冻结合成 Resource Case；假 HTTP、强制 Compact、独立 grader
 ```
 
 ---
@@ -235,7 +237,7 @@ npm run eval:suite -- --endpoint deepseek
 ```text
 while (true) {
   ⓪ 排空 Interject 队列
-  ① 编译 ContextFrame（外置 → Compact → 协议校验）
+  ① 编译 ContextFrame（Resource 外置 → 可恢复 Compact → 协议校验）
   ② 调模型（流式，delta 直接 yield）
   ③ 无 tool call → 结算 outcome，具名 Terminal 退出
   ④ 执行 ActionBatch（串行，每个 call 恰好一个 result）
@@ -258,27 +260,46 @@ packages/harness-runtime/    Layer 3 全部
   src/verification/          Verifier 与 outcome 结算
   src/model/capability/      端点能力声明的加载、冻结与漂移检测
   src/facade/                HarnessRuntime：start / resume / cancel / interject / inspect
-packages/store-sqlite/       唯一允许 import node:sqlite 的地方（transcript / run / blob / artifact）
+packages/store-sqlite/       唯一允许 import node:sqlite 的地方（transcript / run / resource / artifact）
 packages/testkit/            fake-endpoint-profile、fake-clock、crash-harness（真 kill -9）
 eval/                        graders / suite / fixtures —— 只经 Facade
 adapters/shape-anthropic-messages/   唯一允许 import Provider SDK 的地方
 adapters/endpoint-profiles/  端点行为的**数据**形态，不是代码
-tools/common/                Case 无关的通用能力面（9 场景 ＋ 3 机制工具）
+tools/common/                Case 无关的通用能力面（9 场景 ＋ 4 机制工具）
 tools/mcp/                   通用本地 stdio MCP 客户端；配置、生命周期、工具桥接与 handler
 cases/micro-cases/           append_log 与 slow_write —— **测量工具**，不是能力
-apps/cli/                    Composition Root ＋ 终端入口 ＋ 16 条验收脚本 ＋ 一次性探针
+apps/cli/                    Composition Root ＋ 终端入口 ＋ 17 条验收脚本 ＋ 一次性探针
 apps/workagent-service/      ★阶段 4。Layer 2：投影 / Runtime Host / 三条人机通道 / HTTP ＋ SSE
 apps/workagent-ui/public/    ★阶段 4。Layer 1：**没有 src/、没有构建、没有一行 import**
 ```
 
-不配置 MCP 时默认装配 **14 个工具**（9 场景 ＋ 3 机制 ＋ 2 测量），固定开销起步价 ≈ 2520 token
+不配置 MCP 时默认装配 **15 个工具**（9 场景 ＋ 4 机制 ＋ 2 测量），固定开销起步价 ≈ 2700 token
 （§16.1【定·实测】每工具约 180 token）。启用 MCP 后会追加服务器在启动时声明的工具，
 固定开销随工具数线性增加；工具数是随时可读的过拟合警报。
 
-### 边界 grep：编号 1…13、共 14 条规则（有机械判据）
+### ResourceRef 与可恢复 Context
+
+工具可通过类型化 `resources` 返回 UTF-8 文本或原始二进制。Runtime 对文本执行现有脱敏，
+对二进制只作本地不透明字节保存，随后把稳定的 `ResourceReference` 附在 tool result 上：
+
+- `read_resource` 分页读取文本；二进制只显示元数据，不返回 base64；
+- `materialize_resource` 在批准后把 Resource 原样、原子写入 workspace，写后复读校验 SHA-256，
+  并登记带 `sourceResourceRef` 的 Artifact；来源描述内容版本创建事实，不追溯改写旧版本；
+- 单条 Resource 上限 8 MiB；相同字节内容寻址去重，但每次产生独立 `res_*`；
+- 单条工具结果 inline 上限 8,000 token，同一 ActionBatch 累计上限 12,000 token；
+- ResourceRefs 元数据本身超限时也会外置成可分页恢复的索引，不让大量小资源绕过预算；
+- `fetch_url` 流式读取，越过 8 MiB 立即取消；HTML 转换后的 Resource 使用 Markdown MIME 与文件名；
+- Compact 先把移出的已脱敏工具结果与 JSON 恢复索引持久化，再以一条包含
+  summary + kept snapshot 的 boundary 原子提交；旧摘要再次移出时由索引链保留恢复入口。
+  Store 失败会以 `CONTEXT_MATERIALIZATION_FAILED` 终止，原 Context 不被替换。
+
+这条管道只保证证据可恢复、可原样落盘；它不引入 Planner、任务级 Completion Gate，
+也不把任何站点、正文选择或目录规则写进生产 Runtime。
+
+### 边界 grep：编号 1…14、共 15 条规则（有机械判据）
 
 ```bash
-npm run verify:tools      # A 段机械跑这 14 条，别手工 grep（表在 apps/cli/src/verify/boundaries.ts）
+npm run verify:tools      # A 段机械跑完整表，别手工 grep（表在 apps/cli/src/verify/boundaries.ts）
 ```
 
 | # | 规则 |
@@ -296,6 +317,7 @@ npm run verify:tools      # A 段机械跑这 14 条，别手工 grep（表在 a
 | 11 | ★阶段 4 收口：**界面不得用内联 `style` 属性** —— 它会被自己的 CSP 静默丢弃，八条预算轴曾因此全部渲染成满格 |
 | 12 | ★ADR-0011：**MCP 客户端不得进 Runtime / 适配器**；协议与进程管理属于工具域 |
 | 13 | ★阶段 4：界面高度不得用“视口减写死常数”计算；MCP notice 让顶栏换行后该假设会失效 |
+| 14 | Resource / Context 生产模块不得含合成归档 Eval 的站点、目录或固定数量语义 |
 
 前两条是研究问题「端点差异能否被完全挡在主循环之外」的机械判据。
 判据要区分**注释、类型定义与真实依赖** —— 这些文件里到处在引用规则本身，
@@ -316,13 +338,13 @@ npm run verify:tools      # A 段机械跑这 14 条，别手工 grep（表在 a
 |---|---|
 | 跨进程 resume 与 DeepSeek 对照端点的**真实端点实跑**（要花钱） | 统一评测阶段（决 4） |
 | S13 三场景由脚本化模型驱动，证据等级是 **smoke** | 同上，换真实端点跑一遍 |
-| `fetch_url` 二进制正文取不回（Blob 只吃文本、工具拿不到 blob 句柄） | 需先扩 Port 与执行上下文 |
+| 二进制 Resource 不做文本扫描，按不透明本地字节保存 | 事件明确记录 `OPAQUE_BINARY_NOT_TEXT_SCANNED`；只允许批准后原样物化 |
 | 基于进展的「还活着」判定（进展是批结算时才排空的） | 需先把工具执行改成 generator |
 | `requiredCapabilities` 逐工具零消费 | bugfix 阶段接授权层，或删掉 |
 | **在界面上用真实端点跑完一个多轮任务**（要花钱；当前 D 段由脚本化模型驱动，证据等级 smoke） | 统一评测阶段 |
 | Web 入口同时只允许一个前台 Run（接管/提问通道不带 runId） | 需先扩 Runtime 侧接口，等真实并发场景 |
 | MCP 仅支持本地 stdio；resources/prompts/OAuth 与远程传输未实现 | 出现真实服务器需求时扩协议面 |
-| MCP image/resource 块不能进入当前字符串结果通道 | 需先扩工具结果与 Blob/Artifact 字节通道 |
+| MCP resource link 只保留链接元数据，不主动拉取链接目标 | 出现需要递归获取的真实服务器需求时再扩协议面 |
 | MCP 登录态、cwd 与磁盘残留位于 transcript/workspace 边界之外 | 保持显式提示；需要会话身份与清理需求时再建机制 |
 | Eval Inspector 独立视图（Trace Inspector 已做） | 评测阶段有多份报告要横向比时 |
 | Session 与配置管理（无 Session 概念，`SESSION_MESSAGE` 至今零产出点） | 有真实多轮会话需求时 |

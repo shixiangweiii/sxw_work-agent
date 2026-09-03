@@ -27,7 +27,7 @@ import type {
   TokenCount,
   ToolSnapshot,
 } from "@workagent/harness-runtime";
-import { makeError } from "@workagent/harness-runtime";
+import { makeError, renderToolResultForModel } from "@workagent/harness-runtime";
 import { readAnthropicErrorFacts, type AnthropicErrorFacts } from "./error-facts.js";
 
 export interface AnthropicProtocolDeps {
@@ -579,7 +579,7 @@ function toBlock(c: NonNullable<ContextItem["content"]>): unknown | null {
       return {
         type: "tool_result",
         tool_use_id: c.toolCallId,
-        content: c.content,
+        content: renderToolResultForModel(c.content, c.resourceRefs),
         is_error: c.isError,
       };
   }
@@ -609,7 +609,9 @@ function estimateTokens(frame: ContextFrame): number {
     if (!c) continue;
     if (c.type === "text" || c.type === "reasoning") chars += c.text.length;
     else if (c.type === "tool_call") chars += c.name.length + JSON.stringify(c.input).length;
-    else if (c.type === "tool_result") chars += c.content.length;
+    else if (c.type === "tool_result") {
+      chars += renderToolResultForModel(c.content, c.resourceRefs).length;
+    }
   }
   // 中英混排的粗略系数。标记为 ESTIMATED，调用方据此放宽阈值。
   return Math.ceil(chars / 2.5) + frame.fixedOverheadTokens;

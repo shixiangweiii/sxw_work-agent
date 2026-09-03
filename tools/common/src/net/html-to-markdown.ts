@@ -23,7 +23,7 @@
  *
  * 本仓工程基线原本是「运行期依赖只有 `@anthropic-ai/sdk` 和 `dotenv`」。
  * 破这条基线的理由是一次实测：Run `run_9610d44d3a62` 里 40311 字节 HTML
- * 被外置成 blob（approxTokens 16114），模型连调 **3 次 `read_blob`
+ * 被外置成大结果（approxTokens 16114），模型连调 **3 次分页读取**
  * 把它整个搬回上下文**（4363 → 20621 token）—— 外置在这条链路上净收益为零。
  *
  * 自己手写的替代方案要在没有 DOM 的 Node 里解析任意 HTML，

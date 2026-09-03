@@ -1310,6 +1310,7 @@ function toUiArtifact(r: {
   path?: string;
   contentHash: string;
   sizeBytes: number;
+  sourceResourceRef?: string;
   verified?: boolean;
   verifyDetail?: string;
   createdAt: number;
@@ -1323,6 +1324,7 @@ function toUiArtifact(r: {
     ...(r.path ? { path: r.path } : {}),
     contentHash: r.contentHash,
     sizeBytes: r.sizeBytes,
+    ...(r.sourceResourceRef ? { sourceResourceRef: r.sourceResourceRef } : {}),
     // 【定】undefined 原样透传。「没验过」与「验过没通过」不是一回事，
     // `?? false` 会把前者变成后者。
     ...(r.verified !== undefined ? { verified: r.verified } : {}),

@@ -57,6 +57,7 @@ import {
   isInsideWorkspace,
   type HandoffChannel,
   type QuestionChannel,
+  type FetchTransport,
 } from "@workagent/tools-common";
 import type { McpRuntime } from "@workagent/tools-mcp";
 import { CompositeToolHandler, CompositeVerifier } from "./composite.js";
@@ -66,7 +67,7 @@ import {
 } from "@workagent/testkit";
 import {
   SqliteArtifactStore,
-  SqliteBlobStore,
+  SqliteResourceStore,
   SqliteRunStore,
   SqliteTranscriptStore,
   openDb,
@@ -138,13 +139,13 @@ export function workspaceStorage(workspaceRoot: string): {
  * ```text
  * tools/common  场景工具  list_dir stat read_file search write_file edit_file
  *                         fetch_url now run_shell            ← 9（run_shell 见下）
- *               机制工具  read_blob request_handoff ask_user  ← 3
+ *               机制工具  read_resource materialize_resource
+ *                         request_handoff ask_user             ← 4
  * micro-cases   测量工具  append_log slow_write               ← 2
  * ```
  *
  * ⚠️ 【定】`run_shell` **必须列在这张表里**。它此前漏了，于是这段注释报的是
- * 13 个而实际装 14 个 —— 而这张表的全部用途就是让人一眼读出起步价
- * （14 × 180 ≈ 2520 token），少一个就少 180，偏差方向还是"看起来更省"。
+ * 默认共 15 个，固定开销约 15 × 180 ≈ 2700 token。
  * 阶段 3.5 加它的时候只改了 `tools/common/src/index.ts` 的那份清单。
  *
  * ⚠️ 【定】`run_shell` 只在 `isSandboxAvailable()` 为真时进工具面
@@ -745,6 +746,8 @@ export interface ComposeOptions {
    * 不传通道时报明确装配错误是刻意的差别：没人接管是失败，没人回答不是。
    */
   question?: QuestionChannel;
+  /** Eval 的密封 HTTP 传输注入；生产入口不设置。 */
+  fetchTransport?: FetchTransport;
   /**
    * 外部 MCP 服务器带来的工具面（`@workagent/tools-mcp`）。
    *
@@ -757,7 +760,7 @@ export interface ComposeOptions {
    *      §18.2 三条恢复分支读的是冻结的那一份，中途长出新工具会让
    *      同一条 transcript 在 resume 时走进另一条分支，而盘上看不出来；
    *   ② `compose()` 保持同步。改成 async 会波及 main.ts / run-host.ts /
-   *      16 条 verify 脚本 / eval，而那些地方一件正事都不多干。
+   *      17 条 verify 脚本 / eval，而那些地方一件正事都不多干。
    *
    * 不传 = 没有 MCP，工具面就是 `DEFAULT_TOOLS`。
    */
@@ -948,7 +951,7 @@ export function compose(opts: ComposeOptions): Composed {
   const transcript = new SqliteTranscriptStore(db);
   const runStore = new SqliteRunStore(db);
   // 阶段 3：大结果外置与产物登记（§11.4 / §17）。同一个库，同一条 SQL 路径。
-  const blobs = new SqliteBlobStore(db);
+  const resources = new SqliteResourceStore(db);
   const artifacts = new SqliteArtifactStore(db);
   const clock = new SystemClock();
   const ids = new RandomIdGenerator();
@@ -990,9 +993,10 @@ export function compose(opts: ComposeOptions): Composed {
     tools:
       opts.portOverrides?.tools ??
       new CompositeToolHandler([
-        // blobs 注入给 read_blob（S6.5）—— 外置与取回必须一起在场。
+        // ResourceStore 同时服务恢复读取、原样物化、结果外置与 Compact 索引。
         new CommonToolHandler({
-          blobs,
+          resources,
+          ...(opts.fetchTransport ? { fetchTransport: opts.fetchTransport } : {}),
           ...(opts.handoff ? { handoff: opts.handoff } : {}),
           ...(opts.question ? { question: opts.question } : {}),
         }),
@@ -1044,7 +1048,7 @@ export function compose(opts: ComposeOptions): Composed {
       new FileModelInvocationAuditStore(
         opts.modelAuditDir ?? workspaceStorage(opts.workspaceRoot).modelAuditDir,
       ),
-    blobs,
+    resources,
     artifacts,
     /**
      * 【定】检查器由**工具包**提供，生命周期与结算语义归 Runtime（§10.4）。
@@ -1191,7 +1195,7 @@ export const DEFAULT_SYSTEM_PROMPT = [
   "你是 WorkAgent 的执行体。你能读文件、找内容、改文件、取网页，并产出交付物。",
   "",
   "工作边界：",
-  "- 写操作（write_file / edit_file / append_log）必须落在 workspace 内，越界会被直接拒绝；",
+  "- 写操作（write_file / edit_file / append_log / materialize_resource）必须落在 workspace 内，越界会被直接拒绝；",
   "- 读操作（read_file / stat / search / list_dir）可以越出 workspace，路径可以是绝对路径；",
   "- 凭证类文件（.env*、.git/、.ssh/ 等）一律读不到，这是有意为之，不要绕道尝试；",
   "",
@@ -1203,9 +1207,11 @@ export const DEFAULT_SYSTEM_PROMPT = [
   "- 只改文件里的一小段 → edit_file，不要用 write_file 把整个文件重写一遍；",
   "- edit_file 的 old_string 必须唯一匹配；报「不唯一」时往前后多带几行，不要反复重试同一个短串；",
   "- 整份产出或新建文件 → write_file；往日志末尾追加一行 → append_log；",
-  "- 结果太大被外置成 ref 时 → 用 read_blob 按 ref 分页取回，不要重新执行那个工具；",
+  "- 结果太大被外置成 ref 时 → 用 read_resource 按 ref 分页取回，不要重新执行那个工具；",
+  "- 要保留外部结果原文或原始字节时 → 优先 ResourceRef → materialize_resource，不要让模型重写大段内容；",
+  "- 看到 Compact 恢复索引时 → 先用 read_resource 读取索引，再读取或物化其中的 ResourceRef；不要假定移出的内容仍在上下文；",
   // 阶段 3.5：默认转 Markdown 之后，绝大多数抓网页的场景不该再碰 raw。
-  // 实测里模型连调 3 次 read_blob 把 40311 字节 HTML 整个搬回上下文。
+  // 实测里模型曾连调 3 次分页读取，把 40311 字节 HTML 整个搬回上下文。
   "- fetch_url 抓 HTML 默认已经转成 Markdown（省掉九成标签）；只有要读 meta / 属性 / 内联脚本时才传 as=\"raw\"；",
   // 【定】「或查询」这三个字是实测补的：原文只写「操作」，于是「人去外部系统
   // **查一条数据**」这个场景在指引里根本不存在，模型把它归进了「查不到 → 如实说明」。

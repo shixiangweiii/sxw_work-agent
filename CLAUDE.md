@@ -859,10 +859,12 @@ npm run ui        # → http://127.0.0.1:<随机端口>/?t=<会话 Token>
 - **13 条验收脚本 115 条判据全绿**（**那是当时的数**；阶段 4 后是 14 条 / 163 条，见本文件开头），`tsc --noEmit` 干净
   （办公任务实跑 bugfix 批后 86 → 91；阶段 3.5 累计 +24：`verify:shell` 19、
   `verify:progress` +3、`verify:tools` +1、`verify:pairing` +1）
-- 新增 `tools/` 层，默认装配 **14 个工具**（9 场景 ＋ 3 机制 ＋ 2 测量）；固定开销起步价 ≈ 2520 token
+- 新增 `tools/` 层；当前默认装配 **15 个工具**（9 场景 ＋ 4 机制 ＋ 2 测量），固定开销起步价 ≈ 2700 token
   （`fixedOverheadTokens()` = 工具数 × 180。此前各处文档写的「11 个 / 1980」是同一处算术错误：
   8＋2＋2 = 12，收口批统一更正。阶段 3.5 加 `run_shell` ＋ `ask_user` 后是 9＋3＋2 = 14）
-- `BlobStorePort` ＋ 外置 ＋ `read_blob` 取回；`ArtifactStorePort` **重设计** ＋ Artifact 级 Verification
+- `ResourceStorePort` ＋ 文本/二进制 ResourceRef ＋ `read_resource` / `materialize_resource`；
+  Compact 通过持久化恢复索引保留被移出的工具结果，summary + kept 在单条 boundary
+  原子提交，旧索引形成恢复链；Artifact 记录创建来源但不追溯改写旧版本
 - Progress Guard（只做「在原地打转」检测）；人工接管全链路（`WAITING_FOR_INTERACTION` 的持久化 / resume / 等待扣除）
 - 边界 grep 全部守住 —— **编号 1…7、共 8 条规则**（6b 算第 6 条的同族；**那是当时的数**，阶段 4 扩到 11 条）。
   阶段 3 新增第 6 / 6b 条，阶段 3.5 新增第 7 条；6b 与 7 都做过判别力实测。
@@ -1344,6 +1346,7 @@ npm run verify:pairing             # 批内配对不变量能否守住（三条�
                                    #     且**没有一条落 UNSPECIFIED**（三向注入，两处接线各自独立承重）
 npm run verify:resume              # 消息级恢复够不够用；C 段判据已收紧到「产物与基线逐字一致」
 npm run verify:compact             # Compact 是否真的落地（R-6）＋ ★G 段：「最近两轮」是不是真的两轮
+                                   #   ＋ 恢复索引、Store 失败不提交、关闭并重开 SQLite 后仍可恢复
                                    #   （夹具每轮两条消息 —— 每轮一条的话有 bug 与没 bug 给同一个答案）
 npm run verify:persistence         # 跨进程恢复：真 kill -9 之后能不能只凭 SQLite 接上
 npm run verify:budget              # 预算八轴逐条撞墙 ＋ 墙钟拆分 ＋ 时间事实段级冻结
@@ -1378,6 +1381,8 @@ npm run verify:ui                  # ★阶段 4：边界判别力 ＋ 投影幂
                                    #     ＋ 输入框默认值与 budgetAxes 同源（readBudgetLimits）
 npm run verify:mcp                 # ★ADR-0011：通用 MCP 客户端。边界 12 判别力 ＋ 默认最保守档
                                    #   ＋ read/execute 两侧 ＋ array/嵌套 object 逐字送达 ＋ 分页
+npm run verify:resource            # Resource 文本/二进制往返、同内容独立 ref、批量 inline 上限、
+                                   #   不透明字节不进模型轨道、原样物化 hash 与 Artifact 来源
                                    #   ＋ isError 分流 ＋ image 块不假装 ＋ list_changed 必须被忽略
                                    #   ★二次评审收口：服务器原文不得进 safeMessage（走脱敏管道）
                                    #   ＋ 四种**开放 schema**（additionalProperties/patternProperties/
@@ -1455,7 +1460,7 @@ dashscope_api_key=...
 ```text
 while (true) {
   ⓪ 排空 Interject 队列
-  ① 编译 ContextFrame（外置 → Compact → 协议校验）
+  ① 编译 ContextFrame（Resource 外置 → 可恢复 Compact → 协议校验）
   ② 调模型（流式，delta 直接 yield）
   ③ 无 tool call → 结算 outcome，具名 Terminal 退出
   ④ 执行 ActionBatch（串行，每个 call 恰好一个 result）
@@ -1497,7 +1502,8 @@ Progress Guard 判定（U-3，无进展 → 具名 Terminal `NO_PROGRESS`），
 
 | 工具 | 包 | 性质 | 分支 |
 |---|---|---|---|
-| `list_dir` / `stat` / `read_file` / `search` / `now` / `fetch_url` / `read_blob` | tools/common | 只读、幂等 | 一：真的重新执行 |
+| `list_dir` / `stat` / `read_file` / `search` / `now` / `fetch_url` / `read_resource` | tools/common | 只读、幂等 | 一：真的重新执行 |
+| `materialize_resource` | tools/common | 幂等覆盖写；Resource 字节原样写入 workspace | 一 |
 | `write_file` | tools/common | **幂等**（覆盖写同样内容两次 == 一次） | 一 |
 | **`edit_file`** | tools/common | **真的非幂等** ＋ 相对操作（`requiresPreFingerprint: true`） | 二：**唯一天然落在分支二的场景工具** |
 | `request_handoff` / **`ask_user`** | tools/common | 只读、幂等；`waitsForHumanInteraction` | 一 |
@@ -1662,7 +1668,7 @@ packages/store-sqlite/       ★阶段 2。唯一允许 import node:sqlite 的�
   src/db.ts                  **一份当前 Schema ＋ 形状断言**，没有 migration
   src/transcript-store.ts    TranscriptStorePort 的 SQLite 实现（接口一字未改）
   src/run-repository.ts      RunStorePort：RunSpec / AgentSpecSnapshot / status
-  src/blob-store.ts          ★阶段 3。内容寻址；get 按行**且按字符**分页（见下）
+  src/resource-store.ts      文本/二进制内容寻址；文本按行**且按字符**分页，完整字节只供本地物化
   src/artifact-store.ts      ★阶段 3。版本链 / Tombstone / lineage / role
 packages/testkit/            fake-endpoint-profile、clock、id-generator、crash-harness（真 kill -9）
                              【定】只留有使用者的夹具 —— FakeClock / DeterministicIdGenerator /
@@ -1677,7 +1683,8 @@ tools/common/                ★阶段 3。Case 无关的通用能力面（@work
   src/fs/read-guard.ts       读黑名单（决 3 护栏 1，**必须同时覆盖 read_file 与 search**）
   src/net/                   fetch_url ＋ url-guard（私网拒绝，DNS 解析后判 ＋ 重定向终点再判）
                              ＋ html-to-markdown（★3.5，只做结构转换，见 ADR-0007）
-  src/mech/                  read_blob / request_handoff / ask_user（★3.5）—— 机制工具，声明义务不同
+  src/mech/                  read_resource / materialize_resource / request_handoff / ask_user
+                             —— 机制工具，声明义务不同
                              【定】request_handoff 与 ask_user 的 description 是**成对**的，
                              只改一边会让模型在两者之间随机选（ADR-0008）
   src/exec/                  ★阶段 3.5。run_shell（＋ ADR-0010 的 artifact_path 声明）
@@ -1702,7 +1709,7 @@ tools/mcp/                   ★ADR-0011。通用 MCP 客户端（@workagent/too
                              【定】成功时 execute 档记 APPLIED，不是 UNKNOWN ——
                              否则每次正常调用都 push RecoveryItem，降级信号变成永远亮的灯
 cases/micro-cases/           只剩 append_log 与 slow_write —— **测量工具**，不是能力
-apps/cli/                    Composition Root（compose.ts）＋ 终端入口 ＋ 14 条验收脚本 ＋ 一次性探针
+apps/cli/                    Composition Root（compose.ts）＋ 终端入口 ＋ 17 条验收脚本 ＋ 一次性探针
   src/composite.ts           ★阶段 3。工具包组合器。【定】必须路由 Verifier 的**三个**方法
   src/stdin-channel.ts       ★阶段 3。**单一** readline，按「谁在等」分派三种语义
   src/trace/file-sink.ts     事件流落 JSONL（header / event / footer 三种行）
@@ -1729,7 +1736,7 @@ apps/workagent-ui/public/    ★阶段 4。Layer 1。**没有 src/、没有构�
 > **那条 grep 反过来正好证明了 Composition Root 属于 app 层。**
 > 名字里带 `cli` 是历史不是设计，登记为欠账 S4-1。
 
-**`read_blob` 为什么要按字符分页**：被外置的是**工具结果**，而工具结果几乎都是
+**`read_resource` 为什么要按字符分页**：被外置的是**工具结果**，而工具结果几乎都是
 **一行 JSON** —— 一个 64KB 的 `read_file` 结果 `totalLines` 就是 1。只按行分页的话，
 模型请求 100 行会拿回整整 64KB，**刚外置掉的东西原样搬回上下文，外置等于白做**。
 所以还有一层字符预算，超长单行按字符切片并给 `nextLineOffset`。这仍然是分页，不是截断。

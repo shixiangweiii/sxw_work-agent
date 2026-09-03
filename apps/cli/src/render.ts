@@ -63,7 +63,12 @@ export function renderEvent(e: RunEvent): void {
       break;
 
     case "ContextCompacted":
-      console.log(`${tag("Compact", YELLOW)} 释放 ${e.payload.freedTokens} tokens：${e.payload.reason}`);
+      console.log(
+        `${tag("Compact", YELLOW)} 释放 ${e.payload.freedTokens} tokens；` +
+          `移出 ${e.payload.removedMessageCount} 条消息 / ${e.payload.removedToolResultCount} 条工具结果` +
+          (e.payload.recoveryIndexRef ? `；索引 ${e.payload.recoveryIndexRef}` : "") +
+          `：${e.payload.reason}`,
+      );
       break;
 
     case "ModelStreamDelta":
@@ -164,10 +169,34 @@ export function renderEvent(e: RunEvent): void {
       );
       break;
 
+    case "ToolResourceRefsExternalized":
+      console.log(
+        `${tag("ResourceRefs 外置")} ${e.payload.toolName} → ${e.payload.indexRef} ` +
+          `(${e.payload.resourceCount} refs / 外置前 ≈${e.payload.approxTokensBefore} tokens)`,
+      );
+      break;
+
+    case "ResourceStored":
+      console.log(
+        `${tag("Resource")} ${e.payload.toolName} → ${e.payload.ref} ` +
+          `${e.payload.kind}/${e.payload.mediaType} ${e.payload.sizeBytes}B ` +
+          `${DIM}${e.payload.redactionDisposition}${RESET}`,
+      );
+      break;
+
+    case "ResourcePersistenceFailed":
+      console.log(
+        `${tag("Resource 失败", RED)} ${e.payload.toolName}/${e.payload.label}：${e.payload.reason}`,
+      );
+      break;
+
     case "ArtifactRegistered":
       console.log(
         `${tag("产物登记")} ${e.payload.logicalId} v${e.payload.version} ` +
-          `${e.payload.role}/${e.payload.kind}`,
+          `${e.payload.role}/${e.payload.kind}` +
+          (e.payload.sourceResourceRef
+            ? ` ${DIM}来源 Resource：${e.payload.sourceResourceRef}${RESET}`
+            : ""),
       );
       break;
 

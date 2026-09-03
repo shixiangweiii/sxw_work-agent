@@ -45,6 +45,7 @@ interface Row {
   path: string | null;
   content_hash: string;
   size_bytes: number;
+  source_resource_ref: string | null;
   verified: number | null;
   verify_detail: string | null;
   created_at: number;
@@ -97,7 +98,7 @@ export class SqliteArtifactStore implements ArtifactStorePort {
        *           → §1.2 第 3 条「DELIVERABLE 检查失败判 FAILED」那条
        *           **强制力被静默降档**，而盘上看不出来。
        *
-       * 「内容相同」是 blob 层的事，「这是谁的、什么角色的产物」是 Artifact
+       * 「内容相同」是 Resource 内容层的事，「这是谁的、什么角色的产物」是 Artifact
        * 层的 provenance —— 两件事不能用一个 hash 合并掉。
        * 判据在 `verify:artifact` I 段，两条各做过注入实测。
        * ══════════════════════════════════════════════════════════════════
@@ -108,6 +109,9 @@ export class SqliteArtifactStore implements ArtifactStorePort {
         latest.run_id === String(input.runId) &&
         latest.role === input.role
       ) {
+        // sourceResourceRef 是这个内容版本**创建时**的来源，不追溯性改写。
+        // 当前这次登记的来源由 ArtifactRegistered 事件记录；改旧行会让历史事件
+        // 与数据库分叉，并把 write_file 创建的版本伪装成 Resource 产物。
         return toRecord(latest);
       }
 
@@ -128,8 +132,8 @@ export class SqliteArtifactStore implements ArtifactStorePort {
         .prepare(
           `INSERT INTO artifacts
              (artifact_id, logical_id, version, run_id, role, kind, path,
-              content_hash, size_bytes, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              content_hash, size_bytes, source_resource_ref, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           artifactId,
@@ -141,6 +145,7 @@ export class SqliteArtifactStore implements ArtifactStorePort {
           input.path ?? null,
           hash,
           size,
+          input.sourceResourceRef ?? null,
           now,
         );
 
@@ -183,6 +188,9 @@ function toRecord(r: Row): ArtifactRecord {
     ...(r.path === null ? {} : { path: r.path }),
     contentHash: r.content_hash,
     sizeBytes: r.size_bytes,
+    ...(r.source_resource_ref === null
+      ? {}
+      : { sourceResourceRef: r.source_resource_ref }),
     // 【定】NULL → undefined，不要变成 false。
     // 「还没验过」与「验过没通过」在结算时的含义完全不同。
     ...(r.verified === null ? {} : { verified: r.verified === 1 }),

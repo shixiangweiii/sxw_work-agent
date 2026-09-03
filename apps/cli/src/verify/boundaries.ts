@@ -53,7 +53,7 @@ export interface Boundary {
 const lit = (...parts: string[]): string => parts.join("");
 
 /**
- * 边界表：**编号到 13，条目 14 条** —— 6b 按惯例算作第 6 条的同族。
+ * 边界表：编号继续单调增长；6b 按惯例算作第 6 条的同族。
  *
  * 阶段 3 把第 4 条推广、新增第 6 / 6b 条；阶段 3.5 新增第 7 条；
  * 阶段 4 新增第 8 / 9 / 10 条（Layer 1 与 Layer 2 的边界）；
@@ -282,6 +282,17 @@ export const BOUNDARIES: Boundary[] = [
     desc: "★界面高度不得由视口减写死常数算出（顶栏一换行就失效）",
     pattern: "calc\\(100vh *-",
     paths: ["apps/workagent-ui"],
+    allowed: [],
+  },
+  {
+    /**
+     * Resource 管道必须保持 Case 无关。这里扫描的是最容易被一次评测反向写进
+     * 生产实现的夹具词；规则本身只住在验收层，不给生产模块发白名单。
+     */
+    id: "14",
+    desc: "Resource / Context 生产模块不得含资源归档 Eval 夹具语义",
+    pattern: "hugozhu|博客文章|images/|正文选择器|固定(文章)?数量",
+    paths: ["packages/harness-runtime/src", "tools/common/src"],
     allowed: [],
   },
 ];

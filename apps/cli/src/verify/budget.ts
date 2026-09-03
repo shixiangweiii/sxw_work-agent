@@ -673,6 +673,21 @@ async function main(): Promise<void> {
         ? "撞墙路径不再调用模型补总结；墙、已完成 Action、交付物、未完成项、未知副作用与既有摘要都由同一组事实确定生成"
         : "确定性交接遗漏了事实，或相同输入产生了不同 outcome",
     );
+
+    const emptyHandoff = settleWallOutcome("BUDGET_EXHAUSTED", {
+      verifications: [],
+      recoveryItems: [],
+      artifactChecks: [],
+    }).summary ?? "";
+    const conservative =
+      emptyHandoff.includes("未登记到结构化未完成项或未知副作用") &&
+      emptyHandoff.includes("不能据此证明自然语言目标已全部完成") &&
+      !emptyHandoff.includes("没有额外的未完成项");
+    fact("事实表为空时的 handoff", emptyHandoff.replaceAll("\n", " ｜ "));
+    verdict(
+      conservative,
+      "撞硬限制且事实表为空时只陈述“未登记到”，并明确 Runtime 无任务级完成契约，不再反推目标已经完成",
+    );
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

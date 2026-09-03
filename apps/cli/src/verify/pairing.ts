@@ -493,6 +493,7 @@ async function main(): Promise<void> {
         kind: "MESSAGE",
         message: {
           role: "user",
+          origin: "TOOL",
           turn: 99,
           content: [{ type: "tool_result", toolCallId: "tc_does_not_exist", content: "{}", isError: false }],
         },

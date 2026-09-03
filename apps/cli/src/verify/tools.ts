@@ -306,7 +306,38 @@ async function main(): Promise<void> {
       : `边界判别力失败：抓到=${canaryCaught} 清理=${canaryCleaned}`,
   );
 
-  section("A3. 现行协作文档不引用已删除文件");
+  section("A3. Resource / Context 反过拟合边界的判别力实测");
+  const resourceBoundary = BOUNDARIES.find((boundary) => boundary.id === "14");
+  const resourceCanary = join(
+    REPO_ROOT,
+    "packages/harness-runtime/src/__resource_case_canary.ts",
+  );
+  let resourceCanaryHits: string[] = [];
+  try {
+    writeFileSync(
+      resourceCanary,
+      'export const forbiddenFixtureSite = "hugozhu";\n',
+      "utf8",
+    );
+    resourceCanaryHits = resourceBoundary ? grepBoundary(resourceBoundary) : [];
+  } finally {
+    try {
+      unlinkSync(resourceCanary);
+    } catch {
+      /* 已经不在了 */
+    }
+  }
+  const resourceCanaryCaught = resourceCanaryHits.some((hit) =>
+    hit.includes("__resource_case_canary.ts"),
+  );
+  const resourceCanaryCleaned = !existsSync(resourceCanary);
+  fact("注入 Eval 站点词后边界 14", resourceCanaryHits[0] ?? "（没有命中）");
+  verdict(
+    resourceBoundary !== undefined && resourceCanaryCaught && resourceCanaryCleaned,
+    "向 Runtime 注入资源归档 Eval 夹具词会让边界 14 当场翻红，且临时文件已清理",
+  );
+
+  section("A4. 现行协作文档不引用已删除文件");
   const brokenGuideLinks = CURRENT_GUIDES.flatMap((file) =>
     brokenLocalMarkdownLinks(file, readFileSync(join(REPO_ROOT, file), "utf8")),
   );

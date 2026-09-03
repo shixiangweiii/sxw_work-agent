@@ -17,10 +17,10 @@ import type {
 } from "../types/context.js";
 import type { ContextMessage } from "../types/transcript.js";
 import type { ExecutionPrivilege } from "../types/run.js";
-import type { ModelProtocolPort } from "../ports/index.js";
-import type { IdGeneratorPort } from "../ports/index.js";
+import type { IdGeneratorPort, ModelProtocolPort, ResourceStorePort } from "../ports/index.js";
 import { asId, digest, type ContextFrameId, type ModelInvocationId, type RunId } from "../types/ids.js";
 import { compactMessages } from "./compact.js";
+import { renderToolResultForModel } from "../types/resource.js";
 
 export interface CompileDeps {
   protocol: ModelProtocolPort;
@@ -33,6 +33,8 @@ export interface CompileDeps {
    * 【定】阈值判断必须先扣除它，否则「还剩多少上下文可用」算错。
    */
   fixedOverheadTokens: number;
+  /** Compact 被移出的结果及恢复索引必须先落这里，成功后才能提交 boundary。 */
+  resources?: ResourceStorePort;
   /**
    * IANA 时区名，来自 AgentSpec。与 `now` 一起构成注入给模型的受信时间事实。
    *
@@ -99,6 +101,7 @@ export async function compileFrame(
    * 又从原始 state.messages 开始 —— 压缩事件照发，历史照样越滚越长。
    */
   let compacted: { messages: ContextMessage[]; summary?: ContextMessage; kept: ContextMessage[] } | undefined;
+  let stagedCompactionRefs: string[] = [];
 
   // ① 首次成帧
   let frame = buildFrame(working, deps);
@@ -107,6 +110,7 @@ export async function compileFrame(
 
   // ② soft limit 之下：Context Runtime 自治压缩
   if (count.tokens > deps.policy.softInputLimitTokens) {
+    const beforeCompactionTokens = count.tokens;
     /**
      * 【定】阈值与估算必须是同一个单位。
      *
@@ -130,12 +134,73 @@ export async function compileFrame(
       now: deps.now,
     });
     if (result.freedTokens > 0) {
-      working = result.messages;
-      compacted = { messages: result.messages, summary: result.summary, kept: result.kept };
-      compactionApplied.push(result.record);
-      frame = buildFrame(working, deps);
-      count = await deps.protocol.countTokens(frame);
+      let summary: ContextMessage | undefined;
+      let record = result.record;
+      if (result.dropped.length > 0) {
+        try {
+          const index = await persistCompactionRecoveryIndex(result.dropped, deps.resources);
+          stagedCompactionRefs = index.createdRefs;
+          const removedToolResults = index.toolResultCount;
+          summary = {
+            role: "user",
+            origin: "RUNTIME",
+            turn: result.kept[0]?.turn ?? 0,
+            recoveryIndexRefs: [index.reference.ref],
+            content: [
+              {
+                type: "text",
+                text:
+                  `[已压缩] 整体移出了 ${result.dropped.length} 条较早消息，` +
+                  `其中 ${removedToolResults} 条工具结果可恢复；协议单元没有拆分。` +
+                  `恢复索引：${index.reference.ref}。先用 read_resource 读取索引，` +
+                  `再读取或物化其中的 ResourceRef；不要假定移出内容仍在当前上下文。` +
+                  `真实用户输入与最近两轮仍保留。`,
+              },
+            ],
+          };
+          record = {
+            ...record,
+            reason:
+              `持久化后提交 Compact：整体移出 ${result.dropped.length} 条消息、` +
+              `${removedToolResults} 条工具结果；恢复索引 ${index.reference.ref}`,
+            removedMessageCount: result.dropped.length,
+            removedToolResultCount: removedToolResults,
+            recoveryIndexRef: index.reference.ref,
+          };
+        } catch (err) {
+          return {
+            status: "CONTEXT_MATERIALIZATION_FAILED",
+            totalTokens: count.tokens,
+            irreducibleTokens: 0,
+            fixedOverheadTokens: deps.fixedOverheadTokens,
+            compactionApplied: [],
+            protocolError:
+              `CONTEXT_MATERIALIZATION_FAILED：Compact 恢复索引持久化失败，` +
+              `原上下文未替换、COMPACT_BOUNDARY 未提交。` +
+              `${String((err as Error)?.message ?? err).slice(0, 240)}`,
+          };
+        }
+      }
+      working = summary ? [summary, ...result.kept] : result.messages;
+      compacted = { messages: working, ...(summary ? { summary } : {}), kept: result.kept };
+      try {
+        frame = buildFrame(working, deps);
+        count = await deps.protocol.countTokens(frame);
+      } catch (err) {
+        const cleanup = await discardPreparedCompaction(deps.resources, stagedCompactionRefs);
+        return contextMaterializationFailure(
+          deps,
+          count.tokens,
+          `Compact 新帧计数失败：${String((err as Error)?.message ?? err).slice(0, 180)}` +
+            (cleanup ? `；临时 Resource 清理也失败：${cleanup}` : ""),
+        );
+      }
       frame.totalTokens = count.tokens;
+      compactionApplied.push({
+        ...record,
+        // 含摘要与 ResourceRef 的真实新帧已经计数；不能拿“只算 kept”的估算冒充。
+        freedTokens: Math.max(0, beforeCompactionTokens - count.tokens),
+      });
     }
   }
 
@@ -169,24 +234,63 @@ export async function compileFrame(
    * 从来没有第二种处置 —— 一个自称存在的分支比一个缺失的分支更误导。
    */
   if (count.tokens > deps.policy.hardInputLimitTokens) {
+    const cleanup = await discardPreparedCompaction(deps.resources, stagedCompactionRefs);
+    if (cleanup) {
+      return contextMaterializationFailure(
+        deps,
+        count.tokens,
+        `Compact 后仍超过上下文硬限，且临时 Resource 清理失败：${cleanup}`,
+      );
+    }
     return {
       status: "COMPACTION_INSUFFICIENT",
       totalTokens: count.tokens,
       irreducibleTokens: irreducible,
       fixedOverheadTokens: deps.fixedOverheadTokens,
-      compactionApplied,
+      compactionApplied: [],
     };
   }
 
   // ④ 协议校验。失败不得发起模型调用（V05 §11.5 不变量 7）
-  const validation = deps.protocol.validateFrame(frame);
+  let validation;
+  try {
+    validation = deps.protocol.validateFrame(frame);
+  } catch (err) {
+    if (stagedCompactionRefs.length === 0) {
+      return {
+        status: "PROTOCOL_INVALID",
+        totalTokens: count.tokens,
+        irreducibleTokens: irreducible,
+        fixedOverheadTokens: deps.fixedOverheadTokens,
+        compactionApplied: [],
+        protocolError:
+          `ModelProtocolPort.validateFrame() 抛出异常：` +
+          String((err as Error)?.message ?? err).slice(0, 180),
+      };
+    }
+    const cleanup = await discardPreparedCompaction(deps.resources, stagedCompactionRefs);
+    return contextMaterializationFailure(
+      deps,
+      count.tokens,
+      `Context 协议校验抛出异常：${String((err as Error)?.message ?? err).slice(0, 180)}` +
+        (cleanup ? `；临时 Resource 清理也失败：${cleanup}` : ""),
+    );
+  }
   if (!validation.ok) {
+    const cleanup = await discardPreparedCompaction(deps.resources, stagedCompactionRefs);
+    if (cleanup) {
+      return contextMaterializationFailure(
+        deps,
+        count.tokens,
+        `Compact 新帧协议非法，且临时 Resource 清理失败：${cleanup}`,
+      );
+    }
     return {
       status: "PROTOCOL_INVALID",
       totalTokens: count.tokens,
       irreducibleTokens: irreducible,
       fixedOverheadTokens: deps.fixedOverheadTokens,
-      compactionApplied,
+      compactionApplied: [],
       protocolError: validation.violations.join("；"),
     };
   }
@@ -201,6 +305,111 @@ export async function compileFrame(
     compactedMessages: compacted?.messages,
     compactSummary: compacted?.summary,
     compactKept: compacted?.kept,
+  };
+}
+
+async function persistCompactionRecoveryIndex(
+  dropped: ContextMessage[],
+  resources: ResourceStorePort | undefined,
+): Promise<{
+  reference: Awaited<ReturnType<ResourceStorePort["put"]>>;
+  toolResultCount: number;
+  createdRefs: string[];
+}> {
+  if (!resources) throw new Error("ResourceStorePort 未装配");
+  const createdRefs: string[] = [];
+  const toolNames = new Map<string, string>();
+  for (const message of dropped) {
+    for (const content of message.content) {
+      if (content.type === "tool_call") toolNames.set(content.toolCallId, content.name);
+    }
+  }
+
+  const entries: Array<{
+    turn: number;
+    toolCallId: string;
+    toolName: string;
+    resultRef: string;
+    resourceRefs: NonNullable<Extract<ContextMessage["content"][number], { type: "tool_result" }>["resourceRefs"]>;
+  }> = [];
+  try {
+    for (const message of dropped) {
+      for (const content of message.content) {
+        if (content.type !== "tool_result") continue;
+        const resultRef = await resources.put({
+          kind: "text",
+          mediaType: "application/vnd.workagent.tool-result+text; charset=utf-8",
+          label: `Compact 工具结果 ${content.toolCallId}`,
+          content: content.content,
+          redactionDisposition: "TEXT_REDACTED",
+        });
+        createdRefs.push(resultRef.ref);
+        entries.push({
+          turn: message.turn,
+          toolCallId: content.toolCallId,
+          toolName: toolNames.get(content.toolCallId) ?? "(unknown)",
+          resultRef: resultRef.ref,
+          resourceRefs: content.resourceRefs ?? [],
+        });
+      }
+    }
+
+    const indexText = JSON.stringify({
+      type: "COMPACT_RECOVERY_INDEX",
+      version: 1,
+      removedMessageCount: dropped.length,
+      toolResultCount: entries.length,
+      protocolUnitsMovedWhole: true,
+      priorRecoveryIndexRefs: [
+        ...new Set(dropped.flatMap((message) => message.recoveryIndexRefs ?? [])),
+      ],
+      entries,
+    });
+    const reference = await resources.put({
+      kind: "text",
+      mediaType: "application/vnd.workagent.compact-index+json; charset=utf-8",
+      label: "Compact 恢复索引",
+      suggestedFilename: "compact-recovery-index.json",
+      content: indexText,
+      redactionDisposition: "TEXT_REDACTED",
+    });
+    createdRefs.push(reference.ref);
+    return { reference, toolResultCount: entries.length, createdRefs };
+  } catch (err) {
+    const cleanup = await discardPreparedCompaction(resources, createdRefs);
+    throw new Error(
+      `${String((err as Error)?.message ?? err)}` +
+        (cleanup ? `；临时 Resource 清理失败：${cleanup}` : ""),
+    );
+  }
+}
+
+async function discardPreparedCompaction(
+  resources: ResourceStorePort | undefined,
+  refs: string[],
+): Promise<string | undefined> {
+  if (!resources || refs.length === 0) return undefined;
+  try {
+    await resources.discardUncommitted(refs);
+    return undefined;
+  } catch (err) {
+    return String((err as Error)?.message ?? err).slice(0, 200);
+  }
+}
+
+function contextMaterializationFailure(
+  deps: CompileDeps,
+  totalTokens: number,
+  detail: string,
+): ContextFrameOutcome {
+  return {
+    status: "CONTEXT_MATERIALIZATION_FAILED",
+    totalTokens,
+    irreducibleTokens: 0,
+    fixedOverheadTokens: deps.fixedOverheadTokens,
+    compactionApplied: [],
+    protocolError:
+      `CONTEXT_MATERIALIZATION_FAILED：原上下文未替换、COMPACT_BOUNDARY 未提交。${detail}`,
   };
 }
 
@@ -296,8 +505,8 @@ function buildFrame(messages: ContextMessage[], deps: CompileDeps): ContextFrame
     for (const c of m.content) {
       const partial = {
         kind: kindOf(m.role, c.type),
-        source: { kind: sourceOf(m.role, c.type) },
-        trust: trustOf(m.role, c.type),
+        source: { kind: sourceOf(m.origin) },
+        trust: trustOf(m.origin),
         // 占位，下面立刻由端点声明覆盖
         protocolRole: "ORDINARY" as ContextItem["protocolRole"],
         content: c,
@@ -409,7 +618,7 @@ function renderText(c: ContextItem["content"]): string {
     case "tool_call":
       return `${c.name}(${JSON.stringify(c.input)})`;
     case "tool_result":
-      return c.content;
+      return renderToolResultForModel(c.content, c.resourceRefs);
   }
 }
 
@@ -420,19 +629,34 @@ function kindOf(role: string, type: string): ContextItem["kind"] {
   return role === "assistant" ? "ASSISTANT_MESSAGE" : "USER_MESSAGE";
 }
 
-function sourceOf(role: string, type: string): ContextItem["source"]["kind"] {
-  if (type === "tool_result") return "TOOL";
-  return role === "assistant" ? "RUN" : "USER";
+function sourceOf(origin: ContextMessage["origin"]): ContextItem["source"]["kind"] {
+  switch (origin) {
+    case "USER":
+      return "USER";
+    case "MODEL":
+      return "RUN";
+    case "TOOL":
+      return "TOOL";
+    case "RUNTIME":
+      return "SYSTEM";
+  }
 }
 
 /**
  * 【定】ToolResult 默认 EXTERNAL_UNTRUSTED（V05 §22.4）。
  * 不可信内容中的文字不能创建 Grant、改变 Policy 或自动批准 Action。
  */
-function trustOf(role: string, type: string): ContextTrust {
-  if (type === "tool_result") return "EXTERNAL_UNTRUSTED";
-  if (role === "assistant") return "MODEL_GENERATED";
-  return "USER_PROVIDED";
+function trustOf(origin: ContextMessage["origin"]): ContextTrust {
+  switch (origin) {
+    case "USER":
+      return "USER_PROVIDED";
+    case "MODEL":
+      return "MODEL_GENERATED";
+    case "TOOL":
+      return "EXTERNAL_UNTRUSTED";
+    case "RUNTIME":
+      return "SYSTEM_TRUSTED";
+  }
 }
 
 function summarize(items: ContextItem[]): TrustSummary {
@@ -484,7 +708,7 @@ function computeIrreducible(
       /**
        * 用户输入（R-3 的第一层）。
        *
-       * Compact 明确永久保留「有 text 块的 user 消息」，也就是说它们
+       * Compact 明确永久保留 `origin === USER` 的真实用户输入，也就是说它们
        * **压不掉**。而修复前 irreducible 不把它们算进去，于是一个超长
        * 用户输入会得到「irreducible 很小 → 还能压 → 照常发出」的判定，
        * 而实际上一条都压不动。超硬限的帧就这样被放行了。
@@ -493,7 +717,7 @@ function computeIrreducible(
        * 归成 `USER_MESSAGE`，那个合取项从写下来就没命中过。
        * 一个恒假的判定读起来像是一条保护。
        */
-      item.kind === "USER_MESSAGE"
+      (item.kind === "USER_MESSAGE" && item.source.kind === "USER")
     ) {
       sum += item.estimatedTokens;
     }

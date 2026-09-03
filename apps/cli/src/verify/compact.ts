@@ -37,12 +37,19 @@
 import {
   CollectingTraceSink,
   DEFAULT_CONTEXT_POLICY,
+  compileFrame,
   compactMessages,
   findOrphanResults,
   findUnpairedToolUses,
   type ContextMessage,
   type TranscriptEntry,
 } from "@workagent/harness-runtime";
+import { join } from "node:path";
+import {
+  SqliteResourceStore,
+  SqliteTranscriptStore,
+  openDb,
+} from "@workagent/store-sqlite";
 import { listDirSnapshot } from "@workagent/tools-common";
 import { compose } from "../compose.js";
 import {
@@ -258,9 +265,7 @@ async function main(): Promise<void> {
     fact("逐轮帧内条目数", itemCounts.join(" → "));
 
     const freed = compactedEvents.map((e) => e.payload.freedTokens);
-    const droppedCounts = compactedEvents.map(
-      (e) => Number(/丢弃 (\d+) 条/.exec(e.payload.reason)?.[1] ?? 0),
-    );
+    const droppedCounts = compactedEvents.map((e) => e.payload.removedMessageCount);
     fact("逐次压缩 freedTokens", freed.join(" → "));
     fact("逐次压缩丢弃条数", droppedCounts.join(" → "));
 
@@ -286,13 +291,73 @@ async function main(): Promise<void> {
     fact("transcript 条目数", entries.length);
     fact("COMPACT_BOUNDARY 条数", boundaries.length);
     fact("boundary 带摘要", boundaries.every((b) => !!b.compactSummary) ? "是" : "否");
+    fact("boundary 原子携带 kept snapshot", boundaries.every((b) => !!b.compactKept) ? "是" : "否");
 
-    const boundaryOk = boundaries.length > 0 && boundaries.every((b) => !!b.compactSummary);
+    const boundaryOk =
+      boundaries.length > 0 &&
+      boundaries.every((b) => !!b.compactSummary && !!b.compactKept);
     verdict(
       boundaryOk,
       boundaryOk
-        ? "boundary 已落盘且带摘要 —— rebuildFromEntries 的「从最后一个 boundary 之后重建」语义这才被真正激活"
-        : "没有写 COMPACT_BOUNDARY，重建语义仍然是死代码",
+        ? "boundary 以单条 payload 原子携带摘要与 kept snapshot，重建不会暴露半提交窗口"
+        : "COMPACT_BOUNDARY 缺摘要或 kept snapshot，崩溃恢复仍可能丢上下文",
+    );
+
+    // ── D2. Compact 移出的工具结果能否通过恢复索引重新读回
+    section("D2. Compact 恢复索引可读，旧结果没有不可逆消失");
+    const indexed = compactedEvents.filter((event) => event.payload.recoveryIndexRef);
+    const recovered: string[] = [];
+    let indexShapeOk = indexed.length > 0;
+    for (const event of indexed) {
+      const indexPage = await composed.ports.resources.getTextPage(
+        event.payload.recoveryIndexRef!,
+      );
+      if (!indexPage) {
+        indexShapeOk = false;
+        continue;
+      }
+      const index = JSON.parse(indexPage.content) as {
+        protocolUnitsMovedWhole?: boolean;
+        entries?: Array<{
+          turn?: number;
+          toolCallId?: string;
+          toolName?: string;
+          resultRef?: string;
+          resourceRefs?: unknown[];
+        }>;
+      };
+      if (index.protocolUnitsMovedWhole !== true || !Array.isArray(index.entries)) {
+        indexShapeOk = false;
+        continue;
+      }
+      for (const entry of index.entries) {
+        if (
+          typeof entry.turn !== "number" ||
+          typeof entry.toolCallId !== "string" ||
+          typeof entry.toolName !== "string" ||
+          typeof entry.resultRef !== "string" ||
+          !Array.isArray(entry.resourceRefs)
+        ) {
+          indexShapeOk = false;
+          continue;
+        }
+        const page = await composed.ports.resources.getTextPage(entry.resultRef);
+        if (!page) indexShapeOk = false;
+        else recovered.push(page.content);
+      }
+    }
+    const lastRequest = JSON.stringify(model.requestBodies.at(-1) ?? {});
+    const oldestRemoved = !lastRequest.includes('"id":"tc_0"');
+    const indexVisible = indexed.some((event) =>
+      lastRequest.includes(event.payload.recoveryIndexRef!),
+    );
+    fact("带恢复索引的 Compact 次数", indexed.length);
+    fact("从索引恢复的工具结果数", recovered.length);
+    fact("当前请求不再内联最旧协议单元", oldestRemoved);
+    fact("当前请求包含恢复索引 ref", indexVisible);
+    verdict(
+      indexShapeOk && recovered.length > 0 && oldestRemoved && indexVisible,
+      "Compact 只把索引留在当前请求；索引含 turn/toolCallId/toolName/resultRef/resourceRefs，且原工具结果可分页恢复",
     );
 
     // ── E. 从 transcript 重建出来的，是不是压缩后的那份
@@ -391,6 +456,7 @@ async function main(): Promise<void> {
      */
     const mkMsg = (role: "user" | "assistant", turn: number, text: string): ContextMessage => ({
       role,
+      origin: role === "user" ? "USER" : "MODEL",
       turn,
       content: [{ type: "text", text }],
     });
@@ -422,6 +488,224 @@ async function main(): Promise<void> {
         : `保护窗口不对：kept 里是 [${keptTurns.join(", ")}]，期望含 3 与 4、不含 2。` +
           `只剩 4 说明轮号没有去重（那正是这条判据要抓的形态）`,
     );
+
+    section("H. 恢复索引持久化失败不得提交 Compact");
+    const realResources = composed.ports.resources;
+    let stagedRef = "";
+    let putCount = 0;
+    const partialFailureHistory: ContextMessage[] = [
+      mkMsg("user", 0, "部分写入回滚夹具"),
+      {
+        role: "assistant",
+        origin: "MODEL",
+        turn: 1,
+        content: [
+          { type: "tool_call", toolCallId: "partial_call", name: "fixture_tool", input: {} },
+        ],
+      },
+      {
+        role: "user",
+        origin: "TOOL",
+        turn: 1,
+        content: [
+          { type: "tool_result", toolCallId: "partial_call", content: "partial", isError: false },
+        ],
+      },
+      mkMsg("assistant", 2, "最近第二轮"),
+      mkMsg("assistant", 3, "最近第一轮"),
+    ];
+    const failed = await compileFrame(partialFailureHistory, {
+      protocol: composed.ports.protocol,
+      ids: composed.ports.ids,
+      resources: {
+        put: async (input) => {
+          putCount += 1;
+          if (putCount === 2) throw new Error("INJECTED_INDEX_STORE_FAILURE");
+          const reference = await realResources.put(input);
+          stagedRef = reference.ref;
+          return reference;
+        },
+        getMetadata: (ref) => realResources.getMetadata(ref),
+        getTextPage: (ref, opts) => realResources.getTextPage(ref, opts),
+        readForMaterialization: (ref) => realResources.readForMaterialization(ref),
+        discardUncommitted: (refs) => realResources.discardUncommitted(refs),
+      },
+      policy: {
+        ...POLICY,
+        softInputLimitTokens: 1,
+        compactTargetTokens: 1,
+      },
+      systemPrompt: FIXTURE_PROMPT,
+      fixedOverheadTokens: 0,
+      timezone: "Asia/Shanghai",
+      executionPrivilege: "SANDBOXED",
+      runId: runId as never,
+      now: Date.now(),
+      timeFactAt: Date.now(),
+    });
+    fact("故障状态", failed.status);
+    fact("已提交 compaction record", failed.compactionApplied.length);
+    const stagedWasRolledBack =
+      stagedRef.length > 0 && (await realResources.getMetadata(stagedRef)) === undefined;
+    fact("失败前已写入的临时 ref 已回滚", stagedWasRolledBack);
+    verdict(
+      failed.status === "CONTEXT_MATERIALIZATION_FAILED" &&
+        failed.compactionApplied.length === 0 &&
+        failed.compactedMessages === undefined &&
+        stagedWasRolledBack,
+      "ResourceStore 中途故障时具名失败、不产生 boundary 状态、不丢原上下文，并回滚已写入的临时 ref",
+    );
+
+    section("I. 进程重开后 Compact 索引与原工具结果仍可恢复");
+    const persistentPath = join(ws.root, "compact-resume.db");
+    const persistentDb = openDb({ path: persistentPath });
+    const persistentResources = new SqliteResourceStore(persistentDb);
+    const persistentTranscript = new SqliteTranscriptStore(persistentDb);
+    const persistentRunId = "run_compact_resume" as never;
+    const sentinel = "COMPACT_RECOVERY_SENTINEL_9f3b";
+    const pairedHistory: ContextMessage[] = [
+      mkMsg("user", 0, "恢复索引持久化夹具"),
+      {
+        role: "assistant",
+        origin: "MODEL",
+        turn: 1,
+        content: [
+          { type: "tool_call", toolCallId: "old_call", name: "fixture_tool", input: {} },
+        ],
+      },
+      {
+        role: "user",
+        origin: "TOOL",
+        turn: 1,
+        content: [
+          { type: "tool_result", toolCallId: "old_call", content: sentinel, isError: false },
+        ],
+      },
+      mkMsg("assistant", 2, "最近第二轮"),
+      mkMsg("assistant", 3, "最近第一轮"),
+    ];
+    const persisted = await compileFrame(pairedHistory, {
+      protocol: composed.ports.protocol,
+      ids: composed.ports.ids,
+      resources: persistentResources,
+      policy: { ...POLICY, softInputLimitTokens: 1, compactTargetTokens: 1 },
+      systemPrompt: FIXTURE_PROMPT,
+      fixedOverheadTokens: 0,
+      timezone: "Asia/Shanghai",
+      executionPrivilege: "SANDBOXED",
+      runId: persistentRunId,
+      now: Date.now(),
+      timeFactAt: Date.now(),
+    });
+    const persistedRef = persisted.compactionApplied[0]?.recoveryIndexRef;
+    if (persisted.compactSummary && persisted.compactKept) {
+      await persistentTranscript.append({
+        runId: persistentRunId,
+        kind: "COMPACT_BOUNDARY",
+        compactSummary: persisted.compactSummary,
+        compactKept: persisted.compactKept,
+        createdAt: Date.now(),
+      });
+    }
+    persistentDb.close();
+
+    const reopenedDb = openDb({ path: persistentPath });
+    const reopenedResources = new SqliteResourceStore(reopenedDb);
+    const reopenedTranscript = new SqliteTranscriptStore(reopenedDb);
+    const rebuiltAfterRestart = await reopenedTranscript.rebuildMessages(persistentRunId);
+    const reopenedEntries = await reopenedTranscript.readAll(persistentRunId);
+    const reopenedIndex = persistedRef
+      ? await reopenedResources.getTextPage(persistedRef)
+      : undefined;
+    let recoveredSentinel = false;
+    if (reopenedIndex) {
+      const index = JSON.parse(reopenedIndex.content) as {
+        entries?: Array<{ resultRef?: string }>;
+      };
+      for (const entry of index.entries ?? []) {
+        if (!entry.resultRef) continue;
+        const page = await reopenedResources.getTextPage(entry.resultRef);
+        if (page?.content === sentinel) recoveredSentinel = true;
+      }
+    }
+    const rebuiltHasIndex =
+      persistedRef !== undefined && JSON.stringify(rebuiltAfterRestart).includes(persistedRef);
+    const boundaryCarriesWholeSnapshot = reopenedEntries.some(
+      (entry) =>
+        entry.kind === "COMPACT_BOUNDARY" &&
+        entry.compactKept?.length === persisted.compactKept?.length,
+    );
+    fact("重开后的恢复索引", reopenedIndex ? persistedRef : "（读不到）");
+    fact("重建 Context 含索引 ref", rebuiltHasIndex);
+    fact("原工具结果哨兵可恢复", recoveredSentinel);
+    fact("boundary 原子携带完整 kept", boundaryCarriesWholeSnapshot);
+    verdict(
+      reopenedIndex !== undefined &&
+        rebuiltHasIndex &&
+        recoveredSentinel &&
+        boundaryCarriesWholeSnapshot,
+      "单条 boundary 原子携带摘要与完整 kept；连接关闭并重开后索引和原工具结果仍可恢复",
+    );
+
+    section("J. Runtime Compact 摘要可再次压缩，旧恢复索引形成链");
+    const priorIndex = await reopenedResources.put({
+      kind: "text",
+      mediaType: "application/vnd.workagent.compact-index+json; charset=utf-8",
+      label: "prior compact index fixture",
+      content: JSON.stringify({ type: "COMPACT_RECOVERY_INDEX", version: 1, entries: [] }),
+      redactionDisposition: "TEXT_REDACTED",
+    });
+    const oldRuntimeSummary: ContextMessage = {
+      role: "user",
+      origin: "RUNTIME",
+      turn: 1,
+      recoveryIndexRefs: [priorIndex.ref],
+      content: [{ type: "text", text: "旧 Compact 摘要".repeat(30) }],
+    };
+    const chained = await compileFrame(
+      [
+        mkMsg("user", 0, "真实用户目标"),
+        oldRuntimeSummary,
+        mkMsg("assistant", 2, "最近第二轮"),
+        mkMsg("assistant", 3, "最近第一轮"),
+      ],
+      {
+        protocol: composed.ports.protocol,
+        ids: composed.ports.ids,
+        resources: reopenedResources,
+        policy: { ...POLICY, softInputLimitTokens: 1, compactTargetTokens: 1 },
+        systemPrompt: FIXTURE_PROMPT,
+        fixedOverheadTokens: 0,
+        timezone: "Asia/Shanghai",
+        executionPrivilege: "SANDBOXED",
+        runId: persistentRunId,
+        now: Date.now(),
+        timeFactAt: Date.now(),
+      },
+    );
+    const chainedRef = chained.compactionApplied[0]?.recoveryIndexRef;
+    const chainedPage = chainedRef
+      ? await reopenedResources.getTextPage(chainedRef)
+      : undefined;
+    const chainedIndex = chainedPage
+      ? (JSON.parse(chainedPage.content) as { priorRecoveryIndexRefs?: string[] })
+      : undefined;
+    const oldSummaryRemoved =
+      chained.compactKept?.every((message) => message !== oldRuntimeSummary) === true;
+    const trueUserKept =
+      chained.compactKept?.some(
+        (message) => message.origin === "USER" && message.turn === 0,
+      ) === true;
+    fact("旧 Runtime 摘要已移出", oldSummaryRemoved);
+    fact("真实用户目标仍保留", trueUserKept);
+    fact("新索引指向旧索引", chainedIndex?.priorRecoveryIndexRefs?.join(", ") ?? "（无）");
+    verdict(
+      oldSummaryRemoved &&
+        trueUserKept &&
+        chainedIndex?.priorRecoveryIndexRefs?.includes(priorIndex.ref) === true,
+      "Compact 摘要不再冒充真实用户输入永久累积；移出时旧索引进入新索引链，恢复能力不丢",
+    );
+    reopenedDb.close();
 
     console.log(
       "\n   为什么这条验收项不看事件的有无：R-6 修复前 ContextCompacted 照常发出，\n" +

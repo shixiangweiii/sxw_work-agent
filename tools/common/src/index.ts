@@ -44,7 +44,12 @@ import { executeStat, statSnapshot } from "./fs/stat.js";
 import { executeWriteFile, verifyWriteFile, writeFileSnapshot } from "./fs/write-file.js";
 import { executeNow, nowSnapshot } from "./time/now.js";
 import { executeFetchUrl, fetchUrlSnapshot } from "./net/fetch-url.js";
-import { executeReadBlob, readBlobSnapshot } from "./mech/read-blob.js";
+import type { FetchTransport } from "./net/fetch-url.js";
+import { executeReadResource, readResourceSnapshot } from "./mech/read-resource.js";
+import {
+  executeMaterializeResource,
+  materializeResourceSnapshot,
+} from "./mech/materialize-resource.js";
 import { executeRunShell, runShellSnapshot } from "./exec/run-shell.js";
 import { isSandboxAvailable } from "./exec/sandbox.js";
 import {
@@ -54,14 +59,29 @@ import {
 } from "./mech/request-handoff.js";
 import { askUserSnapshot, executeAskUser, type QuestionChannel } from "./mech/ask-user.js";
 import { resolveToolPath } from "./fs/fs-common.js";
-import type { BlobStorePort } from "@workagent/harness-runtime";
+import type { ResourceStorePort } from "@workagent/harness-runtime";
 
 export * from "./fs/fs-common.js";
 export * from "./fs/read-guard.js";
 export * from "./net/url-guard.js";
 export * from "./artifact-checks/index.js";
-export { fetchUrlDefinition, fetchUrlSnapshot, executeFetchUrl, renderText } from "./net/fetch-url.js";
-export { readBlobDefinition, readBlobSnapshot } from "./mech/read-blob.js";
+export {
+  fetchUrlDefinition,
+  fetchUrlSnapshot,
+  executeFetchUrl,
+  renderText,
+  type FetchTransport,
+} from "./net/fetch-url.js";
+export {
+  readResourceDefinition,
+  readResourceSnapshot,
+  executeReadResource,
+} from "./mech/read-resource.js";
+export {
+  materializeResourceDefinition,
+  materializeResourceSnapshot,
+  executeMaterializeResource,
+} from "./mech/materialize-resource.js";
 export { runShellDefinition, runShellSnapshot, executeRunShell } from "./exec/run-shell.js";
 export { analyzeCommand, type CommandAnalysis } from "./exec/command-analysis.js";
 export {
@@ -140,7 +160,8 @@ export const commonSceneTools: ToolSnapshot[] = [
  * 声明义务因此不同：文件头必须指出**是哪一条机制**、**不做它会怎样**。
  */
 export const commonMechanismTools: ToolSnapshot[] = [
-  readBlobSnapshot,
+  readResourceSnapshot,
+  materializeResourceSnapshot,
   requestHandoffSnapshot,
   /**
    * 阶段 3.5 新增。它与 `request_handoff` **不是同一个洞** ——
@@ -155,16 +176,18 @@ export const commonTools: ToolSnapshot[] = [...commonSceneTools, ...commonMechan
 
 export interface CommonToolHandlerDeps {
   /**
-   * `read_blob` 要用它取回外置结果（S6.5）。
+   * Resource 机制工具用它读取或物化持久化资源。
    *
-   * 【定】工具包依赖的是 `BlobStorePort` 这个**接口**，实现由 Composition Root
+   * 【定】工具包依赖的是 `ResourceStorePort` 这个**接口**，实现由 Composition Root
    * 注入。边界 6（`packages/` 与 `adapters/` 不得依赖工具包）因此仍然成立 ——
    * 方向是工具包 → Runtime 的类型，不是反过来。
    *
-   * 不注入时 `read_blob` 会返回一条明确的装配错误，而不是静默失败：
+   * 不注入时资源机制工具会返回一条明确的装配错误，而不是静默失败：
    * 「外置与取回必须一起在场，不能只有一半」（不得绕过 #9）。
    */
-  blobs?: BlobStorePort;
+  resources?: ResourceStorePort;
+  /** 密封 Eval 可注入假 HTTP 传输；不传时 fetch_url 使用宿主 fetch。 */
+  fetchTransport?: FetchTransport;
   /**
    * `request_handoff` 要用它把请求交给人（S10）。
    *
@@ -254,6 +277,7 @@ export class CommonToolHandler implements ToolHandlerPort {
             ...(input["as"] === undefined ? {} : { as: String(input["as"]) }),
           },
           ctx,
+          this.deps.fetchTransport,
         );
       case "run_shell":
         return executeRunShell(
@@ -284,7 +308,7 @@ export class CommonToolHandler implements ToolHandlerPort {
              *
              * 它们在 schema 里、在工具里都有，**只差这一跳**就整个失效 ——
              * 而失效的样子是「模型声明了交付物，产物表照样空的，
-             * 没有任何报错」。办公任务实跑 A 组修的 `read_blob.line_offset`
+             * 没有任何报错」。此前实跑修过的分页 `line_offset`
              * 就是同一处、同一个形态：handler 只转发了一部分参数。
              */
             ...(input["artifact_path"] === undefined
@@ -314,14 +338,14 @@ export class CommonToolHandler implements ToolHandlerPort {
           ctx,
           this.deps.question,
         );
-      case "read_blob":
-        return executeReadBlob(
+      case "read_resource":
+        return executeReadResource(
           {
             ref: String(input["ref"] ?? ""),
             ...(input["start_line"] === undefined ? {} : { start_line: Number(input["start_line"]) }),
             ...(input["limit"] === undefined ? {} : { limit: Number(input["limit"]) }),
             /**
-             * 【定】`line_offset` 必须透传。漏掉它 = `read_blob` 对**单行 blob**
+             * 【定】`line_offset` 必须透传。漏掉它 = `read_resource` 对**单行结果**
              * 完全失效，而单行正是被外置的主导形态（工具结果几乎都是一行 JSON，
              * `totalLines: 1`，只能按字符续页）。
              *
@@ -333,7 +357,7 @@ export class CommonToolHandler implements ToolHandlerPort {
              * first chunk regardless of the line_offset I pass.」
              *
              * 链路其余部分一直是对的（schema 声明了、description 教了、
-             * `executeReadBlob` 往下传、`SqliteBlobStore.get()` 正确切片）——
+             * `executeReadResource` 往下传、`SqliteResourceStore.getTextPage()` 正确切片）——
              * 只有这一跳不通，而 `verify` 的取回判据打在 Port 上，跨不过这一跳。
              * 判据补在 `verify:artifact` A 段（改走工具层）与 `verify:tools`
              * 的「schema ↔ handler 参数逐个透传」段。
@@ -343,7 +367,17 @@ export class CommonToolHandler implements ToolHandlerPort {
               : { line_offset: Number(input["line_offset"]) }),
           },
           ctx,
-          this.deps.blobs,
+          this.deps.resources,
+        );
+      case "materialize_resource":
+        return executeMaterializeResource(
+          {
+            ref: String(input["ref"] ?? ""),
+            path: String(input["path"] ?? ""),
+            artifact_role: String(input["artifact_role"] ?? ""),
+          },
+          ctx,
+          this.deps.resources,
         );
       case "edit_file":
         return executeEditFile(
@@ -416,7 +450,7 @@ export interface CommonVerifierOptions {
  * 加一个路径字段不叫 `path` 的工具时，这里要一起改成 `工具名 → 字段名` 的表。
  * 此前这行注释写的正是那张表，而实现是一个只有工具名的 Set。
  */
-const OBSERVED_TOOLS = new Set(["write_file", "edit_file"]);
+const OBSERVED_TOOLS = new Set(["write_file", "edit_file", "materialize_resource"]);
 
 export class CommonVerifier implements VerificationPort {
   constructor(private readonly opts: CommonVerifierOptions = {}) {}
@@ -521,14 +555,16 @@ export class CommonVerifier implements VerificationPort {
             { path: String(input["path"] ?? ""), content: String(input["content"] ?? "") },
             ctx,
           )
-        : await verifyEditFile(
+        : action.toolName === "edit_file"
+          ? await verifyEditFile(
             {
               path: String(input["path"] ?? ""),
               old_string: String(input["old_string"] ?? ""),
               new_string: String(input["new_string"] ?? ""),
             },
             ctx,
-          );
+          )
+          : await verifyMaterialized(outcome, String(input["path"] ?? ""), ctx);
 
     return {
       ...base,
@@ -576,4 +612,26 @@ async function snapshotFile(target: string): Promise<ObservationResult | undefin
 
 function sha256(buf: Buffer): string {
   return createHash("sha256").update(buf).digest("hex");
+}
+
+async function verifyMaterialized(
+  outcome: ToolExecutionOutcome,
+  path: string,
+  ctx: ToolExecutionContext,
+): Promise<{ ok: boolean; detail: string }> {
+  if (!outcome.artifact) return { ok: false, detail: "物化工具未声明 Artifact" };
+  try {
+    const disk = await readFile(resolveToolPath(ctx.workspaceRoot, path));
+    const expected =
+      typeof outcome.artifact.content === "string"
+        ? Buffer.from(outcome.artifact.content, "utf8")
+        : Buffer.from(outcome.artifact.content);
+    const ok = sha256(disk) === sha256(expected);
+    return {
+      ok,
+      detail: ok ? "磁盘字节与物化 Resource 一致" : "磁盘字节与物化 Resource 不一致",
+    };
+  } catch (err) {
+    return { ok: false, detail: `物化目标不可读：${String((err as Error).message).slice(0, 160)}` };
+  }
 }

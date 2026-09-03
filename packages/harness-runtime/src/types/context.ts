@@ -16,6 +16,7 @@ import type {
 // 纯类型循环引用（transcript.ts 反过来引本文件的 ModelContent）。
 // import type 会被完全擦除，不产生运行期依赖环。
 import type { ContextMessage } from "./transcript.js";
+import type { ResourceReference } from "./resource.js";
 
 /**
  * 【定】只放 `compile.ts` **真的会产出**的七种。
@@ -62,7 +63,14 @@ export type ModelContent =
   | { type: "text"; text: string }
   | { type: "reasoning"; text: string; signature?: string }
   | { type: "tool_call"; toolCallId: string; name: string; input: unknown }
-  | { type: "tool_result"; toolCallId: string; content: string; isError: boolean };
+  | {
+      type: "tool_result";
+      toolCallId: string;
+      content: string;
+      isError: boolean;
+      /** Runtime 持久化后附加；不得从 content 自由文本反解析。 */
+      resourceRefs?: ResourceReference[];
+    };
 
 export interface ContextItem {
   id: ContextItemId;
@@ -113,16 +121,26 @@ export interface ContextBudgetPolicy {
   hardInputLimitTokens: number;
   compactTargetTokens: number;
   inlineToolResultLimitTokens: number;
+  /** 同一 ActionBatch 中允许 inline 的工具结果累计预算。 */
+  inlineToolResultsPerBatchLimitTokens: number;
 }
 
 export interface CompactionRecord {
   reason: string;
   freedTokens: number;
   at: Timestamp;
+  removedMessageCount?: number;
+  removedToolResultCount?: number;
+  recoveryIndexRef?: string;
 }
 
 export interface ContextFrameOutcome {
-  status: "READY" | "COMPACTED_READY" | "COMPACTION_INSUFFICIENT" | "PROTOCOL_INVALID";
+  status:
+    | "READY"
+    | "COMPACTED_READY"
+    | "COMPACTION_INSUFFICIENT"
+    | "PROTOCOL_INVALID"
+    | "CONTEXT_MATERIALIZATION_FAILED";
   frame?: ContextFrame;
   totalTokens: number;
   irreducibleTokens: number;
@@ -140,6 +158,6 @@ export interface ContextFrameOutcome {
   compactedMessages?: ContextMessage[];
   /** COMPACT_BOUNDARY 条目要带的摘要；随 compactedMessages 一起出现。 */
   compactSummary?: ContextMessage;
-  /** boundary 之后需要重新 append 的消息（不含摘要）。 */
+  /** 与摘要一起原子写进 boundary snapshot 的保留消息。 */
   compactKept?: ContextMessage[];
 }

@@ -15,25 +15,28 @@ import type { RunId } from "../types/ids.js";
 /**
  * 从条目序列重建 messages。
  *
- * 【定】从最后一个 COMPACT_BOUNDARY 之后开始取，boundary 之前的原文保留
- * 供 Trace 与 Replay 使用 —— 这就是「只追加，不改写」的兑现方式。
+ * 【定】从最后一个 COMPACT_BOUNDARY 的原子 snapshot 开始，再追加其后的
+ * MESSAGE；boundary 之前的原文保留供 Trace 与 Replay 使用。
  */
 export function rebuildFromEntries(entries: TranscriptEntry[]): ContextMessage[] {
   const sorted = [...entries].sort((a, b) => a.sequence - b.sequence);
 
   let startIdx = 0;
   let summary: ContextMessage | undefined;
+  let compactKept: ContextMessage[] = [];
   for (let i = sorted.length - 1; i >= 0; i--) {
     const e = sorted[i]!;
     if (e.kind === "COMPACT_BOUNDARY") {
       startIdx = i + 1;
       summary = e.compactSummary;
+      compactKept = e.compactKept ?? [];
       break;
     }
   }
 
   const messages: ContextMessage[] = [];
   if (summary) messages.push(summary);
+  messages.push(...compactKept);
 
   for (let i = startIdx; i < sorted.length; i++) {
     const e = sorted[i]!;

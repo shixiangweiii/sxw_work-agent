@@ -38,6 +38,13 @@ import type {
   ModelInvocationAuditWriter,
   ModelInvocationObserver,
 } from "../types/model-audit.js";
+import type {
+  MaterializableResource,
+  ProducedResource,
+  ResourcePutInput,
+  ResourceReference,
+  ResourceTextPage,
+} from "../types/resource.js";
 
 /**
  * ModelPort —— 网络调用与流式传输。
@@ -142,7 +149,7 @@ export interface FrameValidation {
  */
 export interface TranscriptStorePort {
   append(entry: Omit<TranscriptEntry, "sequence">): Promise<number>;
-  /** 从最后一个 COMPACT_BOUNDARY 之后重建。 */
+  /** 从最后一个 COMPACT_BOUNDARY 的原子 summary + kept snapshot 接续重建。 */
   rebuildMessages(runId: RunId): Promise<ContextMessage[]>;
   readAll(runId: RunId): Promise<TranscriptEntry[]>;
   /**
@@ -260,7 +267,7 @@ export interface ToolExecutionOutcome {
    *
    * ── 【定】登记触发源是工具，不是 Runtime 扫 workspace ────────────────
    *
-   * 与 §17【定】「Runtime Blob 不自动升级为 Artifact」是同一条理由：
+   * 与 §17【定】「Runtime Resource 不自动升级为 Artifact」是同一条理由：
    * 自动派生会把**用户自己放进 workspace 的文件**误当成本次 Run 的交付物。
    * 一个装着 200 份历史文档的目录，扫一遍就会「交付」200 个 artifact。
    *
@@ -271,6 +278,11 @@ export interface ToolExecutionOutcome {
    * 记下来，不要事后从文案里猜」是同一条纪律。
    */
   artifact?: ProducedArtifact;
+  /**
+   * 工具产生的原始资源。Runtime 负责脱敏、限额、持久化与生成 ResourceRef；
+   * 工具不得把二进制编码进 output 绕过这条通道。
+   */
+  resources?: ProducedResource[];
 }
 
 /**
@@ -328,6 +340,8 @@ export interface ProducedArtifact {
    * ══════════════════════════════════════════════════════════════════════
    */
   replacedBytes?: number;
+  /** 由 materialize_resource 原样落盘时记录来源；普通写入不带。 */
+  sourceResourceRef?: string;
 }
 
 /**
@@ -486,7 +500,7 @@ export interface ModelInvocationAuditStorePort {
 }
 
 /**
- * BlobStorePort —— 大结果外置（阶段 3，§11.4）。
+ * ResourceStorePort —— 可恢复的文本与二进制证据（§11.4）。
  *
  * 强制它的不变量：**§11.5 不变量 5 —— 外置必须保留协议合法的结构化 stub**，
  * 以及 §16.1 的上下文预算（超过 `inlineToolResultLimitTokens` 的结果不得
@@ -499,54 +513,32 @@ export interface ModelInvocationAuditStorePort {
  * `read_file` 与 `fetch_url` 会产出超过 `inlineToolResultLimitTokens` 的结果。
  * 顺序是先建工具面，让机制被真需求逼出来 —— 而不是先实现 Port 再找用例。
  *
- * ── 【定】`get` 必须支持分页 ────────────────────────────────────────────
+ * ── 【定】文本读取必须支持分页 ─────────────────────────────────────────
  *
- * 只有 `put` / `get(ref): string` 的话，取回一个 500KB 的 blob 会把它整个
+ * 只有 `put` / `get(ref): string` 的话，取回一个 500KB 的文本 Resource 会把它整个
  * 灌回上下文 —— 那就把刚刚外置掉的东西又搬了回来。分页语义与 `read_file`
  * 保持一致（按行、显式 truncated），这样模型在两个工具之间不需要换脑子。
  */
-export interface BlobStorePort {
-  /** 内容寻址：同一份内容只存一份，但每次调用得到自己的 ref。 */
-  put(content: string): Promise<{ ref: string; hash: string; size: number }>;
+export interface ResourceStorePort {
+  /** 内容寻址：相同字节只存一份，但每次调用得到独立的 res_* 引用。 */
+  put(input: ResourcePutInput): Promise<ResourceReference>;
+  getMetadata(ref: string): Promise<ResourceReference | undefined>;
   /**
    * 按 ref 取回。`startLine` 从 1 起；`limit` 是最多返回多少行；
    * `lineOffset` 是起始行内的字符偏移（超长单行续取时用）。
    * 取不到时返回 undefined —— **不要抛**，模型给错 ref 是它自己纠正得了的。
    */
-  get(
+  getTextPage(
     ref: string,
     opts?: { startLine?: number; limit?: number; lineOffset?: number; maxChars?: number },
-  ): Promise<BlobPage | undefined>;
-}
-
-export interface BlobPage {
-  ref: string;
-  hash: string;
-  sizeBytes: number;
-  totalLines: number;
-  startLine: number;
-  endLine: number;
+  ): Promise<ResourceTextPage | undefined>;
+  /** 仅供 workspace 物化；调用方不得把返回字节带进任何模型可见轨道。 */
+  readForMaterialization(ref: string): Promise<MaterializableResource | undefined>;
   /**
-   * 起始行内的字符偏移（0 起）。
-   *
-   * ── 它为什么必须存在 ────────────────────────────────────────────────
-   *
-   * 被外置的东西是**工具结果**，而工具结果几乎都是**一行 JSON** ——
-   * 一个 64KB 的 `read_file` 结果，`totalLines` 就是 1。
-   * 只按行分页的话，模型请求 100 行会拿回整整 64KB，
-   * 刚刚外置掉的东西原样搬回上下文，外置等于白做。
-   *
-   * 【定】所以还有一层**字符预算**。超长单行按字符切片，
-   * 并用 `lineOffset` / `nextLineOffset` 让模型接着取 ——
-   * 这仍然是**分页**（模型知道还有多少、可以再取），不是截断（不得绕过 #6）。
+   * 回滚尚未发布到 Transcript/模型的临时引用，并清理因此失去引用的内容。
+   * 只允许 Context 两阶段提交在 commit 前调用；已发布 Resource 永不走这里。
    */
-  lineOffset: number;
-  /** 还有后续内容。**分页，不是截断** —— 模型带 next* 再取即可。 */
-  truncated: boolean;
-  /** 下一页的起点。`truncated` 为 false 时不出现。 */
-  nextStartLine?: number;
-  nextLineOffset?: number;
-  content: string;
+  discardUncommitted(refs: string[]): Promise<void>;
 }
 
 /**
@@ -612,6 +604,8 @@ export interface ArtifactRegistration {
   path?: string;
   /** 【定】字节这一档见 `ArtifactContent` —— 按字符串传二进制会把 Run 判成 FAILED。 */
   content: ArtifactContent;
+  /** 当前这一次登记动作是否由某个 Resource 原样物化。 */
+  sourceResourceRef?: string;
 }
 
 export interface ArtifactRecord {
@@ -624,6 +618,8 @@ export interface ArtifactRecord {
   path?: string;
   contentHash: string;
   sizeBytes: number;
+  /** 该内容版本首次创建时的 Resource 来源；版本复用不得追溯性改写。 */
+  sourceResourceRef?: string;
   /** undefined = 还没验过。【定】「没验过」与「验过没通过」不是一回事。 */
   verified?: boolean;
   verifyDetail?: string;
@@ -647,8 +643,8 @@ export interface RuntimePorts {
   trace: TraceSinkPort;
   /** 调用级原始请求/返回 sidecar；Runtime 只写，不从中恢复。 */
   modelAudit: ModelInvocationAuditStorePort;
-  /** 阶段 3 新增。大结果外置（§11.4）。 */
-  blobs: BlobStorePort;
+  /** Resource 证据、结果外置与 Compact 恢复索引。 */
+  resources: ResourceStorePort;
   /** 阶段 3 新增。交付物登记与第二层 Verification（§17、§10.4）。 */
   artifacts: ArtifactStorePort;
   /**

@@ -345,6 +345,9 @@ export function projectTimeline(input: ProjectionInput): UiTranscriptEntry[] {
           version: ev.payload.version,
           role: ev.payload.role,
           artifactKind: ev.payload.kind,
+          ...(ev.payload.sourceResourceRef
+            ? { sourceResourceRef: ev.payload.sourceResourceRef }
+            : {}),
         };
         out.set(entry.id, entry);
         break;
@@ -404,7 +407,28 @@ function asNotice(ev: RunEvent): UiSystemNotice | undefined {
         ev.payload.outcome.kind === "SUCCESS" ? "INFO" : "WARN",
       );
     case "ContextCompacted":
-      return mk(`上下文压缩：释放 ${ev.payload.freedTokens} token（${ev.payload.reason}）`);
+      return mk(
+        `上下文压缩：释放 ${ev.payload.freedTokens} token；` +
+          `移出 ${ev.payload.removedMessageCount} 条消息 / ` +
+          `${ev.payload.removedToolResultCount} 条工具结果` +
+          (ev.payload.recoveryIndexRef ? `；恢复索引 ${ev.payload.recoveryIndexRef}` : "") +
+          `（${ev.payload.reason}）`,
+      );
+    case "ResourceStored":
+      return mk(
+        `Resource ${ev.payload.ref}：${ev.payload.kind} / ${ev.payload.mediaType} / ` +
+          `${ev.payload.sizeBytes}B / ${ev.payload.redactionDisposition}`,
+      );
+    case "ToolResourceRefsExternalized":
+      return mk(
+        `ResourceRefs 索引 ${ev.payload.indexRef}：${ev.payload.resourceCount} 项，` +
+          `外置前约 ${ev.payload.approxTokensBefore} token`,
+      );
+    case "ResourcePersistenceFailed":
+      return mk(
+        `Resource 持久化失败：${ev.payload.toolName}/${ev.payload.label}（${ev.payload.reason}）`,
+        "ERROR",
+      );
     case "InterjectionAccepted":
       return mk(`插话已排队：${ev.payload.content}`);
     case "BudgetSoftLimitReached":
@@ -559,6 +583,11 @@ export function projectTurns(input: ProjectionInput): UiTurn[] {
         ensure(current?.turn ?? 0, ev.sequence).compaction.push({
           freedTokens: ev.payload.freedTokens,
           reason: ev.payload.reason,
+          removedMessageCount: ev.payload.removedMessageCount,
+          removedToolResultCount: ev.payload.removedToolResultCount,
+          ...(ev.payload.recoveryIndexRef
+            ? { recoveryIndexRef: ev.payload.recoveryIndexRef }
+            : {}),
         });
         break;
       case "ModelInvocationCompleted": {

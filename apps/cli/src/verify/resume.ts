@@ -572,6 +572,7 @@ async function simulateHardCrash(decision: "CONTINUE" | "ABORT" = "CONTINUE"): P
       kind: "MESSAGE",
       message: {
         role: "assistant",
+        origin: "MODEL",
         turn: 9,
         content: [
           { type: "reasoning", text: "开始处理", signature: "" },

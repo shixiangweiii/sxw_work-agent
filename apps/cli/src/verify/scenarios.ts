@@ -286,6 +286,8 @@ async function main(): Promise<void> {
     try {
       const named = sc.materialize(ws.root);
       const trace = new CollectingTraceSink();
+      const scriptedTurns: ReturnType<Scenario["turns"]> = [];
+      const scriptedModel = LIVE ? undefined : new ScriptedModelPort(scriptedTurns);
       const composed = compose({
         dbPath: ":memory:",
         workspaceRoot: ws.root,
@@ -294,12 +296,43 @@ async function main(): Promise<void> {
         ...(LIVE
           ? {}
           : {
-              modelPortOverride: new ScriptedModelPort([
-                ...sc.turns(ws.root),
-                { text: "做完了。", toolCalls: [] },
-              ]),
+              modelPortOverride: scriptedModel,
             }),
       });
+
+      /**
+       * 三个场景都先用同一个机制工具原样物化一份不同内容的输入证据。
+       * 这是反过拟合判据：办公/代码/聊天不各造专用下载工具，ResourceRef 管道
+       * 与 materialize_resource 的形状保持完全相同。
+       */
+      if (!LIVE) {
+        const seed = await composed.ports.resources.put({
+          kind: "text",
+          mediaType: "text/plain; charset=utf-8",
+          label: `${sc.scene}场景的合成 Resource 输入`,
+          suggestedFilename: `${sc.id.toLowerCase()}-resource.txt`,
+          content: `${sc.scene} Resource materialization fixture\n`,
+          redactionDisposition: "TEXT_REDACTED",
+        });
+        scriptedTurns.push(
+          {
+            text: "先把已取得的输入证据原样放进 workspace。",
+            toolCalls: [
+              {
+                toolCallId: `${sc.id.toLowerCase()}_resource`,
+                name: "materialize_resource",
+                input: {
+                  ref: seed.ref,
+                  path: `resource-input/${sc.id.toLowerCase()}.txt`,
+                  artifact_role: "INTERMEDIATE",
+                },
+              },
+            ],
+          },
+          ...sc.turns(ws.root),
+          { text: "做完了。", toolCalls: [] },
+        );
+      }
 
       const gen = composed.runtime.start(composed.makeRunSpec(sc.task));
       let runId = "";
@@ -337,8 +370,14 @@ async function main(): Promise<void> {
         /* 读不到就是没产出 */
       }
       const registered = artifacts.filter((a) => a.role === "DELIVERABLE");
+      const resourceMaterialized = artifacts.some(
+        (a) => a.role === "INTERMEDIATE" && a.sourceResourceRef !== undefined,
+      );
       const existenceOk =
-        artifactBytes > 0 && registered.length > 0 && registered.every((a) => a.verified === true);
+        artifactBytes > 0 &&
+        registered.length > 0 &&
+        registered.every((a) => a.verified === true) &&
+        (LIVE || resourceMaterialized);
 
       /**
        * ── 层 3：最小有效性 ──────────────────────────────────────────────
@@ -370,6 +409,10 @@ async function main(): Promise<void> {
         registered.length > 0
           ? registered.map((a) => `${a.logicalId} v${a.version} verified=${a.verified}`).join("; ")
           : "（没有 DELIVERABLE 被登记）",
+      );
+      fact(
+        "Resource 原样物化来源",
+        LIVE ? "live 模式不作要求" : resourceMaterialized ? "已登记 sourceResourceRef" : "缺失",
       );
       fact("任务点名的对象", named.join(", "));
       fact("其中出现在工具返回值里", `${seenInTools.length}/${named.length}`);

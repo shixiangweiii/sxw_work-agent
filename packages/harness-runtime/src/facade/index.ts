@@ -384,7 +384,7 @@ export class HarnessRuntime {
 
       /** 循环纪律第 3 条：先落盘，再更新内存数组。resume 路径同样适用。 */
       const appendAndPush = async (content: ModelContent[], turn: number): Promise<void> => {
-        const message: ContextMessage = { role: "user", turn, content };
+        const message: ContextMessage = { role: "user", origin: "TOOL", turn, content };
         await ports.transcript.append({
           runId,
           kind: "MESSAGE",
@@ -602,8 +602,10 @@ export class HarnessRuntime {
             // 【定】恢复路径也要外置。少了这两行，分支一重跑一个
             // `read_file` 会把几百 KB 原样灌进恢复后的第一帧 ——
             // 而恢复恰恰是上下文最紧张的时候（历史全都还在）。
-            blobs: ports.blobs,
+            resources: ports.resources,
             inlineResultLimitTokens: spec.agentSpec.contextPolicy.inlineToolResultLimitTokens,
+            inlineResultsPerBatchLimitTokens:
+              spec.agentSpec.contextPolicy.inlineToolResultsPerBatchLimitTokens,
             artifacts: ports.artifacts,
             artifactChecks: ports.artifactChecks,
           });

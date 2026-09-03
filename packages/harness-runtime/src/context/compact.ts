@@ -27,6 +27,7 @@
 import type { CompactionRecord, ModelContent } from "../types/context.js";
 import type { ContextMessage } from "../types/transcript.js";
 import type { ModelProtocolPort } from "../ports/index.js";
+import { renderToolResultForModel } from "../types/resource.js";
 
 export interface CompactDeps {
   protocol: ModelProtocolPort;
@@ -42,18 +43,12 @@ export interface CompactDeps {
 }
 
 export interface CompactResult {
-  /** 压缩后的完整 messages（含摘要）。【定】调用方必须把它写回 state.messages。 */
+  /** 纯选择后的 messages；持久化成功前不含摘要，也不得提交到状态。 */
   messages: ContextMessage[];
-  /**
-   * 摘要消息本身，单独给出来。
-   *
-   * run-loop 要把它放进 COMPACT_BOUNDARY 条目的 compactSummary 字段 ——
-   * transcript 重建时会自动把它 prepend 到 boundary 之后的消息前面
-   * （见 rebuildFromEntries）。放进 messages 里再 append 一遍就会重复。
-   */
-  summary?: ContextMessage;
   /** 保留下来、需要在 boundary 之后重新 append 的消息（不含摘要）。 */
   kept: ContextMessage[];
+  /** 被完整协议单元移出的消息，供调用方先持久化再提交。 */
+  dropped: ContextMessage[];
   freedTokens: number;
   record: CompactionRecord;
 }
@@ -141,8 +136,8 @@ export function compactMessages(
    * 单条消息是否因自身原因必须保留。
    *
    * 【定】`role === "user"` 不能直接当「用户输入」用。
-   * Anthropic 形状要求 tool_result 放在 user 消息里 —— 那是协议载体，不是用户说的话。
-   * 原实现用 role 判定，等于把每一条工具结果都当成「用户约束与插话」永久保护。
+   * Anthropic 形状要求 tool_result、Runtime notice 都可能用 user role 发出 ——
+   * 它们不是用户说的话。用 role 判定会把工具结果和旧 Compact 摘要永久保护。
    */
   const selfProtected = (m: ContextMessage, idx: number): boolean =>
     idx === firstUser ||
@@ -182,6 +177,7 @@ export function compactMessages(
     return {
       messages,
       kept: messages,
+      dropped: [],
       freedTokens: 0,
       record: {
         reason: "无可压缩项：全部消息受协议、目标或近轮保护，且无可剥离的推理块",
@@ -197,6 +193,7 @@ export function compactMessages(
     return {
       messages: kept,
       kept,
+      dropped: [],
       freedTokens,
       record: {
         reason: `剥离 ${countReasoning(messages)} 个推理块（端点声明 DROPPABLE），未丢弃任何消息`,
@@ -206,32 +203,26 @@ export function compactMessages(
     };
   }
 
-  // 摘要作为派生对象插在被丢弃位置的开头，带来源计数而不是原文。
-  const summary: ContextMessage = {
-    role: "user",
-    turn: kept[0]?.turn ?? 0,
-    content: [
-      {
-        type: "text",
-        text:
-          `[已压缩] 省略了 ${droppedCount} 条较早的助手消息（约 ${freedTokens} tokens）。` +
-          `受协议约束的配对组、用户输入与最近两轮均已完整保留。`,
-      },
-    ],
-  };
-
   return {
-    messages: [summary, ...kept],
-    summary,
+    messages: kept,
     kept,
+    dropped: working.filter((_, i) => dropIdx.has(i)),
     freedTokens,
     record: {
       reason:
-        `尾部压缩：丢弃 ${droppedCount} 条非协议约束的助手消息` +
+        `尾部压缩选择：整体移出 ${droppedCount} 条消息` +
         (reasoningFreed > 0 ? `，并剥离推理块（约 ${reasoningFreed} tokens）` : "") +
         `；收敛目标 ${deps.targetTokens} tokens`,
       freedTokens,
       at: deps.now,
+      removedMessageCount: droppedCount,
+      removedToolResultCount: working
+        .filter((_, i) => dropIdx.has(i))
+        .reduce(
+          (count, message) =>
+            count + message.content.filter((content) => content.type === "tool_result").length,
+          0,
+        ),
     },
   };
 }
@@ -290,13 +281,13 @@ function protocolUnits(messages: ContextMessage[]): number[][] {
 }
 
 /**
- * 真正的用户输入（任务、约束、插话），不含仅作为 tool_result 载体的 user 消息。
+ * 真正的用户输入（任务、约束、插话），不含 tool_result 载体或 Runtime notice。
  *
- * Anthropic 形状要求 tool_result 放在 user 消息里，所以 role 本身
- * 区分不出「用户说的话」和「协议载体」—— 判据是有没有 text 块。
+ * Anthropic 形状要求 tool_result 与 Runtime notice 都可能用 user role 发出，
+ * 所以 role 不是 provenance。判据必须读类型化 origin，不能解析提示文案。
  */
 function isUserInput(m: ContextMessage): boolean {
-  return m.role === "user" && m.content.some((c) => c.type === "text");
+  return m.origin === "USER" && m.content.some((c) => c.type === "text");
 }
 
 /**
@@ -333,7 +324,9 @@ function estimate(m: ContextMessage): number {
   let chars = 0;
   for (const c of m.content) {
     if (c.type === "text" || c.type === "reasoning") chars += c.text.length;
-    else if (c.type === "tool_result") chars += c.content.length;
+    else if (c.type === "tool_result") {
+      chars += renderToolResultForModel(c.content, c.resourceRefs).length;
+    }
     else if (c.type === "tool_call") chars += JSON.stringify(c.input).length;
   }
   return Math.ceil(chars / 2.5);

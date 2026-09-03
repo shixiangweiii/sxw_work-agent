@@ -45,6 +45,9 @@ export const sanitize = (v: string): string => v.replace(/[^a-zA-Z0-9_-]/g, "_")
 export const atlasToolName = (server: string, tool: string): string =>
   `mcp__${sanitize(server)}__${sanitize(tool)}`;
 
+/** Resource block 到 Atlas ResourceRef 的桥接语义版本。 */
+export const ATLAS_MCP_BRIDGE_PROTOCOL_VERSION = "resource-v1";
+
 /** 每个 MCP 工具一条 Resolver 注册项的 key。 */
 const resolverRefFor = (atlasName: string, version: string) => ({
   id: `mcp:${atlasName}`,
@@ -210,7 +213,8 @@ export function bridgeTools(conn: McpConnection): BridgedTool[] {
     const identity = digest(
       JSON.stringify([t.name, t.description ?? "", t.inputSchema ?? {}, tier]),
     ).slice(0, 12);
-    const version = `mcp-${conn.serverVersion}-${identity}`;
+    const version =
+      `mcp-${ATLAS_MCP_BRIDGE_PROTOCOL_VERSION}-${conn.serverVersion}-${identity}`;
     const ref = resolverRefFor(name, version);
     const resolver = new McpEffectResolver(conn.serverName, t.name, tier);
 

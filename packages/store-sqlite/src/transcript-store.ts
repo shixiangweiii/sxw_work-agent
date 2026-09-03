@@ -1,8 +1,8 @@
 /**
  * TranscriptStorePort 的 SQLite 实现（阶段 2）。
  *
- * 接口一个字没改 —— `TranscriptStorePort` 在阶段 1 就是按最终形态定的，
- * 这次换实现是对那个判断的检验，结果是通过了。
+ * Compact boundary 的 payload 同时保存 summary 与 kept snapshot，使 Context
+ * 替换在一条 SQLite INSERT 中原子提交；其余消息仍沿用逐条 append。
  *
  * 这也是 R-4（Port 异常收敛，2026-08-25 提前做掉）的兑现场合：
  * in-memory → SQLite 就是「换 Port 实现」，异常口径先收敛过，
@@ -92,6 +92,7 @@ export class SqliteTranscriptStore implements TranscriptStorePort {
     const payload = JSON.stringify({
       message: entry.message,
       compactSummary: entry.compactSummary,
+      compactKept: entry.compactKept,
       meta: entry.meta,
     });
 
@@ -151,6 +152,7 @@ function toEntry(r: Row): TranscriptEntry {
   let payload: {
     message?: ContextMessage;
     compactSummary?: ContextMessage;
+    compactKept?: ContextMessage[];
     meta?: Record<string, unknown>;
   };
   try {
@@ -171,6 +173,7 @@ function toEntry(r: Row): TranscriptEntry {
   };
   if (payload.message) entry.message = payload.message;
   if (payload.compactSummary) entry.compactSummary = payload.compactSummary;
+  if (payload.compactKept) entry.compactKept = payload.compactKept;
   if (payload.meta) entry.meta = payload.meta;
   return entry;
 }

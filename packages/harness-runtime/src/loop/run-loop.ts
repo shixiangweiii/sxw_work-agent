@@ -292,6 +292,7 @@ export async function* runLoop(
       ...state,
       messages: await appendAndPush(state.messages, {
         role: "user",
+        origin: "USER",
         turn: 0,
         content: [{ type: "text", text: spec.input.task }],
       }),
@@ -366,6 +367,7 @@ export async function* runLoop(
           ...state,
           messages: await appendAndPush(state.messages, {
             role: "user",
+            origin: "USER",
             turn: state.turnCount,
             content: [{ type: "text", text: `[执行中插话] ${content}` }],
           }),
@@ -445,6 +447,7 @@ export async function* runLoop(
         ...state,
         messages: await appendAndPush(state.messages, {
           role: "user",
+          origin: "RUNTIME",
           turn: state.turnCount,
           content: [
             {
@@ -472,6 +475,7 @@ export async function* runLoop(
       // ADR-0012：UNRESTRICTED 档要在受信事实里如实告诉模型（见 compile.ts）。
       executionPrivilege: executionPrivilegeOf(spec.agentSpec),
       fixedOverheadTokens: registry.fixedOverheadTokens(),
+      resources: ports.resources,
       // 输出预算恢复的落点：抬高的上限必须真的进到这一次请求里，
       // 否则「抬高上限重试」就是拿同样的 max_tokens 再撞一次同一堵墙。
       reservedOutputTokensOverride: state.maxOutputTokensOverride,
@@ -487,38 +491,28 @@ export async function* runLoop(
     });
 
     if (compiled.compactionApplied.length > 0) {
-      for (const rec of compiled.compactionApplied) {
-        yield await emit("ContextCompacted", { freedTokens: rec.freedTokens, reason: rec.reason });
-      }
-
       /**
        * R-6 的落地点：把压缩结果真的写进 transcript 与 state.messages。
        *
        * 修复前这两件事都没做 —— ContextCompacted 事件照发，但 state.messages
        * 原封不动，下一轮又从完整历史开始。事件流上看压缩生效了，实际没有。
        *
-       * ── 顺序：先落 boundary ＋ kept，再改内存 ────────────────────
+       * ── 顺序：原子落 boundary snapshot，再改内存 ─────────────────
        *
        * 与循环纪律第 3 条同构。崩在中间时，transcript 只可能与内存一致或领先，
        * 反过来则会丢掉一段只存在于内存里的压缩结果。
        *
-       * ── 为什么 kept 要重新 append 一遍 ──────────────────────────
-       *
-       * rebuildFromEntries 的语义是「boundary.compactSummary ＋ boundary 之后的
-       * MESSAGE 条目」。kept 里的消息原本都在 boundary **之前**，不重新 append
-       * 就会在重建时全部消失 —— resume 出来的上下文比压缩后的还要短。
-       *
-       * 重复写入是 append-only 日志的诚实代价，换来的是「重建结果 == 刚才真的
-       * 发出去的东西」这条等式成立。Compact 只在超过 soft limit 时触发，
-       * 压完就回到线下，不是每轮都付这个代价。
+       * 【定】summary 与 kept 必须住在**同一条** COMPACT_BOUNDARY payload。
+       * 拆成「先 boundary、再逐条 append kept」会产生一个真实崩溃窗口：最新
+       * boundary 已经遮蔽旧历史，而 kept 只写了一部分。单条 SQLite INSERT
+       * 要么完整出现、要么完全不出现，resume 才只会看到旧世界或完整新世界。
        */
       if (compiled.compactedMessages) {
         /**
          * 【定】只有**真的丢了消息**（compactSummary 存在）才写 boundary。
          *
          * boundary 的语义是「它之前的内容已被摘要取代」。没丢任何消息时
-         * 没有东西被取代，写它是错的，而且要连带把 kept 重新 append 一遍 ——
-         * 六轮的 Run 会滚出 58 条 transcript，全是重复。
+         * 没有东西被取代，写它是错的。
          *
          * 那「只剥了推理块」这种情况怎么办？答案是**什么都不用做**：
          * transcript 保留完整原文（§18.5「boundary 之前的原文保留供 Trace 与
@@ -531,18 +525,23 @@ export async function* runLoop(
             runId,
             kind: "COMPACT_BOUNDARY",
             compactSummary: compiled.compactSummary,
+            compactKept: compiled.compactKept,
             createdAt: now(),
           });
-          for (const m of compiled.compactKept) {
-            lastSequence = await ports.transcript.append({
-              runId,
-              kind: "MESSAGE",
-              message: m,
-              createdAt: now(),
-            });
-          }
         }
         state = { ...state, messages: compiled.compactedMessages };
+        // 只有恢复索引、boundary 与内存状态都成功后，才宣告 Compact 已提交。
+        for (const rec of compiled.compactionApplied) {
+          yield await emit("ContextCompacted", {
+            freedTokens: rec.freedTokens,
+            reason: rec.reason,
+            removedMessageCount: rec.removedMessageCount ?? 0,
+            removedToolResultCount: rec.removedToolResultCount ?? 0,
+            ...(rec.recoveryIndexRef === undefined
+              ? {}
+              : { recoveryIndexRef: rec.recoveryIndexRef }),
+          });
+        }
       }
     }
 
@@ -565,6 +564,19 @@ export async function* runLoop(
         limit: spec.agentSpec.contextPolicy.hardInputLimitTokens,
       });
       return yield* finish({ reason: "CONTEXT_EXHAUSTED" });
+    }
+
+    if (compiled.status === "CONTEXT_MATERIALIZATION_FAILED") {
+      const err = makeError({
+        code: "CONTEXT_MATERIALIZATION_FAILED",
+        source: "CONTEXT",
+        category: "INTERNAL",
+        retryability: "AFTER_USER_ACTION",
+        sideEffectState: "NO_EFFECT",
+        safeMessage: compiled.protocolError ?? "Compact 恢复索引持久化失败，原上下文未改变。",
+      });
+      yield await emit("RuntimeErrorOccurred", { error: err });
+      return yield* finish({ reason: "MODEL_ERROR", error: err });
     }
 
     if (compiled.status === "PROTOCOL_INVALID" || !compiled.frame) {
@@ -885,11 +897,13 @@ export async function* runLoop(
         lastAssistantText = textOf(invocation.content) ?? lastAssistantText;
         let msgs = await appendAndPush(state.messages, {
           role: "assistant",
+          origin: "MODEL",
           turn: state.turnCount + 1,
           content: invocation.content,
         });
         msgs = await appendAndPush(msgs, {
           role: "user",
+          origin: "TOOL",
           turn: state.turnCount + 1,
           content: synthesized,
         });
@@ -951,6 +965,7 @@ export async function* runLoop(
     lastAssistantText = textOf(invocation.content) ?? lastAssistantText;
     let messages = await appendAndPush(state.messages, {
       role: "assistant",
+      origin: "MODEL",
       turn: state.turnCount + 1,
       content: invocation.content,
     });
@@ -1005,8 +1020,10 @@ export async function* runLoop(
         workspaceRoot: deps.workspaceRoot,
         // §11.4：大结果外置。阈值来自**上下文预算**，不是端点协议上限 ——
         // 循环只是把它透传下去，不读端点声明（纪律第 5 条不变）。
-        blobs: ports.blobs,
+        resources: ports.resources,
         inlineResultLimitTokens: spec.agentSpec.contextPolicy.inlineToolResultLimitTokens,
+        inlineResultsPerBatchLimitTokens:
+          spec.agentSpec.contextPolicy.inlineToolResultsPerBatchLimitTokens,
         // §17 / §10.4：Artifact 登记与第二层 Verification。
         artifacts: ports.artifacts,
         artifactChecks: ports.artifactChecks,
@@ -1088,6 +1105,7 @@ export async function* runLoop(
     // 【定】不变量 8 的落盘点：results 恰好 calls.length 条。
     messages = await appendAndPush(messages, {
       role: "user",
+      origin: "TOOL",
       turn: state.turnCount + 1,
       content: batchOutcome.results,
     });

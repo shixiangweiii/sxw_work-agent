@@ -706,7 +706,7 @@ async function main(): Promise<void> {
   ];
   const wfProbeDir = mkdtempSync(join(tmpdir(), "wa-verify-writeboundary-"));
   const handler = new CompositeToolHandler([
-    new CommonToolHandler({ blobs: undefined as never }),
+    new CommonToolHandler({ resources: undefined as never }),
     new MicroCaseToolHandler(),
   ]);
   const runWrite = async (
@@ -893,6 +893,7 @@ async function main(): Promise<void> {
       kind: "MESSAGE",
       message: {
         role: "assistant",
+        origin: "MODEL",
         turn: 3,
         content: [
           {

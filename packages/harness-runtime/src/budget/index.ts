@@ -36,6 +36,7 @@ export const DEFAULT_CONTEXT_POLICY: ContextBudgetPolicy = {
   hardInputLimitTokens: 100_000,
   compactTargetTokens: 40_000,
   inlineToolResultLimitTokens: 8_000,
+  inlineToolResultsPerBatchLimitTokens: 12_000,
 };
 
 /**

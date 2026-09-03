@@ -36,6 +36,11 @@ export interface GraderContext {
    * 生产结算路径，本文件开头那条【定】禁止的正是这件事。
    */
   traceEvents?: Array<Record<string, unknown>>;
+  /** 可选的 Runtime Artifact 元数据；只用于来源审计，不读取 RunOutcome。 */
+  artifactRecords?: Array<{
+    path?: string;
+    sourceResourceRef?: string;
+  }>;
 }
 
 export interface Check {
@@ -80,3 +85,4 @@ export function check(name: string, ok: boolean, detail: string, hard = true): C
 
 export * from "./workspace-manifest.js";
 export * from "./archive-inventory.js";
+export * from "./resource-archive.js";

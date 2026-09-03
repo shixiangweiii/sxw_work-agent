@@ -817,6 +817,9 @@ function renderEntry(e) {
     } else {
       head.appendChild(el("span", { class: "chip", text: "还没验过" }));
     }
+    if (e.sourceResourceRef) {
+      box.appendChild(el("div", { class: "kv mono", text: "source " + e.sourceResourceRef }));
+    }
   } else if (e.kind === "SYSTEM_NOTICE") {
     head.appendChild(el("span", { class: "tag", text: e.eventType }));
     box.appendChild(el("div", { class: "body", text: e.text }));
@@ -963,7 +966,15 @@ function renderTurns(view, d) {
       tb.appendChild(
         el("tr", {}, [
           el("td", {}),
-          el("td", { colspan: 8, class: "muted", text: "压缩：释放 " + c.freedTokens + " token（" + c.reason + "）" }),
+          el("td", {
+            colspan: 8,
+            class: "muted",
+            text:
+              "压缩：释放 " + c.freedTokens + " token；移出 " +
+              c.removedMessageCount + " 条消息 / " + c.removedToolResultCount +
+              " 条工具结果" + (c.recoveryIndexRef ? "；索引 " + c.recoveryIndexRef : "") +
+              "（" + c.reason + "）",
+          }),
         ]),
       );
     }
@@ -1485,6 +1496,9 @@ function renderArtifacts(view, d) {
     box.appendChild(el("div", { class: "kv", text: "登记于 " + new Date(a.createdAt).toLocaleString() }));
     if (a.verifyDetail) box.appendChild(el("div", { class: "kv", text: a.verifyDetail }));
     box.appendChild(el("div", { class: "kv mono", text: "hash " + a.contentHash }));
+    if (a.sourceResourceRef) {
+      box.appendChild(el("div", { class: "kv mono", text: "source " + a.sourceResourceRef }));
+    }
     if (a.path) {
       const pre = el("pre", { text: "（点开看磁盘上那一份）" });
       const drift = el("div", { class: "kv" });
@@ -1556,6 +1570,9 @@ const TRACE_EVENT_META = {
   InteractionCompleted: { label: "人工接管结束", category: "human", tone: "warn", important: true },
   InterjectionAccepted: { label: "插话已接收", category: "human", tone: "warn", important: true },
   ToolResultExternalized: { label: "工具结果已外置", category: "tool", tone: "tool", important: true },
+  ToolResourceRefsExternalized: { label: "ResourceRefs 已索引", category: "tool", tone: "tool", important: true },
+  ResourceStored: { label: "Resource 已保存", category: "tool", tone: "tool", important: true },
+  ResourcePersistenceFailed: { label: "Resource 保存失败", category: "diagnostic", tone: "bad", important: true },
   VerificationCompleted: { label: "操作验证完成", category: "verify", tone: "ok" },
   ArtifactRegistered: { label: "产物已登记", category: "verify", tone: "ok", important: true },
   ArtifactVerified: { label: "产物验证完成", category: "verify", tone: "ok", important: true },
@@ -1653,7 +1670,10 @@ function traceEventPresentation(line) {
           : "");
       break;
     case "ContextCompacted":
-      summary = "释放 " + (payload.freedTokens ?? "?") + " token · " + (payload.reason || "未给出原因");
+      summary = "释放 " + (payload.freedTokens ?? "?") + " token · 移出 " +
+        (payload.removedMessageCount ?? "?") + " 条消息 / " +
+        (payload.removedToolResultCount ?? "?") + " 条工具结果" +
+        (payload.recoveryIndexRef ? " · 索引 " + payload.recoveryIndexRef : "");
       break;
     case "ModelStreamDelta":
       summary = "流式片段 · " + String(payload.text || "").length + " 字符";
@@ -1724,6 +1744,23 @@ function traceEventPresentation(line) {
       summary = (payload.toolName || "未知工具") + " · " + (payload.sizeBytes ?? "?") + " 字节 ≈ " +
         (payload.approxTokens ?? "?") + " token · " + (payload.ref || "无引用");
       break;
+    case "ToolResourceRefsExternalized":
+      summary = (payload.toolName || "未知工具") + " · " +
+        (payload.resourceCount ?? "?") + " refs · 外置前 ≈" +
+        (payload.approxTokensBefore ?? "?") + " token · " +
+        (payload.indexRef || "无索引引用");
+      break;
+    case "ResourceStored":
+      summary = (payload.ref || "无引用") + " · " + (payload.kind || "UNKNOWN") + " · " +
+        (payload.mediaType || "unknown") + " · " + (payload.sizeBytes ?? "?") + " 字节 · " +
+        (payload.redactionDisposition || "UNKNOWN");
+      break;
+    case "ResourcePersistenceFailed":
+      summary = (payload.toolName || "未知工具") + " / " + (payload.label || "未命名") + " · " +
+        traceClip(payload.reason || "未给出原因", 180);
+      abnormal = true;
+      diagnostic = true;
+      break;
     case "VerificationCompleted":
       summary = (payload.required ? "必需验证" : "可选验证") + " · " + (payload.status || "UNKNOWN") +
         " · " + traceClip(payload.detail || "", 180);
@@ -1736,7 +1773,8 @@ function traceEventPresentation(line) {
       break;
     case "ArtifactRegistered":
       summary = (payload.logicalId || payload.artifactId || "未知产物") + " · v" + (payload.version ?? "?") +
-        " · " + (payload.role || "UNKNOWN") + " · " + (payload.kind || "UNKNOWN");
+        " · " + (payload.role || "UNKNOWN") + " · " + (payload.kind || "UNKNOWN") +
+        (payload.sourceResourceRef ? " · 来源 " + payload.sourceResourceRef : "");
       break;
     case "ArtifactVerified":
       summary = (payload.ok ? "通过" : "未通过") + " · " + (payload.role || "UNKNOWN") + " · " +

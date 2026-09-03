@@ -809,7 +809,7 @@ async function snapshotForArtifact(
  * 归一化声明的产物路径（二次评审 zcode F4）。
  *
  * 【定】`logicalId` 是版本链的身份。不归一化的话，`images.zip`、
- * `./images.zip`、`images/../images.zip` 会形成**三条互不相干的版本链**，
+ * `./bundle.zip`、`assets/../bundle.zip` 会形成**三条互不相干的版本链**，
  * 指向同一个文件 —— 而「同一个文件被改了两次」正是版本链存在的理由。
  *
  * 【定】只做无歧义的化简（`./`、`a/../b`、重复斜杠），**不做**把绝对路径

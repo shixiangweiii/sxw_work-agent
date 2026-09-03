@@ -105,6 +105,7 @@ export class McpToolHandler implements ToolHandlerPort {
            * 所以模型该看到的细节一个字都不少。
            */
           output: r.text,
+          ...(r.resources.length > 0 ? { resources: r.resources } : {}),
           sideEffectState: failedState,
           error: makeError({
             code: "MCP_TOOL_ERROR",
@@ -123,6 +124,7 @@ export class McpToolHandler implements ToolHandlerPort {
       return {
         ok: true,
         output: r.text,
+        ...(r.resources.length > 0 ? { resources: r.resources } : {}),
         /**
          * 【定】成功时也**不能**一律报 NO_EFFECT。
          *

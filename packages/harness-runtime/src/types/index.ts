@@ -8,3 +8,4 @@ export * from "./transcript.js";
 export * from "./loop.js";
 export * from "./event.js";
 export * from "./model-audit.js";
+export * from "./resource.js";
