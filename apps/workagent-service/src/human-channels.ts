@@ -32,6 +32,7 @@ import type {
   PreparedAction,
 } from "@workagent/harness-runtime";
 import type { HandoffChannel, QuestionChannel } from "@workagent/tools-common";
+import type { ComputerApprovalView } from "@workagent/tools-computer";
 import { stripUnsafeDisplayChars } from "../../cli/src/compose.js";
 import type { ApprovalMode } from "../../cli/src/compose.js";
 import type { UiPending } from "./api-types.js";
@@ -162,6 +163,11 @@ export class PendingHub {
      * 挂错的后果是取消一个 Run 会把另一个 Run 的审批一起打断。
      */
     signalFor: (runId: string) => AbortSignal,
+    /**
+     * GUI 动作（ADR-0013）的「这一步要点哪个应用的哪个控件」。
+     * 与 CLI `interactiveApproval` 的 describeGui 是同一个函数给出的同一份内容。
+     */
+    describeGui: (a: PreparedAction) => Promise<ComputerApprovalView | undefined>,
   ): ApprovalDecider {
     return async (action: PreparedAction): Promise<ApprovalDecision> => {
       const runId = String(action.runId);
@@ -216,6 +222,14 @@ export class PendingHub {
        */
       const show = (v: unknown, fallback = ""): string =>
         typeof v === "string" ? stripUnsafeDisplayChars(v) : fallback;
+      /**
+       * 【定】GUI 审批描述同样要剥：窗口标题、控件名来自**别的应用**（网页标题、
+       * 文件名都能带双向覆盖字符），要输入的文字来自模型。描述查不出来
+       * （助手不在、窗口没了）不阻断审批 —— 退回 scope.value 那一行，
+       * 而那一行本身就带着应用与坐标。
+       */
+      const gui =
+        e.scope.kind === "GUI" ? await describeGui(action).catch(() => undefined) : undefined;
       const pending: UiPending = {
         pendingId: randomUUID(),
         runId,
@@ -270,6 +284,20 @@ export class PendingHub {
            */
           ...(e.scope.kind === "EXTERNAL_TOOL"
             ? { externalArgs: stripUnsafeDisplayChars(JSON.stringify(input, null, 2)) }
+            : {}),
+          /**
+           * 本机屏幕上的一次点击 / 输入（ADR-0013）。**与 CLI 的 GUI 分支是
+           * 同一份内容的两处**（`describeForApproval` 唯一给出），必须一起改。
+           *
+           * 【定】只给坐标的审批是盲批 —— 「点保存」与「点删除」在坐标里长得一样。
+           */
+          ...(e.scope.kind === "GUI"
+            ? {
+                gui: {
+                  summary: stripUnsafeDisplayChars(gui?.summary ?? e.scope.value),
+                  details: (gui?.details ?? []).map((l) => stripUnsafeDisplayChars(l)),
+                },
+              }
             : {}),
         },
       };

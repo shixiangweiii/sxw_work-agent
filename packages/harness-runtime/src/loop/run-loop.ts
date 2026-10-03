@@ -37,7 +37,7 @@ import { DriftDetector, EndpointDriftError } from "../model/capability/drift-det
 import { RunInterrupts } from "./interrupt/index.js";
 import { ProgressGuard } from "./progress-guard.js";
 import { makeError } from "../types/error.js";
-import { FailOpenModelInvocationAudit } from "./model-audit.js";
+import { FailOpenModelInvocationAudit, omitLiveImageBytes } from "./model-audit.js";
 
 export interface RunLoopDeps {
   runId: RunId;
@@ -622,7 +622,8 @@ export async function* runLoop(
         endpointProfileVersion: frame.endpointProfileVersion,
         modelId: request.modelId,
         startedAt,
-        requestBody: request.body,
+        // 图像字节不进审计（CU-8，见 omitLiveImageBytes）；其余逐字是实际请求。
+        requestBody: omitLiveImageBytes(request.body, frame.liveImages),
       },
       now,
       spec.origin.kind !== "EVAL",
@@ -1095,11 +1096,16 @@ export async function* runLoop(
      * 同一个调用换个键序、换个等价路径写法就「看起来不一样了」。
      */
     const noProgress = progress.observeBatch(
-      batchOutcome.batch.actions.map((a) => ({
-        toolName: a.toolName,
-        inputDigest: a.inputDigest,
-        effectDigest: a.resolvedEffect.digest,
-      })),
+      batchOutcome.batch.actions.map((a) => {
+        // 读的是冻结的工具声明（registry 来自 spec.agentSpec.toolSnapshots），不是今天的装配。
+        const def = registry.get(a.toolName)?.definition;
+        return {
+          toolName: a.toolName,
+          inputDigest: a.inputDigest,
+          effectDigest: a.resolvedEffect.digest,
+          observesExternalState: def?.stateOutsideTranscript === true && def.idempotency.isReadOnly,
+        };
+      }),
     );
 
     // 【定】不变量 8 的落盘点：results 恰好 calls.length 条。
@@ -1140,7 +1146,20 @@ export async function* runLoop(
       return yield* finish({ reason: "NO_PROGRESS", toolName: noProgress.toolName, repeats: noProgress.repeats });
     }
 
-    const anyFailed = batchOutcome.attempts.some((a) => a.status === "FAILED");
+    /**
+     * 【定】「观察已过期」的拒绝不算失败（ADR-0014）。
+     *
+     * 判据是 `AFTER_REOBSERVATION` **且** `NOT_STARTED` 两个同时成立 —— 只有工具
+     * 自己保证「什么都没做」时才豁免。副作用状态说不清（UNKNOWN / 部分执行）的，
+     * 哪怕带着这个 retryability 也照常计数：豁免的前提是这一下确实没发生过。
+     *
+     * 它只影响「要不要 +1」，不影响清零条件 —— 清零仍然只认必需验证通过。
+     */
+    const anyFailed = batchOutcome.attempts.some(
+      (a) =>
+        a.status === "FAILED" &&
+        !(a.error?.retryability === "AFTER_REOBSERVATION" && a.sideEffectState === "NOT_STARTED"),
+    );
     /**
      * 【定】判据是「**必需**验证通过」，名字也要这么叫。
      *

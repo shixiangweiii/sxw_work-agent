@@ -270,6 +270,12 @@ export function bridgeTools(conn: McpConnection): BridgedTool[] {
        * `read` 档因为 `isReadOnly: true` 先一步落分支一（重跑），那也是对的。
        */
       recoveryObservation: { requiresPreFingerprint: true },
+      /**
+       * 登录态活在 MCP 子进程里，是 transcript 之外的隐藏状态（ADR-0011 代价③）。
+       * resume 时 Runtime 据此如实报告「核对不了」（ADR-0013 把这条从名字前缀
+       * 改成了声明）。
+       */
+      stateOutsideTranscript: true,
     };
 
     return {

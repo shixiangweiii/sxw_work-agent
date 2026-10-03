@@ -92,6 +92,24 @@ export async function executeReadResource(
       sideEffectState: "NO_EFFECT",
     };
   }
+  /**
+   * 图像（ADR-0013）不按文本分页 —— 它要么还在上下文的活跃窗口里（模型直接看得见），
+   * 要么已经过期移出。【定】这里不把过期的图重新塞回上下文：那会绕过活跃窗口的
+   * 上限，一次 read_resource 就能把十张旧截图全部拉回请求里。要看当前屏幕就重新截图。
+   */
+  if (metadata.kind === "image") {
+    return {
+      ok: true,
+      output: JSON.stringify({
+        ...metadata,
+        content: null,
+        note:
+          "这是一张截图。较早的截图不会重新放回上下文；要看当前屏幕请重新截图，" +
+          "要把它存成文件请调用 materialize_resource。",
+      }),
+      sideEffectState: "NO_EFFECT",
+    };
+  }
 
   let page;
   try {

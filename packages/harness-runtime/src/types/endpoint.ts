@@ -93,6 +93,68 @@ export interface ErrorTaxonomyProfile {
   discriminators: Array<"HTTP_STATUS" | "TYPE" | "CODE" | "MESSAGE_MATCH">;
 }
 
+/**
+ * 视觉能力（ADR-0013）。**整组可选：不声明 = 这个端点 × 模型看不见图。**
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ * 每个字段都来自 Spike 1（`spikes/s1-computer-use-vision/`）的实测，
+ * 而且每一条都是「换一个端点结论就可能变」的那种 —— 所以是数据，不是代码：
+ *
+ *   · 截图放在哪：两端点都收得下 tool_result 里的图；而 tool_result **之后**的
+ *     图片块，DeepSeek 收、**百炼返回 200 却静默丢弃**（4/4，图贡献 0 token）。
+ *   · 图像怎么计费：百炼约每 32×32 像素一个 token、封顶 2562；
+ *     DeepSeek 约每 40×40 一个、封顶 962、下限 200。
+ *   · count_tokens 算不算图：DeepSeek 算且与计费一致；**百炼完全不算**。
+ *   · 坐标约定：两模型都以 0–1000 归一化最准；qwen3.8-flash 在工具描述写明
+ *     像素坐标时**照样输出归一化坐标**（1/10、0/10 命中）。
+ * ══════════════════════════════════════════════════════════════════════
+ */
+export interface VisionCapability {
+  /**
+   * 截图装进请求的位置。
+   *
+   * 【定】单值类型，与 `ActionBatch.executionMode` 同一条理由：只有这一档有生产者。
+   * 「tool_result 之后再跟 image 块」在百炼上是**静默丢图**，不是一个可选项 ——
+   * 写成联合类型会让人以为它能用。
+   */
+  imageCarrier: "IN_TOOL_RESULT";
+  /**
+   * 本地估算图像 token 的参数：
+   *   tokens = clamp(ceil(w / patchPx) × ceil(h / patchPx) + perImageOverhead, min, max)
+   *
+   * 【定】这是**保守估算**（实测在个别尺寸上高估 ≤7%），用于上下文预算 ——
+   * 宁可估多，不能让阈值判定系统性偏向「还够用」那一侧（与 D-3 推理块同一条纪律）。
+   */
+  imageTokens: {
+    patchPx: number;
+    perImageOverhead: number;
+    minTokens: number;
+    maxTokens: number;
+  };
+  /**
+   * 端点的 count_tokens 是否计入图像。
+   *
+   * 【定】false 时，形状适配器在 count_tokens 的返回值上**补上本地估算**，
+   * 并把精度降级为 ESTIMATED。不补的话，带图的帧会被少算每张约 1000 token
+   * （Spike 1 P-3：百炼带一张 1280×800 的图，count_tokens 只多了 3）。
+   */
+  countTokensIncludesImages: boolean;
+  /**
+   * 模型输出点击坐标时用的坐标系。
+   *
+   * 【定】单值。两端点实测都以 0–1000 归一化最准，而且它**不受服务端缩放影响**
+   * —— DeepSeek 对大图会在服务端缩小，不说明单位时给的是缩小后那张图上的像素
+   * 坐标（3584 宽的图斜率 0.537），客户端根本不知道那个尺寸。
+   * 归一化坐标把「模型看到的图有多大」这个未知量整体消掉了。
+   */
+  groundingCoordinateSpace: "NORMALIZED_1000";
+  /**
+   * 截图建议的长边像素。超过服务端缩放的封顶后不再增加细节，只增加字节。
+   * 实测 1792（= 本机逻辑点宽度）时两模型定位与小字可读性都在最好的一档。
+   */
+  preferredScreenshotLongEdgePx: number;
+}
+
 /** 组合时收紧上下文策略、生成可观测提示的端点限制。 */
 export interface EndpointLimits {
   maxContextTokens?: number;
@@ -128,6 +190,8 @@ export interface EndpointCapabilityProfile {
   /** 只有具备相应证据的端点才声明错误分类与容量限制。 */
   errors?: ErrorTaxonomyProfile;
   limits?: EndpointLimits;
+  /** 视觉能力（ADR-0013）。不声明 = 看不见图；computer use 在这样的端点上拒绝启用。 */
+  vision?: VisionCapability;
 
   observedAt: Timestamp;
   probeSuiteVersion: string;

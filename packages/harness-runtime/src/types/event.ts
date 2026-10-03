@@ -20,6 +20,7 @@ import type { Continue, Terminal } from "./loop.js";
 import type { ExecutionPrivilege, ModelUsage, RunOutcome } from "./run.js";
 import type { RuntimeErrorRecord } from "./error.js";
 import type { ApprovalDecidedBy, DataMovementDescriptor } from "./tool.js";
+import type { ResourceKind, ResourceRedactionDisposition } from "./resource.js";
 
 export type RunEvent =
   /**
@@ -139,11 +140,11 @@ export type RunEvent =
         actionId: ActionId;
         toolName: string;
         ref: string;
-        kind: "text" | "binary";
+        kind: ResourceKind;
         mediaType: string;
         sizeBytes: number;
         contentHash: string;
-        redactionDisposition: "TEXT_REDACTED" | "OPAQUE_BINARY_NOT_TEXT_SCANNED";
+        redactionDisposition: ResourceRedactionDisposition;
       }>
   | Ev<"ResourcePersistenceFailed",
       { actionId: ActionId; toolName: string; label: string; reason: string }>
@@ -210,7 +211,8 @@ export type RunEvent =
   | Ev<"ResumeUnpairedToolUse",
       { toolCallId: string; toolName: string; branch: string ; hasPreFingerprint: boolean }>
   /**
-   * 这个 Run 用过**外部工具**（MCP），而它们的外部状态 Atlas 核对不了。
+   * 这个 Run 用过**作用于 transcript 之外状态**的工具（声明 `stateOutsideTranscript`：
+   * 外部 MCP、computer use），而那些外部状态 Atlas 核对不了。
    *
    * ══════════════════════════════════════════════════════════════════════
    * 【定】它必须发：

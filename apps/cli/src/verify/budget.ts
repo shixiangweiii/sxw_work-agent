@@ -33,10 +33,14 @@ import {
   NullTraceSink,
   applyBudgetOverrides,
   asId,
+  makeError,
   readRunFacts,
   settleWallOutcome,
+  type Retryability,
   type RunId,
   type SettleInput,
+  type SideEffectState,
+  type ToolSnapshot,
 } from "@workagent/harness-runtime";
 import { listDirSnapshot, writeFileSnapshot } from "@workagent/tools-common";
 import { compose, DEFAULT_SYSTEM_PROMPT } from "../compose.js";
@@ -688,6 +692,107 @@ async function main(): Promise<void> {
       conservative,
       "撞硬限制且事实表为空时只陈述“未登记到”，并明确 Runtime 无任务级完成契约，不再反推目标已经完成",
     );
+
+    // ═══════════════════════════════════════ I. ADR-0014：观察过期的拒绝不计入连续失败
+    section("I. ADR-0014：「观察过期 ＋ 什么都没做」的失败不计入连续失败（两个合取项各自可触发）");
+    console.log(
+      "   豁免的判据是 retryability = AFTER_REOBSERVATION **且** sideEffectState = NOT_STARTED。\n" +
+        "   GUI 工具从不产出前者而不带后者 —— 第二个合取项在 verify:computer 里没有能单独触发它的输入，\n" +
+        "   所以这里用一个与屏幕无关的夹具工具，把三种组合各跑五次（上限 3）：\n" +
+        "     ① 过期 ＋ 没做   → 不计，Run 照常走完\n" +
+        "     ② 过期 ＋ 说不清 → 照常计入（豁免的前提是这一下确实没发生过）\n" +
+        "     ③ 普通失败       → 照常计入",
+    );
+    {
+      const failingTool = (retryability: Retryability, sideEffectState: SideEffectState) => {
+        const snap: ToolSnapshot = {
+          toolId: asId("tool_flaky_fixture"),
+          version: "1.0.0",
+          definition: {
+            id: asId("tool_flaky_fixture"),
+            version: "1.0.0",
+            name: "flaky_fixture",
+            description: "验收夹具：每次都失败。",
+            inputSchema: { type: "object", additionalProperties: false, properties: { n: { type: "number" } } },
+            effectResolution: {
+              kind: "DECLARATIVE",
+              rule: { pointer: "", effectType: "READ", scopeKind: "NONE", reversibility: "REVERSIBLE", operation: "fixture" },
+            },
+            redaction: { profile: "STANDARD" },
+            idempotency: { isIdempotent: true, isReadOnly: true },
+            timeoutPolicy: { timeoutMs: 10_000 },
+            progressReporting: { mode: "NONE" },
+            verification: { mode: "NONE", requiredForSuccess: false },
+            recoveryObservation: { requiresPreFingerprint: false },
+          },
+        };
+        return { snap, retryability, sideEffectState };
+      };
+      const runFlaky = async (t: ReturnType<typeof failingTool>): Promise<{ terminal: string; hardAxis?: string; executed: number }> => {
+        let executed = 0;
+        const composed = compose({
+          dbPath: ":memory:",
+          workspaceRoot: tmp,
+          trace: new NullTraceSink(),
+          // 入参逐轮不同（n），免得先撞 Progress Guard。
+          modelPortOverride: new ScriptedModelPort([
+            ...[1, 2, 3, 4, 5].map((n) => ({ toolCalls: [{ toolCallId: `f${n}`, name: "flaky_fixture", input: { n } }] })),
+            { text: "收尾。", toolCalls: [] },
+          ]),
+          timezone: "Asia/Shanghai",
+          tools: [t.snap],
+          approvalDecider: async () => ({ approved: true }),
+          budgetOverrides: { consecutiveFailures: 3 },
+          portOverrides: {
+            tools: {
+              execute: async () => {
+                executed += 1;
+                return {
+                  ok: false,
+                  output: "",
+                  sideEffectState: t.sideEffectState,
+                  error: makeError({
+                    code: "FIXTURE_FAILED",
+                    source: "TOOL_HANDLER",
+                    category: "CONFLICT",
+                    retryability: t.retryability,
+                    sideEffectState: t.sideEffectState,
+                    safeMessage: "夹具失败",
+                  }),
+                };
+              },
+            },
+          },
+        });
+        try {
+          const gen = composed.runtime.start(composed.makeRunSpec("连续失败豁免验收"));
+          let hardAxis: string | undefined;
+          let r = await gen.next();
+          while (!r.done) {
+            if (r.value.type === "BudgetHardLimitReached") hardAxis = (r.value.payload as { axis: string }).axis;
+            r = await gen.next();
+          }
+          return { terminal: r.value.terminal.reason, ...(hardAxis ? { hardAxis } : {}), executed };
+        } finally {
+          composed.db.close();
+        }
+      };
+      const stale = await runFlaky(failingTool("AFTER_REOBSERVATION", "NOT_STARTED"));
+      const unsure = await runFlaky(failingTool("AFTER_REOBSERVATION", "UNKNOWN"));
+      const plain = await runFlaky(failingTool("AFTER_MODEL_CORRECTION", "NOT_STARTED"));
+      for (const [label, x] of [["① 过期＋没做", stale], ["② 过期＋说不清", unsure], ["③ 普通失败", plain]] as const) {
+        fact(label, `执行 ${x.executed} 次 → ${x.terminal}${x.hardAxis ? `（撞 ${x.hardAxis}）` : ""}`);
+      }
+      verdict(
+        stale.executed === 5 && !stale.hardAxis,
+        "① 五次「观察过期、什么都没做」不计入连续失败（上限 3），Run 照常走完。注入：去掉 run-loop 的豁免 → 红",
+      );
+      verdict(
+        unsure.hardAxis === "consecutiveFailures" && unsure.executed === 3 &&
+          plain.hardAxis === "consecutiveFailures" && plain.executed === 3,
+        "②③ 配对：副作用说不清的「过期」、以及普通失败，照常计入，三次撞墙。注入：豁免只看 retryability、不看 NOT_STARTED → ② 红",
+      );
+    }
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

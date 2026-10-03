@@ -295,6 +295,33 @@ export const BOUNDARIES: Boundary[] = [
     paths: ["packages/harness-runtime/src", "tools/common/src"],
     allowed: [],
   },
+  {
+    /**
+     * ★ADR-0013。**屏幕与输入的实现不得进 Runtime / 适配器。**
+     *
+     * Runtime 只认识「模型可见的图像资源」（`ResourceKind: "image"`），
+     * 不认识屏幕、窗口、点击 —— 那是 `tools/computer` 的领域知识。
+     *
+     * 它与第 7 / 12 条同形态：诱惑**不需要 import 任何工具包**（第 4 / 6 条
+     * 抓 import，一条都不会响）。这次的诱惑有两处，而且第二处特别像是对的：
+     *
+     *   ① 在 `packages/harness-runtime/src/ports/` 里加一个「ComputerDriver Port」
+     *     —— 那里本来就叫 Port，一个屏幕 Port 看着天经地义；
+     *   ② 把 0–1000 → 屏幕点的换算（`toPoints`）搬进形状适配器 ——
+     *     坐标空间**就写在端点能力声明里**（`groundingCoordinateSpace`），
+     *     「谁读声明谁换算」读起来很顺。而换算依赖的是显示器几何与截图尺寸，
+     *     那是工具的观察事实，不是端点行为；搬进去之后适配器就认识屏幕了。
+     *
+     * ⚠️ 射程如实写明：它抓的是本仓里屏幕域的**名字**（驱动接口、助手、
+     * 三个系统框架、坐标换算函数）。有人换个名字重写一遍，它一个字都不会命中 ——
+     * 与第 13 条一样，把盲区写下来，而不是扩一个会变成噪音的模式。
+     */
+    id: "15",
+    desc: "★ADR-0013：屏幕与输入（驱动、助手、坐标换算）不得进 Runtime / 适配器",
+    pattern: "ComputerDriver|HelperDriver|AtlasGUIHelper|ScreenCaptureKit|CGEvent|AXUIElement|toPoints\\(",
+    paths: ["packages", "adapters"],
+    allowed: [],
+  },
 ];
 
 /**

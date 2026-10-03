@@ -53,7 +53,10 @@ class AnthropicMessagesProtocol implements ModelProtocolPort {
   // ───────────────────────────────────────────────────── buildRequest
 
   buildRequest(frame: ContextFrame): ModelRequest {
-    const messages = toAnthropicMessages(frame.items);
+    // ADR-0013：只有端点声明了 vision 时，帧上的活跃图像才会被装进请求。
+    // （attachLiveImages 在没有 vision 时一张都不装，这里再判一次是两道独立的门。）
+    const images = this.profile.vision ? frame.liveImages : {};
+    const messages = toAnthropicMessages(frame.items, images);
 
     /**
      * ── U-9：主动前缀缓存 ────────────────────────────────────────────
@@ -162,11 +165,22 @@ class AnthropicMessagesProtocol implements ModelProtocolPort {
         const reasoning = this.profile.tokens.countTokensExcludesReasoning
           ? estimateReasoningTokens(frame)
           : 0;
+        /**
+         * 端点的 count_tokens 不计图像时，本地补上（ADR-0013）。
+         *
+         * 实测（Spike 1 P-3）：百炼带一张 1280×800 的图，count_tokens 只多 3，
+         * 而真实计费多 1000。不补的话，带截图的帧每张少算约一千 token，
+         * Context 的阈值判定会系统性偏向「还够用」—— 与上面推理块那条同一个形状。
+         */
+        const images =
+          this.profile.vision && !this.profile.vision.countTokensIncludesImages
+            ? liveImageTokens(frame)
+            : 0;
 
         return {
-          tokens: tokens + this.profile.tokens.perRequestBaseTokens + reasoning,
+          tokens: tokens + this.profile.tokens.perRequestBaseTokens + reasoning + images,
           accuracy:
-            this.profile.tokens.countTokensAccuracy === "EXACT" && reasoning === 0
+            this.profile.tokens.countTokensAccuracy === "EXACT" && reasoning === 0 && images === 0
               ? "EXACT"
               : "ESTIMATED",
         };
@@ -531,7 +545,10 @@ function classifyStreamProviderError(
  * 上挂 cache_control，拿 `unknown[]` 就只能靠断言硬转。
  * `toBlock()` 每次都新建对象，所以那次挂载是安全的局部改写，不会串到别的请求上。
  */
-function toAnthropicMessages(items: ContextItem[]): Array<{ role: string; content: unknown[] }> {
+function toAnthropicMessages(
+  items: ContextItem[],
+  liveImages: ContextFrame["liveImages"],
+): Array<{ role: string; content: unknown[] }> {
   const messages: Array<{ role: string; content: unknown[] }> = [];
 
   for (const item of items) {
@@ -540,7 +557,7 @@ function toAnthropicMessages(items: ContextItem[]): Array<{ role: string; conten
     if (item.kind === "SYSTEM_INSTRUCTION") continue; // system 走顶层字段
 
     const role = roleOf(item);
-    const block = toBlock(c);
+    const block = toBlock(c, liveImages);
     if (!block) continue;
 
     const last = messages[messages.length - 1];
@@ -567,7 +584,10 @@ function roleOf(item: ContextItem): "user" | "assistant" {
   }
 }
 
-function toBlock(c: NonNullable<ContextItem["content"]>): unknown | null {
+function toBlock(
+  c: NonNullable<ContextItem["content"]>,
+  liveImages: ContextFrame["liveImages"],
+): unknown | null {
   switch (c.type) {
     case "text":
       return c.text.length > 0 ? { type: "text", text: c.text } : null;
@@ -575,14 +595,45 @@ function toBlock(c: NonNullable<ContextItem["content"]>): unknown | null {
       return { type: "thinking", thinking: c.text, signature: c.signature ?? "" };
     case "tool_call":
       return { type: "tool_use", id: c.toolCallId, name: c.name, input: c.input };
-    case "tool_result":
+    case "tool_result": {
+      const text = renderToolResultForModel(c.content, c.resourceRefs);
+      /**
+       * ── 截图放在 tool_result **里面**（ADR-0013，`vision.imageCarrier`）──────
+       *
+       * 【定】不放在 tool_result 之后的同一条 user 消息里，哪怕那在 Anthropic
+       * 形状里同样合法、而且是调研时以为「最可能」的放法。Spike 1 P-1 实测：
+       * 那种放法在百炼上 **HTTP 200 却静默丢图**（4/4，计费只多了提示文字那 7
+       * 个 token），模型回答「看不到」。两个端点都收得下的只有这一种。
+       *
+       * 【定】文字在前、图在后：模型先知道这是什么、要找什么，再看图
+       * （Anthropic 的实测建议，点击更准）。
+       */
+      const images = (c.resourceRefs ?? [])
+        .filter((r) => r.kind === "image")
+        .map((r) => liveImages[r.ref])
+        .filter((img): img is NonNullable<typeof img> => img !== undefined);
       return {
         type: "tool_result",
         tool_use_id: c.toolCallId,
-        content: renderToolResultForModel(c.content, c.resourceRefs),
+        content:
+          images.length === 0
+            ? text
+            : [
+                { type: "text", text },
+                ...images.map((img) => ({
+                  type: "image",
+                  source: { type: "base64", media_type: img.mediaType, data: img.data },
+                })),
+              ],
         is_error: c.isError,
       };
+    }
   }
+}
+
+/** 帧上活跃图像的 token 合计（按端点声明的公式估出，见 `estimateImageTokens`）。 */
+function liveImageTokens(frame: ContextFrame): number {
+  return Object.values(frame.liveImages).reduce((n, img) => n + img.estimatedTokens, 0);
 }
 
 /** 把连续的 assistant 项分组成「回合」，用于推理块占位检查。 */
@@ -614,7 +665,8 @@ function estimateTokens(frame: ContextFrame): number {
     }
   }
   // 中英混排的粗略系数。标记为 ESTIMATED，调用方据此放宽阈值。
-  return Math.ceil(chars / 2.5) + frame.fixedOverheadTokens;
+  // 图像按端点声明的公式另算（ADR-0013）—— 把 base64 当字符数估会高估百倍。
+  return Math.ceil(chars / 2.5) + frame.fixedOverheadTokens + liveImageTokens(frame);
 }
 
 /**

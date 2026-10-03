@@ -16,6 +16,172 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 当前状态
 
+### Computer Use 代码评审的处置（2026-10-03）：12 项全部成立、全部修完，`verify:computer` 44 → **57 条**
+
+评审报告：[Atlas集成ComputerUse未提交代码评审-codex.md](sxw_aicoding/代码评审/2026-10-03/Atlas集成ComputerUse未提交代码评审-codex.md)。
+逐条回源复核后 12 项都存在；分级按实际影响重排过（R02 / R04 降 P2，R11 升 P1，R06 / R07 降 P3），
+修复顺序按「隐私 → 审批与复核能不能成立 → Swift 一次重编 → 其余」。处置记录见 changelog 第 13 节。
+
+> ### 【定】最重的两条都让「执行前复核」在某种写法下整个失效，而 44 条判据全绿
+>
+> | 项 | 形态 | 处置 |
+> |---|---|---|
+> | **CU-R03** | 截图一完成就覆盖复核依据 → 同批 `[screenshot, click]` 里的点击拿新图和此刻的屏幕比，**自己和自己比** | 依据改成「模型生成这一批时**已经看到**的那张」（按批次号推出：本批截的下一批才升为依据）；工具描述与 system prompt 同步改说法 |
+> | **CU-R01** | 键盘执行时现读前台：审批卡写 TextEdit，执行时字打进 Calculator；而人工审批本身要把焦点交给终端 / 浏览器（都在硬拒绝名单上）→ **DEFAULT / CONFIRM 档下每一次打字都必然被拒**，实测全用 AUTO 才没撞上 | `describeForApproval` 记下人看到的目标；执行时焦点若被 Atlas 碰不了的东西拿走（审批界面）→ **切回**那个应用、整套复核重来；若被另一个白名单应用拿走 → 拒绝，**绝不改发** |
+>
+> F 段的 f6–f8 第一版恰好写成同批 `[截图, 点击]` —— **它们测的「模型瞄错了」靠的就是 R03 这个缺陷**。已拆成两批。
+> 判据落在缺陷上而不是行为上，这是本仓「判据测的不是它声称在测的东西」的又一形态。
+
+> ### 【定】切回焦点是「还」，不是「替模型多做一步」
+>
+> 三条同时成立才切：有人看过审批描述（AUTO 档下没有、也就不切）；人批准的窗口就是模型截图里那一处的窗口；
+> 现在挡在那里的是白名单外或硬拒绝的东西。切回走同一条 `activate` 原语与驱动第二道检查，
+> **切完整套复核重来** —— 切换本身不替复核作保（Q 段专门有一条「切回没生效 → 什么都不投」的配对）。
+
+其余：**R02** 投递前最后看一眼取消信号（不把 signal 传进驱动请求 —— 请求交出去就收不回，假装能中途撤销会把「投了没投」变成不确定）·
+**R04** 截完再列一次窗口，有排除表之外的白名单外窗口就重截，三次不干净就不出图（**不退回**「只包含白名单应用」的过滤器：
+第一次真桌面运行的几何错位就在那个过滤器上，而当时换过滤器与加 `sourceRect` 是同一次改动，分不清是谁修好的；
+剩余盲区：两次列表之间出现又消失的窗口）· **R05** 拖拽终点走与起点同一套复核 · **R06** `vision` 进端点行为指纹 ·
+**R07** 接收缓冲跟着连接走（判据用 node 写的假助手挂在 `HelperDriver.launch` 注入点上，真 socket 真重连）·
+**R08** CLI 里助手构建挪到一切资源获取之前 · **R09** 激活等待超时抛错（TS 侧记 `UNKNOWN`）而不是报成功 ·
+**R10** 审批展示要输入的**全文**，JSON 字符串形态、不可见字符写成 `\uXXXX`（展示层会剥掉它们 —— 不先转义，人看到的是「干净」的文字）·
+**R12** spike 渲染器编译前建 `.bin/`。
+
+> ⚠️ **R11 是已经发生的隐私事故，不是潜在风险**：P-6 真实屏幕探针走了会归档的 `imageBlock`，
+> 两张真实桌面截图（一张带桌面上的文件夹名与文件名）落在 `spikes/s1-computer-use-vision/raw/images/`、未被忽略。
+> 已移到废纸篓（未永久删除），探针改走只编码不归档的 `ephemeralImageBlock`。
+> 此前「截图不进仓库」的说法（探针文件头、spike README）在那时是假的，已改正。
+>
+> ⚠️ **助手已重建（R04 ＋ R09 合在一次）、用户已重新授权，真桌面回归两条都过**（qwen3.8-flash，`--approval auto`）：
+> `run_6b779ff203fe`（Chrome 搜 B 站，结果页与前三条独立核对过）、`run_2c0d8f313032`（计算器点出 99+88+66=253，
+> 写入 workspace 的 `calc-result.txt`）。15 次成功截图**零次** `CAPTURE_UNSTABLE` —— R04 担心的「截图本身冒出新窗口」没有发生。
+> **这两条只覆盖了 R04**：R01 / R10 要有人看审批描述（AUTO 档下不调用）、R03 要模型同批排 `[screenshot, 动作]`（两次都是一批一个调用）、
+> R09 要一次超过 10 秒的激活 —— 都只有假驱动判据。R08 没有机械判据（判据要真的跑一次失败的 swiftc，而成功的构建会让授权作废）。
+>
+> ⚠️ **两条真机观察，都不是本批引入的**：① 第 1 轮截图在两次运行里都是 ScreenCaptureKit `-3811`（上一轮同一任务也是）——
+> 白名单应用不在当前桌面时排除式过滤器**也会**报错，ADR-0014 写的「得到一张空白图而不是一个错误」不成立；模型照提示先 `activate_app` 恢复。
+> ② Chrome 地址栏的**历史补全**把输入的 `https://www.bilibili.com/` 补成了用户浏览记录里的一个视频页并打开了它（截图随之发往端点）——
+> 模型没点视频，发现后点 logo 回首页；上一轮它自己删掉了补全。ADR-0015 代价 ① 的又一个实例。
+
+### ADR-0015（2026-10-03）：浏览器可在 CLI 入口显式放开给 GUI 操作 —— 真 Chrome 上搜 B 站跑通
+
+依据 [ADR-0015](sxw_aicoding/ADR/历史归档/0015-浏览器可在CLI入口显式放开给GUI操作.md)。
+
+```bash
+npm run dev -- --computer control --computer-apps "com.google.Chrome" --computer-allow-browsers \
+  --max-turns 50 --max-consecutive-failures 10 --task "..."
+```
+
+> ### 【定】只解除「浏览器」一类，只在 CLI，放开 ≠ 加白名单
+>
+> 浏览器被拒的首要理由是「Atlas 的审批卡片就在浏览器里」（自我审批）—— 这条只对 Web 入口是字面事实，
+> 所以 **Web 入口拒绝这个开关**（启动即失败）；CLI 的审批在终端，终端仍是硬拒绝。
+> 终端 / IDE / Agent 宿主 / 凭证类被拒的理由与入口无关，不开口子。TS 与 Swift 两道都认这个开关，它进工具 version 摘要。
+> `verify:computer` 44 条（O 段 +3），两处注入各自翻红。
+>
+> 实测 `run_536c62856c99`（qwen3.8-flash，白名单只有 Chrome）：新标签 → 输入网址并**自己删掉 Chrome 的历史补全** →
+> B 站主搜索框输入「agent开发面试」→ 结果页，前三条与独立截图一致。⚠️ 截图里有用户的其他标签页、书签栏与登录头像 ——
+> 这正是 ADR-0015 代价 ① 写的，红字横幅在启动时说了。
+
+### ADR-0014（2026-10-03）：观察过期不计失败、只读外部状态不判打转 ＋ 第一次真桌面运行抓到的几何 bug
+
+依据 [ADR-0014](sxw_aicoding/ADR/历史归档/0014-观察过期不计失败与只读外部状态不判打转.md)（用户拍板）。
+`verify:computer` 38 → **41 条**，`verify:budget` 13 → **15 条**。
+
+> ### 【定】两条 Runtime 规则按「谁错了」「读不读外部状态」改，各自用合取 / 声明钉住边界
+>
+> | 规则 | 改成 | 边界 |
+> |---|---|---|
+> | 连续失败 | `AFTER_REOBSERVATION` **且** `NOT_STARTED` 的失败不计入 | 合取：副作用说不清的「过期」照常计（`verify:budget` I 段 ②） |
+> | Progress Guard | 全部由 `stateOutsideTranscript ＋ isReadOnly` 调用组成的批不判打转，并**重置**计数 | 「动作 ＋ 截图」的重复批照旧判（剩余盲区，提示里如实说） |
+>
+> handler 的检查顺序改成**先问「变没变」再问「许不许」**：截图之后冒出来的 Finder 是世界变了（STATE_CHANGED，不计），
+> 截图时就在那儿的 Finder 是模型瞄错了（NOT_ALLOWED，计入）。两种都不投递，差别只在谁错了 —— 而计数要的正是这个差别。
+
+> ### 【定】第一次真桌面运行撞墙，原因是截图几何，不是模型
+>
+> `run_609acf77238c`（qwen3.8-flash，计算器 ＋ 文本编辑）撞了 `consecutiveFailures 10/10`。
+> `SCContentFilter(display:including:)` 在 macOS 26 下截的是**白名单窗口的外接矩形**、再等比放大
+> （计算器 230×408 pt 在图里 290×515 px，×1.26 加平移），而 Atlas 按「图 = 整块显示器」换算 ——
+> **模型读图是对的，换算是错的，且不报错**；白名单窗口都不在当前桌面时外接矩形为空 → `-3811`。
+> 修法：排除式过滤器 ＋ 显式 `sourceRect` ＋ 驱动报回 **`contentRect`**，换算经它（E 段钉着）。
+> 我先怀疑的「思考开关」被 P-6 推翻：同一张真截图 ＋ Atlas 真实工具面，qwen 默认思考 13/14、关闭思考 1/14。
+>
+> 之后又抓到两条（都在助手里）：截图漏出**桌面图标层**（用户的文件名 → 改为按窗口排除、桌面窗口一并列入）；
+> 前台应用读的是 `NSWorkspace` 的**旧值**（`dispatchMain()` 不转 run loop → 激活了文本编辑仍报「Claude」，
+> 所有键盘输入被拒 → 改问辅助功能的焦点应用）。三处修完后第四次运行 `run_800091ccaf65` **端到端完成**：
+> 计算器读出 888、文本编辑新建文档输入「37 × 24 = 888」，独立截图核对过。
+> ⚠️ 第三次运行模型明说「打字没做成」，Run 却结算 `SUCCESS` —— 没有任务级完成契约（CU-9 / S5-7），登记不修。
+>
+> **阶段 0 用的是自己渲染的整屏 PNG —— 截图几何恰好永远是「整块显示器」，真实 ScreenCaptureKit 那一跳从来没被测过。**
+> 判据打在下游、跨不过出事的那一跳，这一次跨不过去的是操作系统。
+
+### 本机 computer use（2026-10-03）：图像进模型轨道，GUI 动作经自建 Swift 助手
+
+依据 [ADR-0013](sxw_aicoding/ADR/历史归档/0013-本机-computer-use-图像进模型轨道与自建-Swift-助手.md)；
+调研与阶段 0 探针见 [ComputerUse技术方案调研.md](sxw_aicoding/WorkAgent调研/ComputerUse技术方案调研.md)
+与 `spikes/s1-computer-use-vision/`。**默认关闭**，第一阶段只支持本机 macOS。
+
+```bash
+npm run computer:build && npm run computer:doctor -- --request   # 构建助手、触发授权（授权对象是 Atlas GUI Helper）
+npm run dev -- --computer control --computer-apps "TextEdit,Calculator" \
+  --max-turns 60 --max-consecutive-failures 10 --task "..."
+npm run ui  -- --computer view --computer-apps TextEdit          # 只截图
+```
+
+新增 `tools/computer/`（`@workagent/tools-computer`：工具定义、坐标换算、**全部判定**）＋
+`tools/computer/helper/`（Swift 助手，只供原语）。**运行期依赖仍是 4 个**；新增的是一个要 `swiftc` 的
+构建步骤 —— Atlas 第一个需要编译的组件。`verify:computer` 新增 **38 条判据**（ADR-0014 后 41 条；全程假驱动，
+不截真屏、不动鼠标），边界 grep 扩到 **16 条**（编号到 15）。
+
+> ### 【定】研究问题的答案：能说真话，代价是三处「如实说没有」
+>
+> 图像以 `ResourceKind: "image"` 进模型轨道，处置标记写 `IMAGE_NOT_REDACTED_SENT_TO_MODEL`
+> （脱敏不了，不假装）；`ComputerVerifier` 一律 SKIPPED（再截一次图是模型的观察，不是独立证据）；
+> 崩在一次点击中途落 §18.2 **分支三**（「点了没点」在屏幕上无从判断）。
+> 三处都是「Atlas 不知道」，而事实表上写的就是「不知道」。
+
+> ### 【定】判定全在 TS，Swift 助手只供原语
+>
+> 白名单、窗口身份、区域画面、截图有效性、安全输入、按键拒绝表 —— 全在 `handler.ts`。
+> 判定若写在 Swift 里，验收脚本只能拿假驱动去**模仿**它，判据测的就成了假驱动。
+> 助手投递前**另外**再判一次硬拒绝名单 —— 与 `run_shell` 两道闸门同构：合并成一层的必然写法是
+> 「既然 TS 判过了，助手就不用判了」，那正好把最后一道拆掉。
+
+> ### 【定】图放在 tool_result **之内**、坐标一律 0–1000 归一化 —— 两条都是 Spike 1 实测逼出来的
+>
+> 放在 tool_result 之后，百炼 **HTTP 200 静默丢图**（4/4）；qwen **无视**「像素坐标」的声明照样给归一化。
+> 前者进端点声明（`vision.imageCarrier`），后者让换算只依赖显示器逻辑尺寸（`toPoints`）。
+> 换算**不进形状适配器** —— 坐标空间写在端点声明里，「谁读声明谁换算」读起来很顺，
+> 那正是边界 15 抓的诱惑（换算依赖的是显示器几何，是工具的观察事实，不是端点行为）。
+
+> ### 【定】GUI 暴露了两条 Runtime 既有规则的隐含假设，本批**不改规则、如实提示**（**已由 ADR-0014 修订**，见上）
+>
+> | 规则 | 在 GUI 任务里的后果 |
+> |---|---|
+> | 连续失败只在「必需验证通过」时清零 | GUI 动作没有独立核实 → 它实际是**整个 Run 的累计拒绝数**，默认 3 次就结束 |
+> | Progress Guard：连续三批完全相同的调用 ＝ 原地打转 | `screenshot` 入参恒为空 → 等界面加载时连截三次就 `NO_PROGRESS` |
+>
+> 两条都是写假驱动夹具时撞出来的（F 段连着造六次拒绝，第四次就撞墙；D 段连截七张，第三张就停）。
+> 改哪一条都是改 Runtime 的【定】，要单独的 ADR（ADR-0013 代价 ⑥⑦）。处置是启动提示（`text` 常驻）
+> 如实说并给参数，`verify:computer` N 段把「提示说的」与「实际发生的」钉在一起 —— 规则改了而提示没改，那里会红。
+
+> ### 【定】守卫重叠区，第五次 —— 仍然只有注入实测发现得了
+>
+> 「没有 vision 就一张图都不发」有两道门（帧编译时不装、适配器出请求时不发）。C 段第一版是端到端判据，
+> 注入实测：只摘适配器那道，**照样绿** —— 测的是合取。已补一条直接喂适配器「已带活图的帧」的配对判据。
+> 本批 19 处实现各注入一次，对应判据全部翻红，外加这一次。
+
+> ⚠️ **没有机械判据、登记在此**：CLI 审批提示的 GUI 分支（与 Web 卡片同出 `describeForApproval`）；
+> Swift 助手本身 —— 只核对过构建、启动、socket ＋ peer pid、授权查询、应用解析、退出无残留，
+> **没截过真屏、没投递过真事件**（那要用户本人授权）。
+>
+> ⚠️ **仍然开着的门槛（要花钱、要授权）**：真实端点在真实桌面上跑完一个多步 GUI 任务。
+> 另记两条：Atlas 不发送思考参数（阶段 0 里 qwen 的 10/10 是关闭思考测的）；只支持主显示器。
+>
+> ⚠️ **`verify:resource` 在 HEAD 上就崩在 F 段**（`resource.ts:338`，`JSON.parse` 一个按 12000 字符切开的页；
+> 本批用干净 worktree 复核过），与本批无关、未动。`verify:all` 的 `&&` 链里 `verify:computer` 排在它之前。
+
 ### 预算轴做成真参数（2026-09-02）：**唯一稀缺的那条轴，此前是唯一调不动的**
 
 起因是一次真实实测（Run `run_6c3fec671ceb`，「抓 ATA 文章 → 下图 → 打 zip」）：
@@ -1259,7 +1425,15 @@ npm run dev -- --list-runs         # 库里有哪些 Run
 npm run dev -- --resume <runId>    # 接上一个没跑完的 Run
 npm run dev -- --resume <runId> --recovery-decision CONTINUE --recovery-note "已人工确认"
 npm run dev -- --endpoint deepseek --task "..."   # 换对照端点（受枚举约束，拼错立刻失败）
+npm run computer:build             # ★ADR-0013：构建 Atlas GUI Helper.app（源码不变就跳过 —— 重建会让授权失效）
+npm run computer:doctor            # 查授权（不弹框）；加 --request 触发授权提示，加 --apps A,B 看白名单解析
+npm run dev -- --computer control --computer-apps "TextEdit" --task "..."   # ★本机 GUI（默认 off）
 ```
+
+**computer use（ADR-0013）**：`--computer off|view|control` ＋ `--computer-apps A,B`（应用名或 bundle id）。
+与 `--sandbox` **正交**（GUI 动作在别的应用进程里生效，任何档位下都不在沙箱内）；
+终端 / IDE / Agent 宿主 / 浏览器 / 凭证与安全类应用写进白名单**直接启动失败**；端点声明没有 `vision` 也启动失败。
+授权对象是 **Atlas GUI Helper**（`.workagent-state/computer/`），不是终端。
 
 **外部 MCP（ADR-0011）**：`cp mcp.example.json .workagent-state/mcp.json` 就能用，
 不改任何代码；`--mcp-config <path>` 可换位置。配置文件不存在**不是错误**。
@@ -1390,8 +1564,18 @@ npm run verify:resource            # Resource 文本/二进制往返、同内容
                                    #   ＋ 未知 content 块不得废掉工具 ＋ 握手卡住不留孤儿进程
                                    #   ＋ resume 说出「外部工具核对不了」＋ 示例配置必须真能解析
                                    #   用**手写的假 MCP 服务器**，不依赖 Playwright、不联网、不弹窗口
+npm run verify:computer            # ★ADR-0013：边界 15 判别力 ＋ 图像进 tool_result（两道门各自可触发）
+                                   #   ＋ 图像 token 两条路径（差值恰好等于公式）＋ 活图窗口成批移出
+                                   #   ＋ 坐标（显示器 pt ≠ 截图 px ≠ 1000）＋ 执行前复核六种拒绝 ＋ 配对
+                                   #   ＋ 失败即中止本批 ＋ 安全输入 ＋ Web 审批卡（控件、剥 RLO）
+                                   #   ＋ 审计不落图像字节 ＋ resume 分支一/三与白名单漂移
+                                   #   ＋ N 段：两条既有规则的「提示与行为一致」
+                                   #   ＋ ★P–T 段（2026-10-03 评审）：复核依据只认模型看过的截图 ·
+                                   #     审批绑定目标（审批界面拿走焦点 → 切回；白名单应用拿走 → 拒绝）·
+                                   #     复核途中取消不投递 · 拖拽终点比画面 · 审批全文 · vision 进指纹 · 助手重连
+                                   #   全程**假驱动**：不截真屏、不动鼠标、不弹授权框
 npm run verify:model-audit         # 调用级实际请求、SDK 解码 Provider 事件/错误与 fail-open 独立审计
-npm run verify:all                 # 16 条脚本 / 263 条判据
+npm run verify:all                 # 18 条脚本（verify:resource 在 HEAD 上就崩在 F 段，见「当前状态」）
 ```
 
 > **【定】`verify:ui` 必须真的起 HTTP 服务**，不能直接调 `PendingHub` 的方法测。
@@ -1555,7 +1739,7 @@ isBlockClosed     形状提供事件          端点提供有无
 
 主力端点是**百炼 Anthropic 形状 `qwen3.7-plus`**（D-16）。选它而不是评分更高的 DeepSeek，因为它**零协议兜底**（缺 tool_result、错 tool_call_id 一律 200 放行）且服务端无状态——用一个什么都不校验的端点开发，能逼出自持逻辑的全部漏洞。`compose.ts` 是全仓唯一写死端点名的地方。
 
-### 边界 grep：编号 1…13、共 14 条规则（有机械判据，改动后复核）
+### 边界 grep：编号 1…15、共 16 条规则（有机械判据，改动后复核）
 
 **【定】表在 `apps/cli/src/verify/boundaries.ts`，不要在别处抄第二份。**
 从阶段 4 起有两个消费者（`verify:tools` 跑全表、`verify:ui` 对新增几条做判别力实测），
@@ -1576,7 +1760,14 @@ grep -rnE "\.(inner|outer)HTML|insertAdjacentHTML" apps/workagent-ui/public  # 1
 grep -rnE 'style: "|style="' apps/workagent-ui/public       # 11. ★阶段 4 收口：不得用内联 style（被自己的 CSP 丢弃）
 grep -rniE "modelcontextprotocol|StdioClientTransport" packages adapters  # 12. ★ADR-0011：MCP 客户端不得进 Runtime
 grep -rnE "calc\(100vh *-" apps/workagent-ui                 # 13. ★界面高度不得由视口减写死常数算出
+grep -rnE "hugozhu|博客文章|images/|正文选择器|固定(文章)?数量" packages/harness-runtime/src tools/common/src  # 14. Resource 管道不得含 Eval 夹具语义
+grep -rnE "ComputerDriver|HelperDriver|AtlasGUIHelper|ScreenCaptureKit|CGEvent|AXUIElement|toPoints\(" packages adapters  # 15. ★ADR-0013：屏幕与输入不得进 Runtime / 适配器
 ```
+
+> **第 15 条的两种诱惑都不需要 import 工具包**（第 4 / 6 条一条都不会响）：在 `ports/` 里加一个
+> 「屏幕 Port」，或者把 0–1000 → 屏幕点的换算搬进形状适配器（坐标空间就写在端点声明里，看着顺理成章）。
+> 判别力实测在 `verify:computer` A 段（两种各注入一次）。射程如实写明：它抓的是本仓屏幕域的**名字**，
+> 换个名字重写一遍它不会命中 —— 与第 13 条一样把盲区写下来，不扩成噪音模式。
 
 > **第 12 条与第 7 条同源但更隐蔽。** MCP 的诱惑**不需要 import 任何工具包** ——
 > 把 `StdioClientTransport` 搬进 `packages/harness-runtime/src/ports/` 就行，
@@ -1708,8 +1899,17 @@ tools/mcp/                   ★ADR-0011。通用 MCP 客户端（@workagent/too
   src/handler.ts             isError 按档位分流：read→NO_EFFECT，execute→UNKNOWN
                              【定】成功时 execute 档记 APPLIED，不是 UNKNOWN ——
                              否则每次正常调用都 push RecoveryItem，降级信号变成永远亮的灯
+tools/computer/              ★ADR-0013。本机 computer use（@workagent/tools-computer）
+  src/handler.ts             **全部判定**：白名单 → 窗口身份 → 区域画面 → 截图有效性；键盘的前台 / 安全输入
+                             【定】判定不进 Swift —— 进了就只能拿假驱动去模仿它，判据测的就成了假驱动
+  src/definitions.ts         两个工具不是一个：screenshot（READ 幂等）／ computer（EXECUTE 非幂等、
+                             haltsBatchOnFailure、requiresPreFingerprint → 崩溃落分支三）
+  src/approval.ts            审批面的「点的是哪个应用、哪个控件」—— 两个入口共用，只打坐标是盲批
+  src/helper-build.ts        swiftc ＋ ad-hoc 签名。【定】源码 hash 不变就不重建（重建 = 授权作废）
+  src/helper-driver.ts       open -n -g -a 启动助手（独立 TCC 身份）＋ 0700 目录里的 Unix socket
+  helper/AtlasGUIHelper.swift  只供原语；投递前再判一次硬拒绝；LOCAL_PEERPID ＋ 看门狗
 cases/micro-cases/           只剩 append_log 与 slow_write —— **测量工具**，不是能力
-apps/cli/                    Composition Root（compose.ts）＋ 终端入口 ＋ 17 条验收脚本 ＋ 一次性探针
+apps/cli/                    Composition Root（compose.ts）＋ 终端入口 ＋ 18 条验收脚本 ＋ 一次性探针
   src/composite.ts           ★阶段 3。工具包组合器。【定】必须路由 Verifier 的**三个**方法
   src/stdin-channel.ts       ★阶段 3。**单一** readline，按「谁在等」分派三种语义
   src/trace/file-sink.ts     事件流落 JSONL（header / event / footer 三种行）
@@ -1776,7 +1976,7 @@ apps/workagent-ui/public/    ★阶段 4。Layer 1。**没有 src/、没有构�
 - **规格纪律**：任何 Contract 冻结前必须能指出证据来源；拿不出证据就标【验】或【议】。反向同样成立——「必须存在某个机制」也需要证据，V03 的 15 个决策点里有 3 个被证明**问题本身不该问**。
 - **未接线比不写更糟**：类型、事件、类都在但运行时从不执行，会让人以为问题已经解决了；此前已有多项这种误报。要么接线，要么删掉。
 - 阶段 1 只实现能被当阶段 Micro Case 覆盖的最小面。新增 Port 时必须同时指出强制它存在的不变量。
-- 提交前跑 `npm run typecheck` ＋ 相关的 `verify:*`，并复核边界 grep（14 条，`verify:tools` A 段机械跑）。
+- 提交前跑 `npm run typecheck` ＋ 相关的 `verify:*`，并复核边界 grep（16 条，`verify:tools` A 段机械跑）。
 - **不留「声明了但没人读」的字段、枚举值、Port 或参数。** 要么接线，要么删 ——
   一个没有消费者的声明会让下一个人以为那件事已经有人管了。2026-08-31 那一批
   拆掉的三十多项，每一项当初都是「先声明着，将来会用」。

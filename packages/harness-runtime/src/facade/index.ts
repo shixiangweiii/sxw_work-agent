@@ -406,14 +406,15 @@ export class HarnessRuntime {
        * `ResumeExternalToolsUnverifiable` 的类型注释：放行了却没验过的闸门如果不说话，
        * 与「验过并通过」在事后完全不可区分。
        *
-       * 判别式用 `effectResolution.kind === "RESOLVER"` ＋ scope 不可解析这类
-       * **Runtime 自己的词汇**是做不到的（RunSpec 里存的是声明，不含 scope）。
-       * 用 `EXTERNAL_TOOL` 也不行 —— 那要跑一次 resolve。所以这里退到
-       * 工具名前缀：它由 `atlasToolName()` 唯一产生，而**边界 12 保证 Runtime
-       * 不认识 MCP** —— 认一个字符串前缀不等于认识那个协议。
+       * 【定】判别式是工具自己的**声明**（`stateOutsideTranscript`），不是名字。
+       *
+       * 这里此前退到了工具名前缀 `mcp__`（理由：RunSpec 里存的是声明、不含 scope，
+       * 而当时没有一个声明能表达这件事）。ADR-0013 加 computer use 时它当场漏掉了
+       * 第二类 —— 屏幕状态同样活在 transcript 之外，名字却不以 `mcp__` 开头。
+       * 一条按名字识别的规则，覆盖面只到写它那天见过的名字为止。
        */
-      const externalFrozen = spec.agentSpec.toolSnapshots.filter((t) =>
-        t.definition.name.startsWith("mcp__"),
+      const externalFrozen = spec.agentSpec.toolSnapshots.filter(
+        (t) => t.definition.stateOutsideTranscript === true,
       );
       if (externalFrozen.length > 0) {
         /**

@@ -39,9 +39,18 @@
     }
   },
 
-  "_comment_evidence": "sourceEvidenceRefs 刻意为空：qwen3.7-plus 的 raw probe 不能作为 qwen3.8-flash 的实测证据。ASSUMED 会在每次装配时产生 SYSTEM_NOTICE，使这笔证据债可见。",
+  "_comment_vision": "ADR-0013，全部来自 Spike 1（spikes/s1-computer-use-vision/raw，2026-10-03）。P-1：图放在 tool_result 里 4/4 收到；放在 tool_result **之后**的 image 块 0/4 —— HTTP 200 却静默丢图（计费只比不带图的对照组多 7 token，正好是提示文字的差值），所以 imageCarrier 只能是 IN_TOOL_RESULT。P-3：每 32×32 像素约 1 token ＋2（1280×800 → 1002、1792×1120 → 1962），≥2560×1600 封顶 2562；count_tokens 带一张 1280×800 的图只多 3 → countTokensIncludesImages=false。P-2/P-2b：不说明单位时 15/16 次用 0–1000 归一化；工具描述写明像素坐标时**照样输出归一化坐标**（1/10、0/10），归一化下工具调用形态 10/10。P-5：1792×1120 发送时 9–15pt 小字全部读对。",
+  "vision": {
+    "imageCarrier": "IN_TOOL_RESULT",
+    "imageTokens": { "patchPx": 32, "perImageOverhead": 2, "minTokens": 79, "maxTokens": 2562 },
+    "countTokensIncludesImages": false,
+    "groundingCoordinateSpace": "NORMALIZED_1000",
+    "preferredScreenshotLongEdgePx": 1792
+  },
+
+  "_comment_evidence": "sourceEvidenceRefs 只列 Spike 1 的视觉探针：它只证实 vision 组。qwen3.7-plus 的 raw probe 不能作为 qwen3.8-flash 的实测证据，协议 / 上下文 / token 三组仍未实测，所以 confidence 保持 ASSUMED。ASSUMED 会在每次装配时产生 SYSTEM_NOTICE，使这笔证据债可见。",
   "observedAt": 0,
   "probeSuiteVersion": "unprobed-qwen38-v1",
-  "sourceEvidenceRefs": [],
+  "sourceEvidenceRefs": ["spikes/s1-computer-use-vision/raw/p*-bailian-*.jsonl"],
   "confidence": "ASSUMED"
 }

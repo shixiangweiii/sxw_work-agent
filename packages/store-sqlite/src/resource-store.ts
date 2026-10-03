@@ -13,7 +13,7 @@ import type {
   ResourceStorePort,
   ResourceTextPage,
 } from "@workagent/harness-runtime";
-import { MAX_RESOURCE_BYTES } from "@workagent/harness-runtime";
+import { MAX_RESOURCE_BYTES, imageDimensions, isModelImageMediaType } from "@workagent/harness-runtime";
 import type { Db } from "./db.js";
 import { inTransaction } from "./db.js";
 
@@ -21,7 +21,7 @@ interface ResourceRow {
   ref: string;
   content_hash: string;
   size_bytes: number;
-  kind: "text" | "binary";
+  kind: ResourceReference["kind"];
   media_type: string;
   label: string;
   suggested_filename: string | null;
@@ -38,15 +38,37 @@ export class SqliteResourceStore implements ResourceStorePort {
     if (input.kind === "text" && typeof input.content !== "string") {
       throw new Error("RESOURCE_KIND_CONTENT_MISMATCH: text Resource 必须提供 string 内容");
     }
-    if (input.kind === "binary" && typeof input.content === "string") {
-      throw new Error("RESOURCE_KIND_CONTENT_MISMATCH: binary Resource 必须提供 Uint8Array 内容");
+    if ((input.kind === "binary" || input.kind === "image") && typeof input.content === "string") {
+      throw new Error(
+        `RESOURCE_KIND_CONTENT_MISMATCH: ${input.kind} Resource 必须提供 Uint8Array 内容`,
+      );
     }
     if (
       (input.kind === "text" && input.redactionDisposition !== "TEXT_REDACTED") ||
       (input.kind === "binary" &&
-        input.redactionDisposition !== "OPAQUE_BINARY_NOT_TEXT_SCANNED")
+        input.redactionDisposition !== "OPAQUE_BINARY_NOT_TEXT_SCANNED") ||
+      (input.kind === "image" &&
+        input.redactionDisposition !== "IMAGE_NOT_REDACTED_SENT_TO_MODEL")
     ) {
       throw new Error("RESOURCE_REDACTION_DISPOSITION_MISMATCH: 处置标记与 Resource kind 不一致");
+    }
+    /**
+     * 【定】模型可见图像在**入库时**就验明正身（ADR-0013）：媒体类型在白名单里、
+     * 字节真的是那种图、尺寸读得出来。
+     *
+     * 理由是去向：这份字节之后会被原样装进模型请求。一个声称是 PNG、实际是任意
+     * 字节的 image Resource，会在编译上下文时变成一个端点拒收（或静默丢弃）的
+     * 请求块 —— 而那一刻离产生它的工具已经隔了好几轮，查都查不到源头。
+     */
+    if (input.kind === "image") {
+      if (!isModelImageMediaType(input.mediaType)) {
+        throw new Error(
+          `RESOURCE_IMAGE_MEDIA_TYPE: ${input.mediaType} 不是模型可见图像支持的类型（image/png、image/jpeg）`,
+        );
+      }
+      if (!imageDimensions(input.content as Uint8Array)) {
+        throw new Error("RESOURCE_IMAGE_UNREADABLE: 字节不是可识别的 PNG / JPEG");
+      }
     }
     const bytes =
       typeof input.content === "string"
@@ -177,6 +199,16 @@ export class SqliteResourceStore implements ResourceStorePort {
   async readForMaterialization(ref: string): Promise<MaterializableResource | undefined> {
     const row = this.select(ref, true);
     if (!row) return undefined;
+    return {
+      reference: toReference(row),
+      content: new Uint8Array(row.content!),
+    };
+  }
+
+  async readImageForModel(ref: string): Promise<MaterializableResource | undefined> {
+    const row = this.select(ref, true);
+    // 【定】只认 image。binary 的契约是「字节不进模型」，这里不给它开口子。
+    if (!row || row.kind !== "image") return undefined;
     return {
       reference: toReference(row),
       content: new Uint8Array(row.content!),

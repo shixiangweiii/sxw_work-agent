@@ -37,10 +37,19 @@ import { SqliteRunStore, openDb } from "@workagent/store-sqlite";
 import type { HandoffChannel, QuestionChannel } from "@workagent/tools-common";
 import { connectMcpServers } from "@workagent/tools-mcp";
 import {
+  HelperDriver,
+  describeAllowlist,
+  ensureHelperBuilt,
+  parseComputerFlags,
+  type ComputerApprovalView,
+  type ComputerUseConfig,
+} from "@workagent/tools-computer";
+import {
   autoGrantVerdict,
   BUDGET_VALUE_FLAGS,
   budgetFlagHelp,
   compose,
+  DEFAULT_STATE_DIR,
   defaultMcpConfigPath,
   describeModes,
   fullAccessWarning,
@@ -128,6 +137,11 @@ interface Args {
    * 因此走同一条判据，而不是"命令行严一点、接口松一点"。
    */
   budgets: Record<string, string>;
+  /**
+   * 本机 computer use（ADR-0013）。默认 off；`--computer view|control` ＋
+   * `--computer-apps` 显式开启。与 `--sandbox` 正交（见 tools/computer/src/config.ts）。
+   */
+  computer: ComputerUseConfig;
 }
 
 /**
@@ -144,7 +158,7 @@ interface Args {
  */
 const VALUE_FLAGS = [
   "task", "workspace", "trace", "db", "resume", "recovery-decision", "recovery-note",
-  "endpoint", "mcp-config", "approval", "sandbox",
+  "endpoint", "mcp-config", "approval", "sandbox", "computer", "computer-apps",
   /**
    * 八条预算轴（`--max-turns` …）。
    *
@@ -155,7 +169,7 @@ const VALUE_FLAGS = [
    */
   ...BUDGET_VALUE_FLAGS,
 ];
-const BOOL_FLAGS = ["no-trace", "list-runs"];
+const BOOL_FLAGS = ["no-trace", "list-runs", "computer-allow-browsers"];
 
 function assertKnownArgs(argv: string[]): void {
   for (let i = 0; i < argv.length; i += 1) {
@@ -207,12 +221,13 @@ function assertModeArgs(argv: string[], mode: Mode): void {
     start: [
       ...common,
       "task", "trace", "no-trace", "endpoint", "mcp-config", "approval", "sandbox",
+      "computer", "computer-apps", "computer-allow-browsers",
       ...BUDGET_VALUE_FLAGS,
     ],
     resume: [
       ...common,
       "resume", "trace", "no-trace", "recovery-decision", "recovery-note",
-      "endpoint", "mcp-config", "approval", "sandbox",
+      "endpoint", "mcp-config", "approval", "sandbox", "computer", "computer-apps", "computer-allow-browsers",
     ],
   };
   const ignored = [...supplied].filter((name) => !allowed[mode].includes(name));
@@ -279,6 +294,7 @@ function parseArgs(argv: string[]): Args {
     endpoint,
     mcpConfig: get("mcp-config") ?? defaultMcpConfigPath(),
     budgets: parseBudgetFlags(argv),
+    computer: parseComputerFlags(get("computer"), get("computer-apps"), argv.includes("--computer-allow-browsers")),
   };
 }
 
@@ -320,6 +336,11 @@ function interactiveApproval(
    * 见 stdin-channel.ts 的文件头。
    */
   stdin: StdinChannel,
+  /**
+   * computer use 的审批描述（ADR-0013）：这一步要点哪个应用的哪个控件。
+   * 晚绑定（decider 先于 compose 建出来），没开 computer use 时恒返回 undefined。
+   */
+  describeGui: (a: PreparedAction) => Promise<ComputerApprovalView | undefined>,
 ): ApprovalDecider {
   /**
    * ── E-3：默认档位不再是「批准一切」────────────────────────────────────
@@ -466,6 +487,26 @@ function interactiveApproval(
       console.log(
         `  \x1b[31m此工具由外部 MCP 服务器执行，不在沙箱内\x1b[0m —— ` +
           `Atlas 不解析它的参数，也不约束它能读写什么。`,
+      );
+    }
+
+    /**
+     * ── 本机屏幕上的一次点击 / 输入（ADR-0013）──────────────────────────────
+     *
+     * 【定】只打坐标的审批是盲批（「点保存」与「点删除」在坐标里长得一样），
+     * 所以先查出那个点上是哪个应用、哪个窗口、哪个控件。与 Web 审批卡是同一份
+     * 内容的两处（`describeForApproval` 唯一给出），必须一起改。
+     *
+     * 【定】必须说「不在沙箱内」：无论 `--sandbox` 是哪一档，GUI 动作都在别的
+     * 应用进程里生效 —— 在审批那一刻沉默，等于默认它也被沙箱罩着。
+     */
+    if (e.scope.kind === "GUI") {
+      const view = await describeGui(a).catch(() => undefined);
+      console.log(`\n  \x1b[33m即将操作屏幕\x1b[0m：${forTerminal(view?.summary ?? e.scope.value)}`);
+      for (const l of view?.details ?? []) console.log(`    ${forTerminal(l)}`);
+      console.log(
+        `  \x1b[31mGUI 动作直接作用在这台机器上，不在沙箱内\x1b[0m —— ` +
+          `执行前还会复核目标窗口与画面，变了就不点。`,
       );
     }
 
@@ -629,6 +670,33 @@ async function main(): Promise<void> {
   const warn = fullAccessWarning(args.approval, args.sandbox);
   if (warn) console.log(`\x1b[31m⚠️  ${warn}\x1b[0m`);
 
+  /**
+   * computer use（ADR-0013）。开启时先确保 Swift 助手已构建（源码没变就跳过 ——
+   * 重建会让系统授权失效）；助手本身懒启动，第一次截图时才拉起。
+   *
+   * 【定】构建排在**任何资源获取之前**（stdin 通道、MCP 子进程、退出钩子都在它后面），
+   * 2026-10-03 代码评审 CU-R08。它此前排在 MCP 连好之后、清理钩子与 try/finally 之前：
+   * 首次使用缺 swiftc、编译或签名失败时，异常直接落到最外层 catch，已经连上的 MCP 与交互 stdin
+   * 都没人收，命令打完错误就挂在那里。挪到前面，失败时手里什么都还没有，也就没有要清理的东西 ——
+   * 比把它塞进清理范围更稳：后者要求每加一个资源都记得它与构建的先后。
+   * `HelperDriver` 的构造不占资源（懒启动），可以一起挪。
+   */
+  let computerDriver: HelperDriver | undefined;
+  if (args.computer.level !== "off") {
+    const built = ensureHelperBuilt({
+      stateDir: resolve(REPO_ROOT, DEFAULT_STATE_DIR),
+      log: (l) => console.log(l),
+    });
+    computerDriver = new HelperDriver({ appPath: built.appPath });
+    console.log(
+      `computer : ${args.computer.level === "control" ? "可截图、可操作" : "只能截图"}` +
+        `（白名单 ${describeAllowlist(args.computer)}；GUI 动作不在沙箱内）`,
+    );
+    if (args.computer.allowBrowsers) {
+      // 一次对用户可见的边界让渡而不打印，等于没通知（与「完全权限」那行红字同一条）。
+      console.log("\x1b[31m⚠️  浏览器已放开给 GUI 操作（--computer-allow-browsers）：页面、标签页标题会进截图发往模型端点，登录态在模型可点范围内。\x1b[0m");
+    }
+  }
   // Ctrl+C 的传播源。审批等待也挂在它上面（U-2）。
   const sigint = new AbortController();
 
@@ -724,6 +792,9 @@ async function main(): Promise<void> {
    * 没有任何东西会报错。所以真正的保证在 `shutdownMcp()` 那一侧。
    * ══════════════════════════════════════════════════════════════════════
    */
+  let guiDescribe: ((a: PreparedAction) => Promise<ComputerApprovalView | undefined>) | undefined;
+  process.once("exit", () => void computerDriver?.close());
+
   let mcpClosed = false;
   const shutdownMcp = async (): Promise<void> => {
     if (mcpClosed) return;
@@ -742,7 +813,9 @@ async function main(): Promise<void> {
         args.workspace,
         sigint.signal,
         stdin,
+        async (a) => guiDescribe?.(a),
       ),
+      ...(computerDriver ? { computer: { config: args.computer, driver: computerDriver } } : {}),
       // ADR-0012：第二条轴。冻结进 RunSpec 的就是这个值。
       executionPrivilege: args.sandbox,
       trace,
@@ -768,6 +841,10 @@ async function main(): Promise<void> {
       handoff: terminalHandoff(stdin, sigint.signal),
       question: terminalQuestion(stdin, sigint.signal, () => args.approval),
     });
+    // 晚绑定（见 `interactiveApproval` 的 describeGui 参数）。
+    guiDescribe = composed.computer
+      ? (a: PreparedAction) => composed.computer!.describeForApproval(a)
+      : undefined;
     interjectInto = (runId, text) => composed.runtime.interject(asId<RunId>(runId), text);
     profileRef = `${composed.profile.id}@${composed.profile.observedAt}`;
     modelId = composed.profile.modelId;
@@ -956,6 +1033,8 @@ async function main(): Promise<void> {
     // 任一方还持有句柄，CLI 都可能在报错后继续挂着。exit 钩子只处理极端兜底。
     stdin.close();
     await shutdownMcp();
+    // 助手进程随本进程退出（它有看门狗），这里是正常出口的主动收尾。
+    await computerDriver?.close();
   }
 }
 

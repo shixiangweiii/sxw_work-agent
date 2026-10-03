@@ -16,7 +16,7 @@ import type {
 // 纯类型循环引用（transcript.ts 反过来引本文件的 ModelContent）。
 // import type 会被完全擦除，不产生运行期依赖环。
 import type { ContextMessage } from "./transcript.js";
-import type { ResourceReference } from "./resource.js";
+import type { ModelImage, ResourceReference } from "./resource.js";
 
 /**
  * 【定】只放 `compile.ts` **真的会产出**的七种。
@@ -106,6 +106,14 @@ export interface ContextFrame {
   /** 必须同时覆盖推理与正文 —— 实测推理可以吃光整个输出预算且接口返回成功。 */
   reservedOutputTokens: number;
   trustSummary: TrustSummary;
+  /**
+   * 本帧真的会装进请求的图像，按 ref 索引（ADR-0013）。
+   *
+   * 【定】不在这里的 image ref 只以文字形式出现（tool_result 里的 ResourceRefs）。
+   * 「哪些图还活着」由 Context 编译按 `liveImageLimit` / `liveImagePruneStep`
+   * 决定，形状适配器只负责把这里有的图按端点声明放进请求 —— 适配器不做取舍。
+   */
+  liveImages: Record<string, ModelImage>;
   contentHash: string;
   createdAt: Timestamp;
 }
@@ -123,6 +131,23 @@ export interface ContextBudgetPolicy {
   inlineToolResultLimitTokens: number;
   /** 同一 ActionBatch 中允许 inline 的工具结果累计预算。 */
   inlineToolResultsPerBatchLimitTokens: number;
+  /**
+   * 至少保留多少张最近的图像真的装进请求（ADR-0013）。更早的只留文字引用。
+   *
+   * 【定】默认 3。依据是 Anthropic 的 computer use 实践（保留最近 3 张全分辨率截图）
+   * 与 Spike 1 的计费实测：1792×1120 一张在百炼约 1962 token、DeepSeek 约 962 token，
+   * 全部保留的话 40 步的 GUI 任务光截图就是 4–8 万 token，且越往后每步越慢。
+   */
+  liveImageLimit: number;
+  /**
+   * 旧图**成批**移出的步长（ADR-0013）。
+   *
+   * 【定】不逐张移出。前缀缓存是严格前缀匹配（STRICT_PREFIX）—— 每来一张新图就
+   * 把最老的一张换成文字，等于每一轮都改写历史中段，缓存每轮失效。
+   * 成批移出让活跃图数在 [limit, limit + step - 1] 之间摆动，
+   * 历史只在跨过步长时改写一次。
+   */
+  liveImagePruneStep: number;
 }
 
 export interface CompactionRecord {

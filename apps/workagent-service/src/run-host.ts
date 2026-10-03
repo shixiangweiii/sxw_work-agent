@@ -106,6 +106,7 @@ export interface RunHostOptions {
     | "contextPolicy"
     | "mcp"
     | "budgetOverrides"
+    | "computer"
   >;
 }
 
@@ -232,6 +233,12 @@ export class RunHost {
         () => this.approvalMode,
         (runId) => this.elevatedRuns.has(runId),
         (runId) => this.aborterFor(runId).signal,
+        /**
+         * GUI 动作的审批描述（ADR-0013）。**晚绑定**：decider 是 compose 的入参，
+         * 而 `describeForApproval` 是 compose 的产出 —— 审批发生时它早已就绪。
+         * 没开 computer use 时 `computer` 不存在，恒返回 undefined。
+         */
+        (a) => this.composed.computer?.describeForApproval(a) ?? Promise.resolve(undefined),
       ),
       handoff: this.pendingHub.handoffChannel(() => this.foregroundHolder),
       question: this.pendingHub.questionChannel(

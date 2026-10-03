@@ -1,0 +1,64 @@
+{
+  "_comment_purpose": "deepseek-flash（DeepSeek-V4.1-Flash，2026-09-10）在 DeepSeek Anthropic 形状下的独立能力声明（ADR-0013 起）。根 .env 写的是 deepseek_model=deepseek-flash，而此前只登记了 deepseek-v4-flash —— 那份 PROBED 声明背后的模型已被服务端换成 V4.1（旧名路由到新模型），继续用它等于拿 V4 的实测去驱动 V4.1。",
+  "_comment_evidence": "vision 组来自 Spike 1（spikes/s1-computer-use-vision/raw/p*-deepseek-*.jsonl）的实测；protocol / context / tokens 三组**沿用 V4-Flash 的 Spike 0 结论、未在 V4.1 上重测** —— 它们多半是 API 层属性而非模型属性，但「多半」不是证据，所以整份 confidence 写 ASSUMED（会在装配时产生 SYSTEM_NOTICE）。Spike 1 期间推理块原样回传正常（VERBATIM_REQUIRED 未见冲突），关闭思考参数被接受。",
+  "id": "epcp_deepseek_anthropic_flash_v41",
+  "endpointId": "ep_deepseek_anthropic",
+  "shape": "ANTHROPIC_MESSAGES",
+  "modelId": "deepseek-flash",
+  "_comment_expectedBaseUrlHost": "U-6：compose 据此断言 baseUrl 与声明指向同一个端点。这条对本 profile 尤其要紧 —— 它与主力端点的三组判定几乎处处相反，错配会静默跑出一堆莫名其妙的 400。",
+  "expectedBaseUrlHost": "api.deepseek.com",
+  "_comment_protocol": "沿用 V4-Flash（Spike 0 第三轮）：缺 tool_result / 错 tool_call_id → 400。未在 V4.1 上重测。",
+  "protocol": {
+    "validatesToolResultPairing": true,
+    "validatesToolCallId": true,
+    "validatesToolResultOrder": false,
+    "validatesToolDefinitionSchema": false,
+    "validatesToolInputSchema": false,
+    "honorsDisableParallelToolCalls": false
+  },
+  "_comment_context": "沿用 V4-Flash：推理块是服务端状态，凭空构造的历史会被拒 → VERBATIM_REQUIRED。Spike 1 中把真实 call-1 的推理块原样回传，30+ 次工具回合均正常。",
+  "context": {
+    "reasoningBlockRule": "VERBATIM_REQUIRED",
+    "reasoningIsServerSideStateful": true,
+    "hasExplicitBlockCloseEvent": true,
+    "cacheMatching": "STRICT_PREFIX",
+    "supportsExplicitCacheBreakpoints": true
+  },
+  "_comment_tokens": "沿用 V4-Flash 的口径（每请求底数 84、计费含缓存）。Spike 1 P-3 另证实 count_tokens 存在且把图像算得与计费一致（带一张 1280×800：689 = 689）。",
+  "tokens": {
+    "hasCountTokensEndpoint": true,
+    "perRequestBaseTokens": 84,
+    "billedInputFormula": "INPUT_PLUS_CACHE",
+    "usageFieldMap": {
+      "inputTokens": "input_tokens",
+      "outputTokens": "output_tokens"
+    }
+  },
+  "_comment_errors": "配对错误在这里会以 source=MODEL_PROVIDER / status=400 出现，而在百炼上永远不会 —— §13.1 的映射表必须允许同一个逻辑错误在不同端点有不同 source。这也是对照测试能发现问题的机制本身。",
+  "errors": {
+    "discriminators": [
+      "HTTP_STATUS",
+      "MESSAGE_MATCH"
+    ]
+  },
+  "_comment_vision": "ADR-0013，全部来自 Spike 1（2026-10-03）。P-1：图放在 tool_result 里 4/4、放在其后 4/4、只放图 4/4 都收到。P-3：每 40×40 像素约 1 token ＋2（1280×800 → 642、1024×640 → 418），约 1792×1120 起封顶 962、下限 200；count_tokens 计图且与计费一致。P-2：不说明单位时给像素坐标，而**大图时给的是服务端缩小后那张图上的坐标**（3584 宽的图斜率 0.537）→ 一律用 0–1000 归一化；关闭思考、归一化、≥1792×1120 时 39/40 命中；工具调用形态归一化 8/10。P-5：1792×1120 发送时 9–15pt 全部读对。⚠️ 默认思考在自由 JSON 形态下 14/24 次把 8192 输出额度烧光、零作答；工具调用形态下正常（中位输出 116 token）。",
+  "vision": {
+    "imageCarrier": "IN_TOOL_RESULT",
+    "imageTokens": {
+      "patchPx": 40,
+      "perImageOverhead": 2,
+      "minTokens": 200,
+      "maxTokens": 962
+    },
+    "countTokensIncludesImages": true,
+    "groundingCoordinateSpace": "NORMALIZED_1000",
+    "preferredScreenshotLongEdgePx": 1792
+  },
+  "observedAt": 1790985600000,
+  "probeSuiteVersion": "s1-vision-r1 (+s0-r3 inherited)",
+  "sourceEvidenceRefs": [
+    "spikes/s1-computer-use-vision/raw/p*-deepseek-*.jsonl",
+    "spikes/s0-provider-protocol/raw/p*-deepseek-anthropic-shape-*.jsonl"
+  ],
+  "confidence": "ASSUMED"
+}

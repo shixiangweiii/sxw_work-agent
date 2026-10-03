@@ -55,6 +55,14 @@ export interface ProgressSample {
   inputDigest: string;
   /** ResolvedEffect.digest —— 同样的输入也可能解析出不同的作用域。 */
   effectDigest: string;
+  /**
+   * 这个调用只是**读取 transcript 之外的状态**（工具声明 `stateOutsideTranscript`
+   * ＋ `isReadOnly`：截图、只读档的 MCP 快照）。见 `observeBatch` 里那条【定】。
+   *
+   * 【定】由工具**声明**推出，不按名字识别 —— 与 resume 的「外部状态核对不了」同一条：
+   * 按名字的规则只覆盖写它那天见过的名字。
+   */
+  observesExternalState: boolean;
 }
 
 export interface NoProgressVerdict {
@@ -89,10 +97,32 @@ export class ProgressGuard {
       return undefined;
     }
 
+    /**
+     * ── 【定】只读取外部状态的批：不按入参相同判无进展，而且**重置**计数（ADR-0014）──
+     *
+     * 「相同入参连续三次」这个判据隐含一个假设：结果只取决于入参。读 transcript
+     * 之外的状态时它不成立 —— `screenshot` 的入参恒为空，而它每次看到的屏幕可以完全不同；
+     * 等一个应用加载、等一个下载跑完，连看三次是正常的观察，不是打转。
+     *
+     * 为什么是重置而不是「跳过、不碰计数」：这道守卫的理由是「第三次还一模一样，
+     * 说明模型没有在读反馈」——而一个只做观察的批，**就是模型在读反馈**。
+     * 于是 [点 A] [截图] [点 A] [截图] [点 A] 不算打转：每次点之前它都重新看过。
+     *
+     * ⚠️ 射程如实写明：只豁免**全部**由这类调用组成的批。[滚动, 截图] 这种
+     * 「动作 ＋ 观察」的批照旧按入参判 —— 同一处连滚三次仍会被判打转（ADR-0014 里登记）。
+     * 兜底的是轮次预算：一个一直只截图的 Run 最终会撞 MAX_TURNS，而不是永远跑下去。
+     */
+    if (samples.every((s) => s.observesExternalState)) {
+      this.last = undefined;
+      this.repeats = 0;
+      return undefined;
+    }
+
     const merged: ProgressSample = {
       toolName: samples.map((s) => s.toolName).join("+"),
       inputDigest: samples.map((s) => s.inputDigest).join("|"),
       effectDigest: samples.map((s) => s.effectDigest).join("|"),
+      observesExternalState: false,
     };
 
     const same =

@@ -10,6 +10,7 @@ import { readFileSync } from "node:fs";
 import type {
   EndpointCapabilityProfile,
   EndpointCapabilityProfileSnapshot,
+  VisionCapability,
 } from "../../types/endpoint.js";
 import { asId } from "../../types/ids.js";
 
@@ -71,6 +72,9 @@ export function parseProfile(raw: Record<string, unknown>): EndpointCapabilityPr
     }
   }
 
+  const vision = raw["vision"] as Record<string, unknown> | undefined;
+  if (vision !== undefined) parseVision(vision);
+
   const p = raw as unknown as EndpointCapabilityProfile;
   return {
     ...p,
@@ -81,6 +85,62 @@ export function parseProfile(raw: Record<string, unknown>): EndpointCapabilityPr
     sourceEvidenceRefs: (raw["sourceEvidenceRefs"] as string[] | undefined) ?? [],
     confidence: (raw["confidence"] as EndpointCapabilityProfile["confidence"]) ?? "ASSUMED",
   };
+}
+
+/**
+ * `vision` 组的形状校验（ADR-0013）。
+ *
+ * 【定】拼错或缺一项就在加载时失败，不等到第一次截图。这组字段决定的是
+ * 「图放在请求哪里」「每张图算多少 token」「点击坐标按什么换算」——
+ * 任何一项静默落回默认值，都会变成一个不报错的系统性偏差（坐标那一项尤甚：
+ * 每一下都点偏，而端点照样 200）。
+ */
+function parseVision(v: Record<string, unknown>): void {
+  if (typeof v !== "object" || v === null || Array.isArray(v)) {
+    throw new Error("端点能力声明的 vision 必须是对象");
+  }
+  if (v["imageCarrier"] !== "IN_TOOL_RESULT") {
+    throw new Error(`端点能力声明的 vision.imageCarrier 只能是 IN_TOOL_RESULT，收到：${String(v["imageCarrier"])}`);
+  }
+  if (v["groundingCoordinateSpace"] !== "NORMALIZED_1000") {
+    throw new Error(
+      `端点能力声明的 vision.groundingCoordinateSpace 只能是 NORMALIZED_1000，收到：${String(v["groundingCoordinateSpace"])}`,
+    );
+  }
+  if (typeof v["countTokensIncludesImages"] !== "boolean") {
+    throw new Error("端点能力声明的 vision.countTokensIncludesImages 必须是 boolean");
+  }
+  const edge = v["preferredScreenshotLongEdgePx"];
+  if (typeof edge !== "number" || !Number.isSafeInteger(edge) || edge < 256 || edge > 8192) {
+    throw new Error("端点能力声明的 vision.preferredScreenshotLongEdgePx 必须是 256..8192 的整数");
+  }
+  const t = v["imageTokens"] as Record<string, unknown> | undefined;
+  if (!t || typeof t !== "object" || Array.isArray(t)) {
+    throw new Error("端点能力声明的 vision.imageTokens 必须是对象");
+  }
+  for (const key of ["patchPx", "perImageOverhead", "minTokens", "maxTokens"] as const) {
+    const value = t[key];
+    if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+      throw new Error(`端点能力声明的 vision.imageTokens.${key} 必须是非负整数`);
+    }
+  }
+  if ((t["patchPx"] as number) === 0 || (t["minTokens"] as number) > (t["maxTokens"] as number)) {
+    throw new Error("端点能力声明的 vision.imageTokens 取值不自洽（patchPx 为 0 或 minTokens > maxTokens）");
+  }
+}
+
+/**
+ * 按端点声明估一张图的 token 数（ADR-0013）。Context 编译与形状适配器共用这一份 ——
+ * 两处各写一遍的后果是「预算判定」与「请求计数」对同一张图给出两个数。
+ */
+export function estimateImageTokens(
+  vision: VisionCapability,
+  width: number,
+  height: number,
+): number {
+  const t = vision.imageTokens;
+  const raw = Math.ceil(width / t.patchPx) * Math.ceil(height / t.patchPx) + t.perImageOverhead;
+  return Math.min(t.maxTokens, Math.max(t.minTokens, raw));
 }
 
 /**
@@ -161,6 +221,12 @@ export function profileMatches(
  * 不含 `sourceEvidenceRefs` / `observedAt` / `confidence` —— 补一条证据引用、
  * 改一次观测日期不该让昨天的 Run 恢复不了。`_comment_*` 在 `loadProfileFromFile`
  * 里就已经剥掉了。
+ *
+ * 【定】`vision` 在内（2026-10-03 代码评审 CU-R06）。它是 ADR-0013 新加的一段，而这个函数
+ * 当时没跟着改：图像 token 公式或 `countTokensIncludesImages` 改了之后，旧 Run 的 resume
+ * 照样放行，接下来的帧按新规则算图像 token —— 预算轴与 Compact 触发点悄悄换了口径。
+ * GUI 工具的版本摘要只含坐标约定与截图长边，管不到这两项。
+ * 新加一段声明时必须回到这里：漏掉的那一段，resume 时就是一条不被核对的行为。
  */
 function behaviorFingerprint(p: EndpointCapabilityProfile): string {
   return createHash("sha256")
@@ -171,6 +237,7 @@ function behaviorFingerprint(p: EndpointCapabilityProfile): string {
         tokens: p.tokens,
         errors: p.errors ?? null,
         limits: p.limits ?? null,
+        vision: p.vision ?? null,
       }),
     )
     .digest("hex")
@@ -225,7 +292,7 @@ export function assertResumeEndpointMatches(
   if (was !== now) {
     throw new Error(
       `拒绝 resume：端点能力声明 ${current.id} 的内容自这个 Run 启动后被改过。\n` +
-        `  冻结时指纹 ${was}，当前 ${now}（只比对 protocol / context / tokens / errors 四段，` +
+        `  冻结时指纹 ${was}，当前 ${now}（只比对 protocol / context / tokens / errors / limits / vision 六段，` +
         `证据引用与观测日期不计入）。\n` +
         `恢复必须用启动时的那一份声明 —— 用今天的规则去判一条昨天的 transcript，` +
         `同一条记录会走进不同的分支。`,

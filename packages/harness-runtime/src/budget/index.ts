@@ -37,6 +37,9 @@ export const DEFAULT_CONTEXT_POLICY: ContextBudgetPolicy = {
   compactTargetTokens: 40_000,
   inlineToolResultLimitTokens: 8_000,
   inlineToolResultsPerBatchLimitTokens: 12_000,
+  // ADR-0013：活跃图像 3..5 张之间摆动（见 ContextBudgetPolicy 两个字段的说明）。
+  liveImageLimit: 3,
+  liveImagePruneStep: 3,
 };
 
 /**

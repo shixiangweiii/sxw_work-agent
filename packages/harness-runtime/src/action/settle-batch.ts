@@ -183,6 +183,14 @@ export async function* executeBatch(
 
   let aborted = false;
   let skipRemaining = false;
+  /**
+   * 工具声明了「失败即中止本批」（ADR-0013，`haltsBatchOnFailure`）时，
+   * 本次失败之后的调用一律跳过。在**每一条**失败 / 拒绝分支上调用 ——
+   * 漏掉一支，那一种失败就会让后续的 GUI 输入照常打进错误的窗口。
+   */
+  const haltIfDeclared = (def: ToolDefinition | undefined): void => {
+    if (def?.haltsBatchOnFailure === true) skipRemaining = true;
+  };
 
   const batch: ActionBatch = {
     id: batchId,
@@ -254,6 +262,7 @@ export async function* executeBatch(
         const e = validation.error!;
         settle(call.toolCallId, renderError(e), true);
         yield ev(deps, "ActionRejected", { actionId, stage: "REJECTED_SCHEMA", reason: e.safeMessage });
+        haltIfDeclared(def);
         continue;
       }
 
@@ -275,6 +284,7 @@ export async function* executeBatch(
           stage: "REJECTED_SCHEMA",
           reason: resolveGuarded.error.safeMessage,
         });
+        haltIfDeclared(def);
         continue;
       }
       const resolvedEffect = resolveGuarded.value;
@@ -328,6 +338,7 @@ export async function* executeBatch(
           reason: verdict.error.safeMessage,
         });
         if (settlement.onActionFailure === "SKIP_REMAINING") skipRemaining = true;
+        haltIfDeclared(def);
         continue;
       }
 
@@ -360,6 +371,7 @@ export async function* executeBatch(
             stage: "REJECTED_APPROVAL",
             reason: decisionGuarded.error.safeMessage,
           });
+          haltIfDeclared(def);
           continue;
         }
         const decision = decisionGuarded.value;
@@ -407,6 +419,8 @@ export async function* executeBatch(
           // 【D-21】默认 CONTINUE_REMAINING —— 与 query.ts 的 runTools() 一致：
           // 遍历全部 tool block，不 break、不短路。
           if (settlement.onApprovalRejected === "SKIP_REMAINING") skipRemaining = true;
+          // 人拒了「点这里」，依赖它的「接着输入」不该照常执行（ADR-0013）。
+          haltIfDeclared(def);
           continue;
         }
       }
@@ -692,6 +706,7 @@ export async function* executeBatch(
           });
         settle(call.toolCallId, renderError(e), true);
         action.stage = "SETTLED";
+        haltIfDeclared(def);
         continue;
       }
 
@@ -752,6 +767,7 @@ export async function* executeBatch(
           persistedResources.references,
         );
         if (settlement.onActionFailure === "SKIP_REMAINING") skipRemaining = true;
+        haltIfDeclared(def);
         continue;
       }
       const vr = vrGuarded.value;
@@ -978,6 +994,7 @@ export async function* executeBatch(
           persistedResources.references,
         );
         if (settlement.onActionFailure === "SKIP_REMAINING") skipRemaining = true;
+        haltIfDeclared(def);
         if (settlement.onActionFailure === "ABORT_BATCH") break;
       }
     }
@@ -1409,6 +1426,22 @@ async function persistProducedResources(
             ...metadata,
             content: red.text,
             redactionDisposition: "TEXT_REDACTED",
+          }),
+        );
+      } else if (resource.kind === "image") {
+        /**
+         * 模型可见图像（ADR-0013）。字节**不过文本脱敏**（像素脱敏不了），
+         * 处置标记如实写「未脱敏、会发往模型端点」；类型与尺寸由 Store 入库时核验。
+         */
+        if (typeof resource.content === "string") {
+          throw new Error("image Resource 的 content 不是 Uint8Array");
+        }
+        references.push(
+          await deps.resources.put({
+            kind: "image",
+            ...metadata,
+            content: resource.content,
+            redactionDisposition: "IMAGE_NOT_REDACTED_SENT_TO_MODEL",
           }),
         );
       } else {

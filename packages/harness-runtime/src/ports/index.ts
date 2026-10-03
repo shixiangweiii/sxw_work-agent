@@ -535,6 +535,15 @@ export interface ResourceStorePort {
   /** 仅供 workspace 物化；调用方不得把返回字节带进任何模型可见轨道。 */
   readForMaterialization(ref: string): Promise<MaterializableResource | undefined>;
   /**
+   * 取一张**模型可见图像**的字节，供 Context 编译装进请求（ADR-0013）。
+   *
+   * 【定】只对 `kind === "image"` 返回；对 `binary` 一律返回 undefined。
+   * 两个读字节的入口必须按去向分开：`readForMaterialization` 的契约是
+   * 「字节不得进模型轨道」，复用它读截图等于让那句契约在一个调用点上失效，
+   * 而调用点本身看不出来。这里的名字就是去向。
+   */
+  readImageForModel(ref: string): Promise<MaterializableResource | undefined>;
+  /**
    * 回滚尚未发布到 Transcript/模型的临时引用，并清理因此失去引用的内容。
    * 只允许 Context 两阶段提交在 commit 前调用；已发布 Resource 永不走这里。
    */

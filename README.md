@@ -2,7 +2,8 @@
 
 自建生产级 Agent Harness。学习导向，个人使用。
 
-**当前状态：阶段 4 产品化半边完成（2026-09-02）—— 白盒界面、外部 MCP/浏览器、AUTO 模式与可配置预算已落地。**
+**当前状态：阶段 4 产品化半边完成（2026-09-02）—— 白盒界面、外部 MCP/浏览器、AUTO 模式与可配置预算已落地；
+2026-10-03 起支持本机 macOS 的 computer use（ADR-0013，默认关闭）。**
 
 阶段 1 Headless Walking Skeleton → 阶段 2 持久化与预算 → 阶段 3 通用能力面 →
 阶段 3.5 内置 shell 执行 → **阶段 4 白盒界面**。阶段 1–3.5 全部 headless。
@@ -112,6 +113,55 @@ AUTO 下 `ask_user` 直接走“无人回答、模型自己定”的正常降级
 
 > 未知参数一律报错，不维护已删除参数的别名或迁移分支。
 
+### 本机 computer use（ADR-0013，第一阶段只支持 macOS）
+
+**默认关闭**，必须显式开启并列出允许的应用。它与 `--sandbox` 正交：沙箱管的是 Atlas 自己的子进程，
+GUI 动作在别的应用进程里生效，**任何档位下都不在沙箱内**。
+
+```bash
+npm run computer:build                                  # 构建 Atlas GUI Helper.app（需 Xcode Command Line Tools）
+npm run computer:doctor                                 # 查授权状态（不弹任何对话框）
+npm run computer:doctor -- --request                    # 触发「录屏」「辅助功能」授权提示
+npm run computer:doctor -- --apps TextEdit              # 看白名单解析成了哪个应用
+
+npm run dev -- --computer control --computer-apps "TextEdit,Calculator" \
+  --max-turns 60 --max-consecutive-failures 10 --task "在 TextEdit 里新建一份文档，写一行字"
+npm run ui  -- --computer view --computer-apps TextEdit  # 只截图、不操作
+```
+
+| `--computer` | 含义 |
+|---|---|
+| `off`（默认） | 不装任何 GUI 工具 |
+| `view` | 只装 `screenshot`：截图**只含白名单应用的窗口**（其他应用、桌面、通知不进图） |
+| `control` | 再装 `computer`：点击、双击、右键、拖拽、滚动、输入、按键、切换应用、等待 |
+
+**授权对象是「Atlas GUI Helper」，不是终端。** 它是一个独立的 .app（ad-hoc 签名，放在
+`.workagent-state/computer/`），在「系统设置 → 隐私与安全性」的「录屏与系统录音」「辅助功能」里打开它。
+助手源码改动后会被重新构建，系统会把它当成新程序，需要重新授权；源码不变时不会重建。
+助手懒启动，只接受启动它的那个 Atlas 进程的连接，Atlas 退出它就退出。
+
+需要端点声明里有 `vision`：当前是 `qwen3.8-flash`（百炼）与 `deepseek-flash`（DeepSeek）。
+坐标一律是 0–1000 归一化，截图按端点声明的长边（1792）发送、放在 `tool_result` 之内。
+
+几道不因审批档位而消失的闸门：
+
+- **硬拒绝名单**：终端、IDE、Agent 宿主、浏览器（Atlas 的审批卡就在浏览器里）、钥匙串 / 密码管理器 / 系统设置，
+  写进白名单直接启动失败；助手投递事件前还会再判一次。**浏览器是唯一可以显式放开的一类**：只在 CLI 入口、
+  加 `--computer-allow-browsers` 并把它写进白名单（ADR-0015）；Web 入口不接受这个开关；
+- **执行前复核**：目标处必须是白名单应用、与截图时是同一个窗口、区域画面没变、那张截图仍有效 —— 否则不点；
+- **键盘**：只发给前台的白名单应用；密码框有焦点（安全输入）时拒绝；拒绝 Spotlight、切换应用、锁屏、注销等系统级组合；
+- **一个 GUI 动作失败，同批后面的动作全部跳过**；崩溃后的点击落 §18.2 分支三（交人决定），截图落分支一（重截）。
+
+审批面（终端与界面卡片）会说出这一步点的是哪个应用、哪个窗口、哪个控件，以及坐标换算成了哪个点。
+
+> **ADR-0014 之后的两条规则**：截图之后屏幕变了导致的拒绝（窗口换了、画面变了、截图失效）**不计入连续失败**；
+> 只由截图这类「只读外部状态」调用组成的批**不按入参判原地打转**。仍然如实提示的两件事：模型自己的错误（点到白名单外、
+> 非法按键）照常计入、且成功的 GUI 动作不会清零它，建议 `--max-consecutive-failures 10 --max-turns 60`；
+> 「动作 ＋ 截图」完全相同地连做三批（例如同一处连滚三次）仍会被判 `NO_PROGRESS`。
+
+> ⚠️ 本机没有隔离层：一次误点就是真实后果；截图会发往模型端点且无法脱敏；屏幕上的文字可能是提示注入。
+> 前台模式下请不要同时使用电脑。
+
 ### 八条预算轴与最大 token
 
 CLI 和 Service 启动参数可以覆盖新 Run 的默认预算；白盒界面的“新任务 → 预算”可以继续做
@@ -189,12 +239,12 @@ RUNNING 敲一句话回车 = 插话；等审批时回车 = 应答；等接管时
 
 ---
 
-## 17 条验收脚本
+## 18 条验收脚本
 
 不写单测（D-25）。验收以**可运行脚本**交付，输出可读证据供人判断，与 Spike 0 的探针形态一致。
 
 ```bash
-npm run verify:all                 # 17 条脚本；每条打印可读证据与判据合计
+npm run verify:all                 # 18 条脚本；每条打印可读证据与判据合计
 ```
 
 | 脚本 | 挂了意味着 |
@@ -213,6 +263,7 @@ npm run verify:all                 # 17 条脚本；每条打印可读证据与�
 | `verify:progress` | 长任务被误杀、原地打转叫不停、人机通道不通 |
 | `verify:ui` | ★阶段 4：Layer 2 开始推进执行语义、投影自己算数、本地通信边界破了、自动放行的正分支回退、失败的 resume 留幻影、或 RECOVERY_REQUIRED 的项看不见 |
 | `verify:mcp` | ★ADR-0011：MCP 跑进 Runtime、默认档不保守、开放 schema 被裁剪、分页/失败分流/生命周期/resume 漂移处理失效 |
+| `verify:computer` | ★ADR-0013：图像没进 `tool_result` 或无 vision 也发图、图像 token 算错、活图窗口逐张移出、坐标换算错、执行前复核 / 白名单 / 安全输入失守、失败后同批照常执行、审计落了图像字节、resume 不说「核对不了」；同批截图顶替了复核依据、审批批的应用与执行的应用不是同一个、取消之后照样投递、拖拽终点不比画面、审批只给半截文字、vision 改了照样 resume、助手重连吞掉响应；全程假驱动，不截真屏、不动鼠标 |
 | `verify:model-audit` | 实际请求、SDK 解码 Provider 事件或独立错误没有落盘，或审计故障改变了 Run |
 | `verify:resource` | Resource 字节不保真、批量外置失效、二进制泄漏进模型轨道，或原样物化失去来源 |
 | `verify:scenarios` | 三个场景不再共用同一套工具（过拟合警报） |
@@ -273,8 +324,10 @@ adapters/shape-anthropic-messages/   唯一允许 import Provider SDK 的地方
 adapters/endpoint-profiles/  端点行为的**数据**形态，不是代码
 tools/common/                Case 无关的通用能力面（9 场景 ＋ 4 机制工具）
 tools/mcp/                   通用本地 stdio MCP 客户端；配置、生命周期、工具桥接与 handler
+tools/computer/              ★ADR-0013。本机 computer use：工具定义、坐标换算与**全部判定**（TS）
+  helper/                    Atlas GUI Helper（Swift，只供原语：截图、窗口表、区域比对、投递事件）
 cases/micro-cases/           append_log 与 slow_write —— **测量工具**，不是能力
-apps/cli/                    Composition Root ＋ 终端入口 ＋ 17 条验收脚本 ＋ 一次性探针
+apps/cli/                    Composition Root ＋ 终端入口 ＋ 18 条验收脚本 ＋ 一次性探针
 apps/workagent-service/      ★阶段 4。Layer 2：投影 / Runtime Host / 三条人机通道 / HTTP ＋ SSE
 apps/workagent-ui/public/    ★阶段 4。Layer 1：**没有 src/、没有构建、没有一行 import**
 ```
@@ -302,7 +355,7 @@ apps/workagent-ui/public/    ★阶段 4。Layer 1：**没有 src/、没有构�
 这条管道只保证证据可恢复、可原样落盘；它不引入 Planner、任务级 Completion Gate，
 也不把任何站点、正文选择或目录规则写进生产 Runtime。
 
-### 边界 grep：编号 1…14、共 15 条规则（有机械判据）
+### 边界 grep：编号 1…15、共 16 条规则（有机械判据）
 
 ```bash
 npm run verify:tools      # A 段机械跑完整表，别手工 grep（表在 apps/cli/src/verify/boundaries.ts）
@@ -324,6 +377,7 @@ npm run verify:tools      # A 段机械跑完整表，别手工 grep（表在 ap
 | 12 | ★ADR-0011：**MCP 客户端不得进 Runtime / 适配器**；协议与进程管理属于工具域 |
 | 13 | ★阶段 4：界面高度不得用“视口减写死常数”计算；MCP notice 让顶栏换行后该假设会失效 |
 | 14 | Resource / Context 生产模块不得含合成归档 Eval 的站点、目录或固定数量语义 |
+| 15 | ★ADR-0013：**屏幕与输入（驱动、助手、坐标换算）不得进 Runtime / 适配器**；Runtime 只认识「模型可见的图像资源」 |
 
 前两条是研究问题「端点差异能否被完全挡在主循环之外」的机械判据。
 判据要区分**注释、类型定义与真实依赖** —— 这些文件里到处在引用规则本身，
@@ -355,6 +409,9 @@ npm run verify:tools      # A 段机械跑完整表，别手工 grep（表在 ap
 | Eval Inspector 独立视图（Trace Inspector 已做） | 评测阶段有多份报告要横向比时 |
 | Session 与配置管理（无 Session 概念，`SESSION_MESSAGE` 至今零产出点） | 有真实多轮会话需求时 |
 | Case 02 反证抽象 | 阶段 4 的另一半 |
+| computer use **真实端点 × 真实桌面**的多步任务没跑过（要花钱、要先授权助手）；验收全程是假驱动 | 授权后 live 复跑 |
+| GUI 任务里模型自己的错误是累计计数；「动作 ＋ 截图」的重复批仍会被判 `NO_PROGRESS`（ADR-0014 剩余盲区） | 需要「观察结果有没有变」这一类判据（V05 §16.2 第二形态） |
+| computer use 只支持主显示器、前台模式（会抢桌面）；不发送思考参数（阶段 0 的 qwen 10/10 是关闭思考测的） | 有真实需求时 |
 
 当前限制以本表和可执行验收为准；已经删除的阶段清单不再作为索引。
 
@@ -367,7 +424,7 @@ npm run verify:tools      # A 段机械跑完整表，别手工 grep（表在 ap
 | [CLAUDE.md](CLAUDE.md) | 面向协作的工程说明，**最常读的那份** |
 | [架构设计 V05](sxw_aicoding/架构设计/历史归档/WorkAgent架构设计_V20260823_05.md) | 历史设计基线；现行行为以源码、本文和验收为准 |
 | [上位基线 v0.4](sxw_aicoding/方案讨论/历史归档/WorkAgent目标定位与技术架构三次对焦讨论进展.md) | 历史目标与原则，用于理解设计来路 |
-| [历史 ADR](sxw_aicoding/ADR/历史归档/) | ADR-0001…0012 及模板；保留决策背景，不冒充现行目录 |
+| [历史 ADR](sxw_aicoding/ADR/历史归档/) | ADR-0001…0015 及模板；保留决策背景，不冒充现行目录 |
 | `sxw_aicoding/代码评审/` | 按日期分目录 |
 | `spikes/s0-provider-protocol/` | 一次性探针，已完成，不进主干依赖 |
 

@@ -23,6 +23,12 @@ import {
   defaultMcpConfigPath,
 } from "../../cli/src/compose.js";
 import { connectMcpServers } from "@workagent/tools-mcp";
+import {
+  HelperDriver,
+  describeAllowlist,
+  ensureHelperBuilt,
+  parseComputerFlags,
+} from "@workagent/tools-computer";
 import { startService } from "./server.js";
 import { selectStartupWorkspace } from "./workspace-registry.js";
 
@@ -51,6 +57,7 @@ function arg(argv: string[], name: string): string | undefined {
  */
 const VALUE_FLAGS = [
   "workspace", "port", "endpoint", "mcp-config", "approval", "sandbox",
+  "computer", "computer-apps",
   // 【定】名字表只从 compose 来 —— 这个文件与 `apps/cli/src/main.ts` 各有一份
   // VALUE_FLAGS（既有的重复）。手打的后果是一个入口认得、另一个报"不认识的参数"。
   ...BUDGET_VALUE_FLAGS,
@@ -61,6 +68,17 @@ function assertKnownArgs(argv: string[]): void {
     const raw = argv[i]!;
     if (!raw.startsWith("--")) continue;
     const name = raw.slice(2);
+    if (name === "computer-allow-browsers") {
+      /**
+       * 【定】Web 入口**不接受**这个开关（ADR-0015）。浏览器被硬拒绝的首要理由是
+       * 「Atlas 的审批卡片就在浏览器里」—— 在 Web 入口那正是字面事实：放开浏览器 = 让模型
+       * 点得到自己的「批准」按钮。CLI 入口的审批在终端，终端仍是硬拒绝。
+       */
+      throw new Error(
+        "Web 入口不接受 --computer-allow-browsers：这里的审批卡片就显示在浏览器里，放开浏览器等于让模型能点到自己的「批准」按钮。" +
+          "需要 GUI 操作浏览器请用 CLI 入口（npm run dev），见 ADR-0015。",
+      );
+    }
     if (VALUE_FLAGS.includes(name)) {
       /**
        * ── 【定】带值参数**必须真的带一个值**（二次评审 P2-4）────────────────
@@ -89,6 +107,8 @@ function assertKnownArgs(argv: string[]): void {
         `可用：${VALUE_FLAGS.map((f) => `--${f}`).join(" ")}\n` +
         `  --approval confirm|default|auto   审批档位（默认 default，界面上可随时改）\n` +
         `  --sandbox  on|off                 执行特权（默认 on，**运行中不可改**）\n` +
+        `  --computer off|view|control       本机屏幕（默认 off；ADR-0013）\n` +
+        `  --computer-apps A,B               允许截图 / 操作的应用（名字或 bundle id）\n` +
         // 【定】由表推出，不手写 —— 与 CLI 那一处同源。
         `${budgetFlagHelp()}\n` +
         `  （预算轴也可以在界面「新任务」栏里逐 Run 覆盖）`,
@@ -111,6 +131,8 @@ async function main(): Promise<void> {
   // ADR-0012：两条轴，与 CLI 同一份解析函数（抄一份就会分叉）。
   const approvalMode = parseApprovalMode(arg(argv, "approval"));
   const executionPrivilege = parseSandboxArg(arg(argv, "sandbox"));
+  // ADR-0013：与 CLI 同一个解析函数（白名单为空、命中硬拒绝名单都在这里就抛）。
+  const computerConfig = parseComputerFlags(arg(argv, "computer"), arg(argv, "computer-apps"));
 
   // 【定】没有 `--db` / `--trace-dir`：存储位置由 workspace 唯一推出
   // （`workspaceStorage()`），CLI 与界面同一条规则。目录已由上面的启动选择
@@ -134,6 +156,31 @@ async function main(): Promise<void> {
     workspaceRoot,
   });
 
+  /**
+   * ── computer use（ADR-0013）：助手与 MCP 同一条生命周期 ─────────────────
+   *
+   * 【定】驱动建一次、跨 workspace 切换复用。切目录会重新 `compose()`，
+   * 而助手进程持有的是**系统授权**（录屏 / 辅助功能）—— 跟着 RunHost 重启
+   * 不会丢授权，但会丢掉「这一次会话里的助手是哪个进程」，没有任何收益。
+   * 每次 compose 会建一个新的 handler（截图记录随之清空），那是对的：
+   * 换了 workspace 就是换了一批 Run，上一批的截图不该被这一批的点击引用。
+   *
+   * 助手懒启动：服务起来时只构建（源码没变就跳过），第一次截图才拉起进程。
+   */
+  let computerDriver: HelperDriver | undefined;
+  try {
+    if (computerConfig.level !== "off") {
+      const built = ensureHelperBuilt({
+        stateDir: resolve(REPO_ROOT, DEFAULT_STATE_DIR),
+        log: (l) => console.log(l),
+      });
+      computerDriver = new HelperDriver({ appPath: built.appPath });
+    }
+  } catch (err) {
+    await mcp.close();
+    throw err;
+  }
+
   try {
     const svc = await startService({
       workspaceRoot,
@@ -142,7 +189,11 @@ async function main(): Promise<void> {
       executionPrivilege,
       // `--max-turns` 等八条轴：这是**启动档**（每个新 Run 的默认预算）。
       // 界面「新任务」栏里的输入框压在它之上，逐 Run 生效。
-      composeOverrides: { mcp, budgetOverrides: parseBudgetFlags(argv) },
+      composeOverrides: {
+        mcp,
+        budgetOverrides: parseBudgetFlags(argv),
+        ...(computerDriver ? { computer: { config: computerConfig, driver: computerDriver } } : {}),
+      },
       /**
        * 【定】注册表放在 `.workagent-state/` 而不是某个 workspace 里面。
        *
@@ -185,6 +236,12 @@ async function main(): Promise<void> {
         .map((a) => `${a.field} ${a.limit}`)
         .join("，");
       if (budgetLine) console.log(`budget    : ${budgetLine}（启动档，界面上可逐 Run 再改）`);
+      if (computerDriver) {
+        console.log(
+          `computer  : ${computerConfig.level === "control" ? "可截图、可操作" : "只能截图"}` +
+            `（白名单 ${describeAllowlist(computerConfig)}；GUI 动作不在沙箱内，随启动参数固定）`,
+        );
+      }
       for (const n of info.notices) {
         console.log(`⚠️  ${n.text}`);
         // 终端照旧全打。折叠是**界面**的处置 —— 顶栏只有几行高，scrollback 没有上限。
@@ -210,6 +267,8 @@ async function main(): Promise<void> {
     }
   } finally {
     // MCP 子进程（浏览器）覆盖 startService、启动信息与运行期的全部异常出口。
+    // GUI 助手同理（它自己还有看门狗：本进程没了它也会退，这里是正常路径）。
+    await computerDriver?.close();
     await mcp.close();
   }
 }

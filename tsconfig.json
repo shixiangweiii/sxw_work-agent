@@ -14,7 +14,9 @@
       "@workagent/tools-common": ["tools/common/src/index.ts"],
       "@workagent/tools-common/*": ["tools/common/src/*"],
       "@workagent/tools-mcp": ["tools/mcp/src/index.ts"],
-      "@workagent/tools-mcp/*": ["tools/mcp/src/*"]
+      "@workagent/tools-mcp/*": ["tools/mcp/src/*"],
+      "@workagent/tools-computer": ["tools/computer/src/index.ts"],
+      "@workagent/tools-computer/*": ["tools/computer/src/*"]
     }
   },
   "include": [

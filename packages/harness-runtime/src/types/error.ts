@@ -58,7 +58,20 @@ export type Retryability =
   | "SAME_INPUT_BACKOFF"
   | "AFTER_MODEL_CORRECTION"
   | "AFTER_USER_ACTION"
-  | "AFTER_ENVIRONMENT_CHANGE";
+  | "AFTER_ENVIRONMENT_CHANGE"
+  /**
+   * 「你依据的那次观察已经过期了：**什么都没做**，重新观察再来」（ADR-0014）。
+   *
+   * 【定】它只在与 `sideEffectState: "NOT_STARTED"` 同时出现时才有特殊处置 ——
+   * 不计入连续失败（`run-loop.ts` 的 `anyFailed`）。理由是「谁错了」：
+   * 执行前核对发现世界在观察之后变了，那既不是模型的错（它照着当时的观察做的），
+   * 也不是工具的错（拒绝正是工具该做的事）。把它记成失败，GUI 任务里屏幕
+   * 一动就会把 Run 推向 MAX_CONSECUTIVE_FAILURES（ADR-0013 代价 ⑥，N 段实测过）。
+   *
+   * 不与 `AFTER_ENVIRONMENT_CHANGE` 合并：那一个说的是「等外部世界变」（服务恢复、
+   * 授权到位），重新观察解决不了；这一个说的是「世界已经变了，你还没看见」。
+   */
+  | "AFTER_REOBSERVATION";
 
 /**
  * 与 category 是两个独立维度，不得合并 ——「请求超时」不告诉你副作用发没发生。

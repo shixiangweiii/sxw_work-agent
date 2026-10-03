@@ -354,6 +354,14 @@ export interface UiPending {
      * 而 MCP 工具**没有沙箱**，这张卡是唯一还在的闸门。
      */
     externalArgs?: string;
+    /**
+     * GUI scope（本机 computer use，ADR-0013）：这一步落在哪个应用的哪个窗口、
+     * 哪个控件上，要输入什么。
+     *
+     * 【定】与 `externalArgs` 一样是独立的一支 —— GUI 动作**不在沙箱内**，
+     * 卡片上必须说出来，不能并进带着沙箱保证的 `command` 那一支。
+     */
+    gui?: { summary: string; details: string[] };
     /** 自动放行档位下为什么没放行。 */
     why?: string;
   };

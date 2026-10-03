@@ -541,6 +541,7 @@ async function main(): Promise<void> {
         getMetadata: (ref) => realResources.getMetadata(ref),
         getTextPage: (ref, opts) => realResources.getTextPage(ref, opts),
         readForMaterialization: (ref) => realResources.readForMaterialization(ref),
+        readImageForModel: (ref) => realResources.readImageForModel(ref),
         discardUncommitted: (refs) => realResources.discardUncommitted(refs),
       },
       policy: {

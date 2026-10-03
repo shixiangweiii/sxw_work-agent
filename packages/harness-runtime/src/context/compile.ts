@@ -20,7 +20,8 @@ import type { ExecutionPrivilege } from "../types/run.js";
 import type { IdGeneratorPort, ModelProtocolPort, ResourceStorePort } from "../ports/index.js";
 import { asId, digest, type ContextFrameId, type ModelInvocationId, type RunId } from "../types/ids.js";
 import { compactMessages } from "./compact.js";
-import { renderToolResultForModel } from "../types/resource.js";
+import { imageDimensions, isModelImageMediaType, renderToolResultForModel } from "../types/resource.js";
+import { estimateImageTokens } from "../model/capability/profile-loader.js";
 
 export interface CompileDeps {
   protocol: ModelProtocolPort;
@@ -103,8 +104,9 @@ export async function compileFrame(
   let compacted: { messages: ContextMessage[]; summary?: ContextMessage; kept: ContextMessage[] } | undefined;
   let stagedCompactionRefs: string[] = [];
 
-  // ① 首次成帧
+  // ① 首次成帧（ADR-0013：成帧之后、计数之前装上活跃图像 —— 计数必须看见它们）
   let frame = buildFrame(working, deps);
+  await attachLiveImages(frame, deps);
   let count = await deps.protocol.countTokens(frame);
   frame.totalTokens = count.tokens;
 
@@ -185,6 +187,7 @@ export async function compileFrame(
       compacted = { messages: working, ...(summary ? { summary } : {}), kept: result.kept };
       try {
         frame = buildFrame(working, deps);
+        await attachLiveImages(frame, deps);
         count = await deps.protocol.countTokens(frame);
       } catch (err) {
         const cleanup = await discardPreparedCompaction(deps.resources, stagedCompactionRefs);
@@ -534,6 +537,8 @@ function buildFrame(messages: ContextMessage[], deps: CompileDeps): ContextFrame
     // override 非空时来自上一轮的输出预算恢复，见 CompileDeps 的说明。
     reservedOutputTokens: deps.reservedOutputTokensOverride ?? deps.policy.reservedOutputTokens,
     trustSummary: summarize(items),
+    // 由 attachLiveImages() 填。构帧本身保持同步，取图字节是异步的那一步。
+    liveImages: {},
     contentHash: "",
     createdAt: deps.now,
   };
@@ -727,4 +732,81 @@ function computeIrreducible(
 
 function hashFrame(f: ContextFrame): string {
   return digest(f.items.map((i) => i.contentHash).join("|"));
+}
+
+// ══════════════════════════════════════════════════════════ 活跃图像（ADR-0013）
+
+/**
+ * 第几张图起算「活着」（会被装进请求）。按出现顺序编号，0 起。
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ * 【定】**成批**移出，不逐张移出。
+ *
+ * 逐张移出的写法最直观（永远只留最近 limit 张），而它每来一张新图就把最老的
+ * 一张换成文字 —— 也就是**每一轮都改写历史中段**。端点的前缀缓存是严格前缀
+ * 匹配（STRICT_PREFIX），于是从被改写的那张图往后，缓存每轮都失效。
+ * 截图又恰恰是帧里最大的东西：失效的代价是每轮重算几千 token 的图像。
+ *
+ * 成批移出让活跃图数在 [limit, limit + step − 1] 之间摆动，历史只在跨过
+ * 步长时改写一次（Anthropic 的 computer use 实践同样按批替换，间隔约 25 轮；
+ * 这里步长取 3，是因为两个目标模型每张图 1000–2000 token，留得太多太贵）。
+ * ══════════════════════════════════════════════════════════════════════
+ */
+export function liveImageWindowStart(total: number, limit: number, step: number): number {
+  if (total <= limit) return 0;
+  const hidden = total - limit;
+  const s = Math.max(1, Math.trunc(step));
+  return Math.floor(hidden / s) * s;
+}
+
+/**
+ * 给帧装上活跃图像：决定哪些 image ref 还活着、取字节、估 token、改写 hash。
+ *
+ * 【定】端点没有声明 `vision` 时**一张都不装**。图像引用照样以文字出现在
+ * tool_result 里（ResourceRefs），模型知道「有过一张截图」但看不到它 ——
+ * 那是如实的，而不是把一张端点看不见的图塞进请求、指望它被正确处理。
+ *
+ * 【定】字节取不到（Store 里没有、或不是 image）就当它已经过期：不装、不报错。
+ * 帧编译不该因为一张旧截图读不出来而整轮失败 —— 模型可以重新截图。
+ */
+async function attachLiveImages(frame: ContextFrame, deps: CompileDeps): Promise<void> {
+  const vision = deps.protocol.profile.vision;
+  if (!vision || !deps.resources) return;
+
+  const occurrences: Array<{ item: ContextItem; ref: string }> = [];
+  for (const item of frame.items) {
+    const c = item.content;
+    if (c?.type !== "tool_result") continue;
+    for (const r of c.resourceRefs ?? []) {
+      if (r.kind === "image") occurrences.push({ item, ref: r.ref });
+    }
+  }
+  if (occurrences.length === 0) return;
+
+  const start = liveImageWindowStart(
+    occurrences.length,
+    deps.policy.liveImageLimit,
+    deps.policy.liveImagePruneStep,
+  );
+  for (const { item, ref } of occurrences.slice(start)) {
+    const loaded = await deps.resources.readImageForModel(ref);
+    if (!loaded || !isModelImageMediaType(loaded.reference.mediaType)) continue;
+    const dims = imageDimensions(loaded.content);
+    if (!dims) continue;
+    const tokens = estimateImageTokens(vision, dims.width, dims.height);
+    frame.liveImages[ref] = {
+      ref,
+      contentHash: loaded.reference.contentHash,
+      mediaType: loaded.reference.mediaType,
+      data: Buffer.from(loaded.content).toString("base64"),
+      width: dims.width,
+      height: dims.height,
+      estimatedTokens: tokens,
+    };
+    item.estimatedTokens += tokens;
+    // 「这张图这一帧是装进去了还是只剩文字」也是帧内容的一部分 —— 必须进 hash，
+    // 否则成批移出那一刻的帧与前一帧会被当成同一个东西。
+    item.contentHash = digest(`${item.contentHash}|img:${loaded.reference.contentHash}`);
+  }
+  frame.contentHash = hashFrame(frame);
 }

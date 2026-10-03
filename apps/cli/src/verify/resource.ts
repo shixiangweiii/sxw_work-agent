@@ -257,6 +257,9 @@ async function main(): Promise<void> {
       readForMaterialization: async () => {
         throw new Error("INJECTED_STORE_FAILURE");
       },
+      readImageForModel: async () => {
+        throw new Error("INJECTED_STORE_FAILURE");
+      },
       discardUncommitted: async () => {},
     };
     const materializeStoreFailure = await executeMaterializeResource(

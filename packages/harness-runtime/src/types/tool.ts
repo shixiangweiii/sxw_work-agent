@@ -33,8 +33,15 @@ export interface EffectScope {
    * `main.ts` 那段注释写着「按 scope.kind 判而不是按工具名判 —— 将来任何一个
    * PROCESS scope 的工具都自动获得同样的展示」。那句话是对的，而这正是它的
    * 代价：展示按 scope 泛化，内容却按工具特化。加一个 kind 是唯一诚实的出路。
+   *
+   * ── `GUI`：本机屏幕上的一次点击 / 输入（ADR-0013）─────────────────────
+   *
+   * 同一条理由再用一次：它不能并进 `EXTERNAL_TOOL`（那一支打印「完整入参 JSON
+   * ＋ Atlas 不解析参数」，而 computer use 恰恰**解析**参数 —— 坐标要换算、
+   * 目标窗口要核对），也不能并进 `PROCESS`（那一支承诺沙箱，而 GUI 动作在别的
+   * 进程里生效，沙箱对它不成立）。审批面要展示的是「点哪个应用的哪个控件」。
    */
-  kind: "FILE" | "DIRECTORY" | "URL" | "PROCESS" | "EXTERNAL_TOOL" | "NONE";
+  kind: "FILE" | "DIRECTORY" | "URL" | "PROCESS" | "EXTERNAL_TOOL" | "GUI" | "NONE";
   /** 规范化语义对象，不以自由文本作为授权边界。 */
   value: string;
 }
@@ -291,6 +298,37 @@ export interface ToolDefinition {
    * Agent 在干活。只有「在等外部世界里的人」才该两者都做。
    */
   waitsForHumanInteraction?: boolean;
+  /**
+   * 这个工具失败（或被拒、被 Policy 拦下）时，**同批后续调用一律跳过**（ADR-0013）。
+   *
+   * ══════════════════════════════════════════════════════════════════════
+   * 为什么要有：GUI 动作在一批里前后依赖 —— 「点开对话框 → 输入 → 回车」。
+   * 点击被拒之后照常执行输入，字会打进错误的窗口。Anthropic 的 computer use
+   * 规范明确要求「按序执行、遇第一个失败就停、其余回 Not executed」。
+   *
+   * ── 【定】它是**逐工具声明**，不是批级开关 ───────────────────────────────
+   *
+   * `BatchSettlementPolicy` 的 `SKIP_REMAINING` 分支早就写在 settle-batch 里，
+   * 而**全仓没有任何生产者**传入非默认值（Spike 1 期间核实）—— 默认
+   * `CONTINUE_REMAINING` 对读文件、搜索这类互不依赖的调用是对的（D-21）。
+   * 批级开关只能在「全停」与「全继续」之间二选一；真正的语义是
+   * 「**这一个**操作失败了，依赖它的后续不该跑」，那是工具的属性。
+   *
+   * 【定】与 `waitsForHumanInteraction` 同一条边界：Runtime 认的是声明，
+   * 不是工具名。
+   * ══════════════════════════════════════════════════════════════════════
+   */
+  haltsBatchOnFailure?: boolean;
+  /**
+   * 这个工具作用于 **transcript 之外**的外部状态，resume 时 Atlas 核对不了它（ADR-0013）。
+   *
+   * 【定】`resume()` 据此发 `ResumeExternalToolsUnverifiable`：外部 MCP 工具
+   * （浏览器登录态活在子进程里，ADR-0011）与 computer use（屏幕状态活在
+   * 宿主机上）都是这一类。此前这个判定写成工具名前缀 `mcp__` ——
+   * 第二类工具一出现就漏掉，而漏掉的形态是**一条本该说话的事实不说话**。
+   * 改成声明之后，任何作用于外部状态的工具都自动获得同样的处置。
+   */
+  stateOutsideTranscript?: boolean;
 }
 
 /**

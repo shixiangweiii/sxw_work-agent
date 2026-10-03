@@ -2891,6 +2891,26 @@ function approvalCard(p) {
       }),
     );
   }
+  /**
+   * 【定】本机屏幕上的一次点击 / 输入（ADR-0013）。**与 CLI 的 GUI 分支是同一份
+   * 内容的两处**（服务端 `describeForApproval` 唯一给出）。
+   *
+   * 只给坐标的审批是盲批：「点保存」与「点删除」在坐标里长得一样，所以这里打的是
+   * 那个点上的应用、窗口与控件。它也是独立的一支 —— GUI 动作无论 `--sandbox`
+   * 是哪一档都不在沙箱内，并进 `a.command` 那支就会给出一句方向相反的保证。
+   */
+  if (a.gui !== undefined) {
+    card.appendChild(el("div", { class: "kv", text: "即将操作屏幕：" + a.gui.summary }));
+    if (a.gui.details.length > 0) card.appendChild(el("pre", { text: a.gui.details.join("\n") }));
+    card.appendChild(
+      el("div", {
+        class: "kv bad",
+        text:
+          "GUI 动作直接作用在这台机器上，不在沙箱内 —— " +
+          "执行前还会复核目标窗口与画面，变了就不点。",
+      }),
+    );
+  }
   card.appendChild(
     el("div", { class: "row" }, [
       el("button", {
