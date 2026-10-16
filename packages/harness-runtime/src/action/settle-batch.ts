@@ -1298,17 +1298,30 @@ async function packResourceReferences(
   }
 
   try {
+    /**
+     * 【定】索引按行写（第一行是头，之后每行一条 ref），不写成一整个 JSON 对象。
+     *
+     * 会走到这里的索引按定义就超过了单条 inline 上限，而 `read_resource` 一页最多
+     * 12000 字符。写成一行的话，第一页恰好切在某条 ref 的字符串中间：模型拿到的
+     * 是一段解析不了的半截 JSON，要靠 `line_offset` 跨页把字符串拼回去才能用 ——
+     * 「完整列表可以分页恢复」在字节上成立，对唯一的读者不成立。
+     * 按行写之后分页落在行边界上，**每一页都由完整的条目组成**，读一页用一页。
+     * `verify:resource` F 段走真实的 read_resource 一页页读回，两条性质分开判。
+     */
     const indexReference = await deps.resources.put({
       kind: "text",
-      mediaType: "application/vnd.workagent.resource-index+json; charset=utf-8",
+      mediaType: "application/vnd.workagent.resource-index+jsonl; charset=utf-8",
       label: "工具附属 ResourceRefs 索引",
-      suggestedFilename: "resource-reference-index.json",
-      content: JSON.stringify({
-        type: "RESOURCE_REFERENCE_INDEX",
-        version: 1,
-        resourceCount: resourceRefs.length,
-        resourceRefs,
-      }),
+      suggestedFilename: "resource-reference-index.jsonl",
+      content: [
+        JSON.stringify({
+          type: "RESOURCE_REFERENCE_INDEX",
+          version: 2,
+          resourceCount: resourceRefs.length,
+          layout: "第一行是本行；之后每行一条 ResourceRef（JSON Lines）",
+        }),
+        ...resourceRefs.map((reference) => JSON.stringify(reference)),
+      ].join("\n"),
       redactionDisposition: "TEXT_REDACTED",
     });
     const preview = resourceRefs.slice(0, 3).map((reference) => ({
@@ -1324,8 +1337,8 @@ async function packResourceReferences(
       resourceCount: resourceRefs.length,
       preview,
       retrieval:
-        `调用 read_resource({ ref: "${indexReference.ref}" }) 读取完整 ResourceRefs 索引，` +
-        `不要重新执行原工具。`,
+        `调用 read_resource({ ref: "${indexReference.ref}" }) 读取完整 ResourceRefs 索引` +
+        `（每行一条；有后续页时把 nextStartLine 原样传回），不要重新执行原工具。`,
     };
     return {
       text: appendResourceIndexNotice(text, notice),

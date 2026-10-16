@@ -39,18 +39,21 @@ import { cancelledError, classifyFsError, resolveToolPath, writeBoundaryRefusal 
 
 export const writeFileDefinition: ToolDefinition = {
   id: asId("tool_write_file"),
-  version: "1.1.0",
+  version: "1.1.1",
   name: "write_file",
   // 1.1.0：`kindOf` 改为共享的 `artifactKindOf`，`.png` 这类扩展名从
   // `text` 变成 `binary` —— **跑的检查器变了**，是语义变化。
   // 工具入参或执行语义变化就必须升版。
+  // 1.1.1：description 写明「不声明 = 不检查、不算交付」（2026-10-16 live 复跑里
+  // 一半任务漏传 artifact_role）。行为不变，升版与 cloud_shell 1.0.1 同一先例。
   description:
     "把一段文本写入文件，**覆盖**已有内容。path 相对于 workspace 根目录，" +
     "必须落在 workspace 内（写操作不允许越界）。父目录会自动创建。" +
     "只想改文件里的一小段时用 edit_file，不要把整个文件重写一遍。" +
     'artifact_role 用来声明这份文件是本次任务的产物："DELIVERABLE" 表示它就是要交付的东西，' +
     '"INTERMEDIATE" 表示是中间产物。声明之后系统会对它做完整性检查（JSON 能否解析等）。' +
-    "只有真正的产出才声明，草稿和临时文件不要声明。",
+    "任务要你产出的那个文件，写最终版时一定要传 artifact_role: \"DELIVERABLE\" —— " +
+    "不传的话系统既不检查它，也不把它算作这次任务的交付。草稿和临时文件不要声明。",
   inputSchema: {
     type: "object",
     // 【定】显式严格：未声明的键丢弃。见 validateAndNormalize 的标准语义那段。

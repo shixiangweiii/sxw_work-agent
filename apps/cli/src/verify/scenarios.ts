@@ -45,7 +45,7 @@ import {
   type ContextMessage,
   type RunId,
 } from "@workagent/harness-runtime";
-import { commonSceneTools, commonTools } from "@workagent/tools-common";
+import { commonMechanismTools, commonSceneTools, commonTools } from "@workagent/tools-common";
 import { compose } from "../compose.js";
 import { ScriptedModelPort, banner, fact, runVerify, section, tempWorkspace, verdict } from "./harness.js";
 
@@ -463,6 +463,7 @@ async function main(): Promise<void> {
 
   const commonNames = new Set(commonTools.map((t) => t.definition.name));
   const sceneNames = new Set(commonSceneTools.map((t) => t.definition.name));
+  const mechanismNames = new Set(commonMechanismTools.map((t) => t.definition.name));
   /** 判据 ①：有没有哪个场景动用了 Case 包里的工具。 */
   const caseToolsUsed = [...allUsed].filter((t) => !commonNames.has(t));
   /** 判据 ③：任意两个场景的工具集有没有交集 —— 三座孤岛不叫「同一套」。 */
@@ -475,8 +476,18 @@ async function main(): Promise<void> {
       if (![...a].some((t) => b.has(t))) pairwiseDisjoint.push(`${ids[i]}×${ids[j]}`);
     }
   }
-  /** 判据 ②的补充：独占的那件东西必须是**声明过三场景用例**的场景工具。 */
-  const exclusiveNotScene = exclusive.filter((t) => !sceneNames.has(t));
+  /**
+   * 独占工具的来路，只打印、不进合取。
+   *
+   * 【定】这里原来是第 ③ 项判据「独占工具必须是场景工具」，2026-10-16 验收批的
+   * live 复跑把它拆了：模型在一个任务里合理地 `ask_user` 了一次，它就判「能力面被反向定义」。
+   * 而 `commonMechanismTools` 的【定】写的正是机制工具「过不了三场景常用这一关，这**不是**问题」
+   * —— 那项判据与它自相矛盾，只是脚本化模型从不调机制工具，才一直没响。
+   * 豁免机制工具之后，它剩下能单独触发的只有 tools/common 以外的工具，而那正是第 ① 项
+   * （`caseToolsUsed`）抓的东西：它整个落在 ① 的射程里，留着只会误报，不会多抓一个。
+   */
+  const exclusiveMechanism = exclusive.filter((t) => mechanismNames.has(t));
+  const exclusiveNotScene = exclusive.filter((t) => !sceneNames.has(t) && !mechanismNames.has(t));
 
   fact("三个场景合计用到的工具", [...allUsed].sort().join(", "));
   fact("三个场景**都**用到的", shared.sort().join(", ") || "（无）");
@@ -484,37 +495,34 @@ async function main(): Promise<void> {
     "只有一个场景用到的",
     exclusive.sort().join(", ") || "（无）",
   );
-  fact("其中不是场景工具的", exclusiveNotScene.join(", ") || "（无 —— 独占的都声明过三场景用例）");
+  fact("其中是机制工具的", exclusiveMechanism.join(", ") || "（无）");
+  fact("其中既非场景也非机制工具的", exclusiveNotScene.join(", ") || "（无 —— 第 ① 项会兜住它们）");
   fact("用到的 Case 包工具", caseToolsUsed.join(", ") || "（无 —— 三个场景都只用通用工具）");
   fact("工具集互不相交的场景对", pairwiseDisjoint.join(", ") || "（无 —— 两两都有交集）");
 
   const allOk = results.every((r) => r.ok);
   /**
-   * 【定】四项合取，缺一条这段就退回「三个都跑通了」：
+   * 【定】三项合取，缺一条这段就退回「三个都跑通了」：
    *   ① 三场景全过；
    *   ② **没有任何场景动用 Case 包的工具** —— 这是本段唯一真正的反过拟合
    *      判据，也正是方案删掉「任务 A 用 append_log 收尾」时要防的形态：
    *      一个场景一旦需要 cases/ 里的东西，「通用能力面」这句话就不成立了；
-   *   ③ 独占工具必须是声明过三场景用例的场景工具（独占 ≠ 为它而生，
-   *      但得拿得出「另外两个场景也用得上」的声明，那条由 verify:tools B 段守）；
-   *   ④ 两两场景的工具集有交集 —— 否则是三座孤岛各用各的，不是同一套。
+   *   ③ 两两场景的工具集有交集 —— 否则是三座孤岛各用各的，不是同一套。
+   * 原来的「独占工具必须是场景工具」已拆除，理由见上面 exclusiveMechanism 处。
    */
-  const universalOk =
-    allOk && caseToolsUsed.length === 0 && exclusiveNotScene.length === 0 && pairwiseDisjoint.length === 0;
+  const universalOk = allOk && caseToolsUsed.length === 0 && pairwiseDisjoint.length === 0;
   verdict(
     universalOk,
     universalOk
       ? `三个来自不同场景、互不相干的任务，用同一套 tools/common 全部跑通：` +
         `${shared.length} 个工具三个场景都用到，${exclusive.length} 个只被一个场景用到` +
-        `（都是声明过三场景用例的场景工具），**没有一个场景需要 Case 包里的东西**，` +
+        `（场景工具或机制工具），**没有一个场景需要 Case 包里的东西**，` +
         `两两之间也都有交集`
       : !allOk
         ? `有场景没跑通：${results.filter((r) => !r.ok).map((r) => `${r.id}(${r.scene})`).join(", ")}`
         : caseToolsUsed.length > 0
           ? `有场景动用了 Case 包的工具（${caseToolsUsed.join(", ")}）—— 能力面正在被某个场景反向定义`
-          : exclusiveNotScene.length > 0
-            ? `独占工具里有非场景工具（${exclusiveNotScene.join(", ")}）—— 它拿不出三场景用例`
-            : `这些场景对的工具集互不相交（${pairwiseDisjoint.join(", ")}）—— 那是三座孤岛，不是同一套工具`,
+          : `这些场景对的工具集互不相交（${pairwiseDisjoint.join(", ")}）—— 那是三座孤岛，不是同一套工具`,
   );
 
   // ── S12 的护栏总校验

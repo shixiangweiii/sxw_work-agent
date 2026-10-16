@@ -77,7 +77,8 @@ function computeTruth(ctx: GraderContext): Truth {
 
 export const archiveInventoryGrader: Grader = {
   id: "archive-inventory",
-  version: "1.0.0",
+  // 1.0.1：空目录判据看目录名的**每一处**出现，不只第一处（2026-10-16 live 5 次里 3 次误判）。
+  version: "1.0.1",
 
   run(ctx: GraderContext): Check[] {
     const checks: Check[] = [];
@@ -127,14 +128,25 @@ export const archiveInventoryGrader: Grader = {
        * 正常 Markdown 会把目录名放标题、把「该目录为空」放下一行。
        * 一个把正确产物判错的 grader 比没有 grader 更危险，
        * 因为它会让人去改本来对的东西。
+       *
+       * 【定】看目录名的**每一处**出现，不只第一处。同一种错误第二次出现：
+       * 2026-10-16 live 5 次里 3 次判 FAIL，而三份清单都写着「临时 … 0 字节（唯一空目录）」——
+       * 只是目录名**第一次**出现在开头的概览里（「临时、会议纪要、合同、设计稿」），
+       * `indexOf` 取到的是那一处，窗口里自然没有「空」。那三次都是 25/26、只差这一条。
+       * 反向照旧成立：没有任何一处标出「空」时仍然判 FAIL。
        */
-      const at = md.indexOf(d);
-      const window = at >= 0 ? md.slice(at, at + 120) : "";
+      const windows: string[] = [];
+      for (let at = md.indexOf(d); at >= 0; at = md.indexOf(d, at + d.length)) {
+        windows.push(md.slice(at, at + 120));
+      }
+      const marked = windows.find((w) => /空|0\s*个|无文件/.test(w));
       checks.push(
         check(
           `标出空目录「${d}」`,
-          /空|0\s*个|无文件/.test(window),
-          at < 0 ? `清单里找不到 ${d}` : `窗口：${window.slice(0, 40).replace(/\n/g, "⏎")}`,
+          marked !== undefined,
+          windows.length === 0
+            ? `清单里找不到 ${d}`
+            : `窗口（共 ${windows.length} 处）：${(marked ?? windows[0]!).slice(0, 40).replace(/\n/g, "⏎")}`,
         ),
       );
     }

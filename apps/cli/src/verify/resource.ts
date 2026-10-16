@@ -336,21 +336,57 @@ async function main(): Promise<void> {
       indexedEvent?.type === "ToolResourceRefsExternalized"
         ? indexedEvent.payload.indexRef
         : "";
-    const indexPage = indexRef ? await resources.getTextPage(indexRef) : undefined;
-    const indexPayload = indexPage
-      ? (JSON.parse(indexPage.content) as { resourceCount?: number })
+    // 走模型真正会走的那一跳（read_resource 工具），一页页读完。
+    // 此前这里直接 `resources.getTextPage(ref)` 取第一页就 JSON.parse —— 它隐含
+    // 「索引一页装得下」，而会被外置的索引按定义就装不下，于是这一段在 HEAD 上
+    // 一直崩在 position 12000，`verify:all` 的 && 链也就从没跑到最后一条。
+    const indexRead = indexRef
+      ? await readAllResourcePages(indexRef, ws.root, resources)
       : undefined;
+    const indexLines = indexRead?.lines ?? [];
+    let indexHeader: { type?: string; resourceCount?: number } | undefined;
+    const recoveredLabels: string[] = [];
+    let unparsableLines = 0;
+    indexLines.forEach((line, index) => {
+      try {
+        const parsed = JSON.parse(line) as Record<string, unknown>;
+        if (index === 0) indexHeader = parsed as typeof indexHeader;
+        else if (typeof parsed["label"] === "string") recoveredLabels.push(parsed["label"]);
+        else unparsableLines += 1;
+      } catch {
+        unparsableLines += 1;
+      }
+    });
+    const expectedLabels = Array.from({ length: 120 }, (_, index) =>
+      `resource fixture ${index.toString().padStart(3, "0")}`,
+    );
+    // 夹具的 120 条之后还跟着一条「完整工具结果」—— approxTokens 把 refs 算在内，
+    // 于是那 15 字节的 output 也被外置了。总数按索引头核对，夹具的 120 条按顺序逐条核对。
+    const everyRefRecovered =
+      recoveredLabels.length === indexHeader?.resourceCount &&
+      expectedLabels.every((prefix, index) => recoveredLabels[index]?.startsWith(prefix));
     fact("索引前 ResourceRefs 数", indexedEvent?.type === "ToolResourceRefsExternalized" ? indexedEvent.payload.resourceCount : 0);
     fact("最终模型可见 token", visibleTokens);
-    fact("索引可恢复的 ref 数", indexPayload?.resourceCount ?? 0);
+    fact("read_resource 读了几页", indexRead?.pageCount ?? 0);
+    fact("跨页切断的行", indexRead?.splitLines ?? "（未读到）");
+    fact("按顺序读回的 ref 数", recoveredLabels.length);
     verdict(
       indexedEvent?.type === "ToolResourceRefsExternalized" &&
         (indexedEvent.payload.resourceCount ?? 0) >= 120 &&
         manyResult?.type === "tool_result" &&
         manyResult.resourceRefs?.length === 1 &&
         visibleTokens <= 8_000 &&
-        indexPayload?.resourceCount === indexedEvent.payload.resourceCount,
-      "大量附属 ResourceRefs 不再绕过单条 inline 上限：模型只收一个索引 ref，完整列表仍可分页恢复",
+        indexHeader?.type === "RESOURCE_REFERENCE_INDEX" &&
+        indexHeader.resourceCount === indexedEvent.payload.resourceCount &&
+        unparsableLines === 0 &&
+        everyRefRecovered,
+      "大量附属 ResourceRefs 不再绕过单条 inline 上限：模型只收一个索引 ref，经 read_resource 逐页读回的条数与索引头一致，夹具的 120 条按顺序一条不少",
+    );
+    // 配对的另一半：上面那条只要「拼得回来」就绿，一整行 JSON 跨页切开也拼得回来。
+    // 而模型不是拼接器 —— 一页里有半条 ref，那一页对它就是废的。
+    verdict(
+      (indexRead?.pageCount ?? 0) >= 2 && indexRead?.splitLines === 0,
+      "索引超过一页时分页落在行边界上：每一页都由完整的条目组成，读一页用一页",
     );
 
     section("G. fetch_url 流式上限与转换后 Resource 元数据");
@@ -409,6 +445,50 @@ async function main(): Promise<void> {
     db.close();
     ws.cleanup();
   }
+}
+
+/**
+ * 像模型那样用 read_resource 一页页读完一个文本 Resource，把行拼回来。
+ * 续读用工具自己给的 nextStartLine / nextLineOffset —— 判据不替它算游标，
+ * 否则测的是这里的算术，不是工具的分页契约。
+ */
+async function readAllResourcePages(
+  ref: string,
+  workspaceRoot: string,
+  resources: SqliteResourceStore,
+): Promise<{ lines: string[]; pageCount: number; splitLines: number }> {
+  const lines: string[] = [];
+  let pageCount = 0;
+  let splitLines = 0;
+  let startLine = 1;
+  let lineOffset = 0;
+  for (let guard = 0; guard < 1_000; guard += 1) {
+    const outcome = await executeReadResource(
+      { ref, start_line: startLine, line_offset: lineOffset },
+      context(workspaceRoot),
+      resources,
+    );
+    if (!outcome.ok) throw new Error(`read_resource 失败：${outcome.error?.safeMessage}`);
+    const page = JSON.parse(outcome.output) as {
+      content: string;
+      lineOffset: number;
+      truncated: boolean;
+      nextStartLine?: number;
+      nextLineOffset?: number;
+    };
+    pageCount += 1;
+    const pieces = page.content.split("\n");
+    if (page.lineOffset > 0 && lines.length > 0) {
+      // 这一页接着上一页没读完的那一行
+      splitLines += 1;
+      lines[lines.length - 1] += pieces.shift() ?? "";
+    }
+    lines.push(...pieces);
+    if (!page.truncated) return { lines, pageCount, splitLines };
+    startLine = page.nextStartLine ?? startLine;
+    lineOffset = page.nextLineOffset ?? 0;
+  }
+  throw new Error("read_resource 分页一千页仍未结束");
 }
 
 async function runManyResourcesBatch(

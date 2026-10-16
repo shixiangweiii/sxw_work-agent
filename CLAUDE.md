@@ -16,6 +16,27 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 当前状态
 
+### 全量验收批（2026-10-16）：`verify:all` 第一次从头跑到尾 ＋ 真实运行抓出四处问题
+
+报告：[2026-10-16-Atlas集成fcsandbox全量验收报告.md](sxw_aicoding/验收报告/2026-10-16-Atlas集成fcsandbox全量验收报告.md)。
+`verify:all` **19 条脚本 / 393 条判据**全绿、退出码 0；fc-sandbox `pytest` 221 条。
+真实端点 ＋ 真实云沙箱全部跑过，关掉三道历史门槛：DeepSeek 对照实跑、Web 入口真实多轮任务、跨进程 resume 实跑。
+
+> ### 【定】四处问题都是「判据或引导面说的」与「真实运行发生的」对不上，脚本化模型一处都碰不到
+>
+> | | 形态 | 处置 |
+> |---|---|---|
+> | 交付物漏声明 | live 6 个任务里 3 个写对了文件却没传 `artifact_role` → 不检查、不算交付、照样 SUCCESS | system prompt ＋ `write_file` description（1.1.1）；改后 15 个里 14 个声明。**剩下那 1 个就是 S5-7** |
+> | `verify:scenarios` 第 ③ 项 | 模型合理地 `ask_user` 一次就判「能力面被反向定义」，与 `commonMechanismTools` 的【定】自相矛盾 | 拆除：豁免机制工具后它整个落在第 ② 项射程里，只会误报 |
+> | eval grader 空目录判据 | 只看目录名**第一次**出现（开头的概览），把三份正确清单判错，pass@1 报成 40% | 看每一处出现，1.0.1 → 5/5、pass^5 成立 |
+> | `probe:reasoning-tokens` | 当前默认端点刻意不走远端 count_tokens，探针却打 ✗ | 如实打「不适用」，加 `--profile` |
+>
+> 另修两条遗留：`verify:resource` F 段（判据假设索引一页装得下；实现侧索引改为按行写，每页都是完整条目）、
+> 池子补货目标不数 DESTROYING（fc-sandbox，见下方「fc-sandbox 侧」）。
+
+> ⚠️ **S5-7 的新证据**：信任声明关闭时，模型对 200 行数据**退回手工累加**，这次碰巧全对、也如实说了「pandas 没跑起来」，
+> 而 Run 照样 `SUCCESS` —— 用户显式要求的执行方式没做到，在结算上不可见。根治要重开 Completion Gate 的决定（要 ADR）。
+
 ### ADR-0018（2026-10-16）：带上传的断网调用，经部署配置里的显式信任声明才放行 ＋ Web 入口补接线
 
 依据 [ADR-0018](sxw_aicoding/ADR/历史归档/0018-带上传的断网云沙箱调用经显式信任声明放行.md)。
@@ -184,7 +205,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 >
 > 模板构建 71s（一次性，`sxw_fc-sandbox/scripts/build_pyagent_template.py`）。
 > ⚠️ 基线那 32s 打了折：5 个包镜像里本来就有。
-> ⚠️ **11 个包够不够用没有证据** —— 按「办公与抓取类」拍的，等真实任务回填。
+> ~~⚠️ **11 个包够不够用没有证据**~~ —— **已由 ADR-0017 回答**：全量枚举基础镜像自带 105 个、模板新增 6 个，
+> 共 111 个；四类真实任务没有一个缺包（见上方 ADR-0017 段「包够不够用量出来了」）。
 
 > ### 【定】两道闸门：池子下发，**Atlas 读回平台回显核对之后**才发命令
 >
@@ -236,14 +258,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > ⚠️ 停池子前要先 `drain`：`target_size` 的预热补货会在最后一次归还后再建一台，
 > 直接杀进程会留下它（池子的既有行为，不是这批引入的）。
 
-> ⚠️ **还没有的**：真实**模型**端点下它会怎么用这个工具（阶段 3 的后半，要花钱）；
-> auto-grant（阶段 5，要单独 ADR）。
+> ~~⚠️ **还没有的**：真实**模型**端点下它会怎么用这个工具；auto-grant~~ —— **两条都已由 ADR-0017 回答**
+> （真实端点 ＋ 真实云沙箱 live 跑；断网 ＋ 无上传自动放行，带上传的由 ADR-0018 的显式信任声明放行）。
 > CLI 与 Web 两个审批面都已接（同出 `describeCloudShellForApproval`，`verify:cloud` G 段覆盖那一份）；
 > Web 卡片把 `uploads` 单独显著画出来 —— 它是这次操作里**唯一不可撤销**的部分。
 
-### fc-sandbox 侧（阶段 1，另一个仓库 `sxw_fc-sandbox`，**未提交**）
+### fc-sandbox 侧（阶段 1，另一个仓库 `sxw_fc-sandbox`）
 
-池子改了五处，219 条单测 ＋ 6 条注入 ＋ 真实云端六条全过：
+已提交在 `claude/inspiring-maxwell-n5z73w` 分支（`831439c`、`21816a5`）。池子改了五处，219 条单测 ＋ 6 条注入 ＋ 真实云端六条全过：
 
 | | |
 |---|---|
@@ -259,6 +281,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > ⚠️ **调研笔记有一条结论是错的，已更正**：那里把 Volume 列在「不支持」，
 > 而实测**支持**（走 POP API 建），只有**挂载**不通（平台 500，疑似邀测未开通）。
 > 这两件事得分开写。Volume 做依赖缓存因此降级为后续项。
+>
+> ### 【定】2026-10-16 验收批又修一处：**补货目标不数 DESTROYING，容量上限照数**
+>
+> 上面那条「暂停 → 销毁撞 409、滞后 8.5 分钟」原来只靠运行参数（`POOL_PAUSE_ENABLED=false`）绕开。
+> 根因在 `reserve_slot`：补货目标与容量上限数的是**同一个总数**，于是一台卡在 DESTROYING、
+> 永远不会再借给任何人的沙箱一直「算作库存」，`target_size=1` 的池子一台都不补。
+> 拆成两个数：`cap = max_size` 数全部（它在云上还活着，照样占配额），`limit = target_size` 不数 DESTROYING。
+> 判据 `tests/test_atlas_egress.py` E 段**成对**：E1 补得上、E2 用满 `max_size` 时照样借不到；两处注入各自只翻红一条。
+> 暂停对 per-call 仍然是白付的代价，那条运行参数建议不变。
 
 ### Computer Use 代码评审的处置（2026-10-03）：12 项全部成立、全部修完，`verify:computer` 44 → **57 条**
 
@@ -423,8 +454,10 @@ npm run ui  -- --computer view --computer-apps TextEdit          # 只截图
 > ⚠️ **仍然开着的门槛（要花钱、要授权）**：真实端点在真实桌面上跑完一个多步 GUI 任务。
 > 另记两条：Atlas 不发送思考参数（阶段 0 里 qwen 的 10/10 是关闭思考测的）；只支持主显示器。
 >
-> ⚠️ **`verify:resource` 在 HEAD 上就崩在 F 段**（`resource.ts:338`，`JSON.parse` 一个按 12000 字符切开的页；
-> 本批用干净 worktree 复核过），与本批无关、未动。`verify:all` 的 `&&` 链里 `verify:computer` 排在它之前。
+> ~~⚠️ **`verify:resource` 在 HEAD 上就崩在 F 段**~~ —— **2026-10-16 验收批已修**。判据只取第一页就 `JSON.parse`，
+> 隐含「索引一页装得下」，而会被外置的索引按定义装不下；它一崩，`verify:all` 的 `&&` 链就跑不到最后的
+> `verify:scenarios`。实现那侧也改了：ResourceRefs 索引按行写（头一行 ＋ 每行一条），分页落在行边界上，
+> 每一页都由完整条目组成；判据改走真实的 `read_resource` 逐页读回，「拼得回来」与「每页完整」成对判。
 
 ### 预算轴做成真参数（2026-09-02）：**唯一稀缺的那条轴，此前是唯一调不动的**
 
@@ -1825,7 +1858,7 @@ npm run verify:computer            # ★ADR-0013：边界 15 判别力 ＋ 图�
                                    #     复核途中取消不投递 · 拖拽终点比画面 · 审批全文 · vision 进指纹 · 助手重连
                                    #   全程**假驱动**：不截真屏、不动鼠标、不弹授权框
 npm run verify:model-audit         # 调用级实际请求、SDK 解码 Provider 事件/错误与 fail-open 独立审计
-npm run verify:all                 # 19 条脚本（verify:resource 在 HEAD 上就崩在 F 段，见「当前状态」）
+npm run verify:all                 # 19 条脚本，一条 && 链（任何一条崩了，排在后面的都不会跑）
 ```
 
 > **【定】`verify:ui` 必须真的起 HTTP 服务**，不能直接调 `PendingHub` 的方法测。
@@ -2014,6 +2047,7 @@ grep -rniE "modelcontextprotocol|StdioClientTransport" packages adapters  # 12. 
 grep -rnE "calc\(100vh *-" apps/workagent-ui                 # 13. ★界面高度不得由视口减写死常数算出
 grep -rnE "hugozhu|博客文章|images/|正文选择器|固定(文章)?数量" packages/harness-runtime/src tools/common/src  # 14. Resource 管道不得含 Eval 夹具语义
 grep -rnE "ComputerDriver|HelperDriver|AtlasGUIHelper|ScreenCaptureKit|CGEvent|AXUIElement|toPoints\(" packages adapters  # 15. ★ADR-0013：屏幕与输入不得进 Runtime / 适配器
+grep -rnE "PoolClient|cloud_shell|v1/leases|lease_id|CloudShellHandler|tools-cloud-sandbox" packages adapters  # 16. ★ADR-0016：云沙箱借用客户端不得进 Runtime / 适配器
 ```
 
 > **第 15 条的两种诱惑都不需要 import 工具包**（第 4 / 6 条一条都不会响）：在 `ports/` 里加一个
@@ -2058,7 +2092,7 @@ grep -rnE "ComputerDriver|HelperDriver|AtlasGUIHelper|ScreenCaptureKit|CGEvent|A
 > 这几个文件的文件头就在讲这条规则。第一次跑时第 8 条就抓到了我自己写在
 > `index.html` 注释里的模式串。
 
-**`verify:tools` A 段机械跑这 14 条**，不要手工 grep 了事 —— 它还会过滤注释行
+**`verify:tools` A 段机械跑这张表（`BOUNDARIES` 全部条目）**，不要手工 grep 了事 —— 它还会过滤注释行
 （这些文件里到处在引用边界规则本身），并在 A2 段做**判别力实测**：
 往 `tools/common` 注入一行对 Case 包的 import，第 6b 条必须当场翻红并指出行号。
 
@@ -2228,7 +2262,7 @@ apps/workagent-ui/public/    ★阶段 4。Layer 1。**没有 src/、没有构�
 - **规格纪律**：任何 Contract 冻结前必须能指出证据来源；拿不出证据就标【验】或【议】。反向同样成立——「必须存在某个机制」也需要证据，V03 的 15 个决策点里有 3 个被证明**问题本身不该问**。
 - **未接线比不写更糟**：类型、事件、类都在但运行时从不执行，会让人以为问题已经解决了；此前已有多项这种误报。要么接线，要么删掉。
 - 阶段 1 只实现能被当阶段 Micro Case 覆盖的最小面。新增 Port 时必须同时指出强制它存在的不变量。
-- 提交前跑 `npm run typecheck` ＋ 相关的 `verify:*`，并复核边界 grep（16 条，`verify:tools` A 段机械跑）。
+- 提交前跑 `npm run typecheck` ＋ 相关的 `verify:*`，并复核边界 grep（编号 1…16、共 17 条，`verify:tools` A 段机械跑）。
 - **不留「声明了但没人读」的字段、枚举值、Port 或参数。** 要么接线，要么删 ——
   一个没有消费者的声明会让下一个人以为那件事已经有人管了。2026-08-31 那一批
   拆掉的三十多项，每一项当初都是「先声明着，将来会用」。

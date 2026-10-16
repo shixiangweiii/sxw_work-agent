@@ -33,9 +33,16 @@
  * 这里取第一种精神：一次性探针，显式调用，不进 verify:all。
  *
  *     npm run probe:reasoning-tokens
+ *     npm run probe:reasoning-tokens -- --profile bailian-anthropic.json   # 换一份声明（同一组凭证）
+ *
+ * 【定】端点声明里**没有** `countTokensAccuracy` 时，这条探针问的问题不成立 ——
+ * 那个端点不走远端 count_tokens，Context 层用本地估算。此时如实打印「不适用」并退出 0，
+ * 不打 ✗：qwen3.8-flash 成为默认端点之后，原来的写法每次都报「端点没有返回结果」，
+ * 读起来像端点坏了，而实际是声明刻意关掉了它（2026-10-16 验收批撞到的）。
  * ══════════════════════════════════════════════════════════════════════
  */
 
+import { resolve } from "node:path";
 import {
   NULL_MODEL_INVOCATION_OBSERVER,
   loadProfileFromFile,
@@ -74,15 +81,29 @@ async function main(): Promise<void> {
 
   loadEnv();
   const cfg = readEndpointConfig();
-  const profile = loadProfileFromFile(cfg.profilePath);
+  const profileArg = process.argv.indexOf("--profile");
+  const profilePath =
+    profileArg >= 0 && process.argv[profileArg + 1]
+      ? resolve(cfg.profilePath, "..", process.argv[profileArg + 1]!)
+      : cfg.profilePath;
+  const profile = loadProfileFromFile(profilePath);
   const model = createAnthropicModelPort({ baseUrl: cfg.baseUrl, apiKey: cfg.apiKey, profile });
 
   section("A. 端点当前的声明");
+  fact("profile 文件", profilePath.split("/").pop());
   fact("endpointId", String(profile.endpointId));
   fact("modelId", profile.modelId);
-  fact("countTokensAccuracy", profile.tokens.countTokensAccuracy);
+  fact("countTokensAccuracy", profile.tokens.countTokensAccuracy ?? "（未声明 —— 不走远端 count_tokens）");
   fact("perRequestBaseTokens", profile.tokens.perRequestBaseTokens);
   fact("reasoningBlockRule", profile.context.reasoningBlockRule);
+  if (profile.tokens.countTokensAccuracy === undefined) {
+    console.log(
+      "\n   不适用：这份声明没有 countTokensAccuracy，Context 层用本地估算，" +
+        "\n   「count_tokens 算不算推理块」在这个端点上不是一个会影响任何判定的问题。" +
+        "\n   要复测 qwen3.7-plus 那份声明：加 --profile bailian-anthropic.json",
+    );
+    return;
+  }
   console.log(
     "\n   注意：下面三个数都是**端点原始返回值**，没有叠加 perRequestBaseTokens。\n" +
       "   protocol.countTokens() 会额外 ＋" + profile.tokens.perRequestBaseTokens +
