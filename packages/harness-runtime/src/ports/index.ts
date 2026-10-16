@@ -93,6 +93,18 @@ export interface ModelInvocationResult {
   usage: ModelUsage;
   /** 中断时为 true。半截内容不进入后续 Context。 */
   interrupted: boolean;
+  /**
+   * 没能转成 Action 的工具调用块数：块没闭合，或参数 JSON 不完整（§8.4 丢弃的那些）。
+   *
+   * ══════════════════════════════════════════════════════════════════════
+   * 【定】丢弃是对的，**静默**丢弃是错的。2026-10-16 live（`run_9862d3f92cf9`）：
+   * 模型在写一个巨大的工具调用时撞上单次输出上限（out=8192），那个 tool_use 块没写完 →
+   * 适配器按 §8.4 丢掉 → 主循环看到「0 个 tool call」→ 按「模型不再请求工具即完成」
+   * 结算 **SUCCESS**：没有交付物、没有总结。一次被截断的回复被当成了「做完了」。
+   * 主循环要靠这个数分清「模型说完了」与「模型的话被截断了」。
+   * ══════════════════════════════════════════════════════════════════════
+   */
+  droppedToolCalls?: number;
 }
 
 /**
@@ -283,6 +295,37 @@ export interface ToolExecutionOutcome {
    * 工具不得把二进制编码进 output 绕过这条通道。
    */
   resources?: ProducedResource[];
+  /**
+   * 这次调用对「任务做完没有」留下的一句**结构化陈述**（ADR-0019 B）。
+   *
+   * ══════════════════════════════════════════════════════════════════════
+   * 【定】陈述者是工具，不是 Runtime 去猜。Runtime 不认识任何具体工具
+   * （边界 4 / 6），而这两件事只有工具自己知道：
+   *
+   *   UNDECLARED_FILE_WRITE —— 写了一个文件，模型没有声明它是产物（`write_file` 没带 role）；
+   *   HUMAN_STEP_NOT_DONE   —— 请人去做的那一步没有发生（`request_handoff` 没人接）；
+   *   HUMAN_STEP_DONE       —— 那一步有人应答了（之后的同类请求可以抵消之前的 NOT_DONE）。
+   *
+   * 它们以前就存在 —— 前者是「一次成功的写 ＋ 零登记」，后者是 `InteractionCompleted.answered:false`
+   * —— 只是结算时没人看。§10.4 自己的底线写着「花钱测出一个事实然后扔掉」，这里两条都犯了。
+   * 结算怎么用它们见 `settle-outcome.ts` 的 completionGaps。
+   *
+   * 【定】`ask_user` 的 NO_ANSWER **不发** HUMAN_STEP_NOT_DONE：问不到人不是失败（ADR-0008），
+   * 「你来定」没人定，模型自己定就是了；「你去做」没人做，那件事就真的没做。
+   * ══════════════════════════════════════════════════════════════════════
+   */
+  completionSignal?: CompletionSignal;
+}
+
+export interface CompletionSignal {
+  kind: "UNDECLARED_FILE_WRITE" | "HUMAN_STEP_NOT_DONE" | "HUMAN_STEP_DONE" | "MODEL_DECLARED_UNMET";
+  /**
+   * UNDECLARED_FILE_WRITE：workspace 内的相对路径；HUMAN_STEP_*：请求里写的「做完是什么样」；
+   * MODEL_DECLARED_UNMET：模型引用的那句用户要求（ADR-0019 C）。
+   */
+  detail: string;
+  /** MODEL_DECLARED_UNMET 的状态与原因（「没做到 ／ 换了做法」＋ 为什么）。 */
+  note?: string;
 }
 
 /**

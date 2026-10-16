@@ -49,7 +49,8 @@ import { asId, makeError } from "@workagent/harness-runtime";
 
 export const requestHandoffDefinition: ToolDefinition = {
   id: asId("tool_request_handoff"),
-  version: "1.0.0",
+  // 1.1.0：陈述 HUMAN_STEP_NOT_DONE / HUMAN_STEP_DONE（ADR-0019 B2）—— 没人接的接管会让 Run 拿不到 SUCCESS。
+  version: "1.1.0",
   name: "request_handoff",
   /**
    * ── 【定】这段话是这个工具唯一的入口，改它等于改行为 ──────────────────
@@ -161,11 +162,17 @@ export async function executeRequestHandoff(
   ctx: ToolExecutionContext,
   channel: HandoffChannel | undefined,
 ): Promise<ToolExecutionOutcome> {
+  /**
+   * ADR-0019 B2：这一步做没做，由这个工具陈述 —— 没人接就是没做（ADR-0008），
+   * 有人应答就是做了（它仍然只是**人的声明**，§20.3 的重新观察照旧由模型去做）。
+   */
+  const notDone = { kind: "HUMAN_STEP_NOT_DONE" as const, detail: input.expected_completion };
   if (!channel) {
     return {
       ok: false,
       output: "",
       sideEffectState: "NO_EFFECT",
+      completionSignal: notDone,
       error: makeError({
         code: "TOOL_HANDOFF_NO_CHANNEL",
         source: "RUNTIME",
@@ -192,6 +199,7 @@ export async function executeRequestHandoff(
       // 【定】NO_EFFECT 而不是 UNKNOWN：没人来接管，那就是什么都没发生。
       // 报 UNKNOWN 会凭空造出一个需要人工确认的待办项 —— 而问题恰恰是没有人。
       sideEffectState: "NO_EFFECT",
+      completionSignal: notDone,
       error: makeError({
         code: "TOOL_HANDOFF_UNANSWERED",
         source: "USER",
@@ -219,6 +227,7 @@ export async function executeRequestHandoff(
         "描述的结果是否真的出现了，再决定下一步。确认不了就如实说明。",
     }),
     sideEffectState: "NO_EFFECT",
+    completionSignal: { kind: "HUMAN_STEP_DONE", detail: input.expected_completion },
   };
 }
 

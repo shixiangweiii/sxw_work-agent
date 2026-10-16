@@ -158,7 +158,17 @@ const scenarios: Scenario[] = [
     path: "（无中断）",
     build: () =>
       new ScriptedModelPort([
-        { reasoning: "先做三件事", toolCalls: CALLS_3 },
+        {
+          reasoning: "先做三件事",
+          // ADR-0019 B1 之后，「全部正常」要包括「写的那份声明成了交付物」——
+          // 没声明的写入结算为 COMPLETED_WITH_LIMITS（第二层检查一项没跑）。
+          // 只改基线自己的这一份，共享的 CALLS_3 不动（中断路径那几条不受影响）。
+          toolCalls: [
+            CALLS_3[0]!,
+            { ...CALLS_3[1]!, input: { ...CALLS_3[1]!.input, artifact_role: "DELIVERABLE" } },
+            CALLS_3[2]!,
+          ],
+        },
         { text: "做完了。", toolCalls: [] },
       ]),
     expectTerminal: "COMPLETED",

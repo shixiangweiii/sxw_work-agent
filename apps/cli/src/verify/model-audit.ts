@@ -51,6 +51,8 @@ interface FakeProvider {
   streamErrorNextMessage(): void;
   transportFailNextMessage(): void;
   slowNextMessage(): void;
+  /** 接下来 n 次回复都是「工具调用写到一半撞上输出上限」（I 段）。 */
+  truncateNextMessages(n: number): void;
 }
 
 interface RunEvidence {
@@ -449,6 +451,62 @@ async function main(): Promise<void> {
       "provider_event 写盘失败只产生一条显眼诊断，模型调用、预算计数和 Run 结算继续",
     );
 
+    /**
+     * ── I. 被截断的工具调用不得结算成「完成」──────────────────────────────
+     *
+     * 2026-10-16 live `run_9862d3f92cf9`：工具调用写到一半撞上输出上限 → 适配器按 §8.4 丢掉 →
+     * 主循环看到 0 个 tool call → 结算 SUCCESS（没有交付物、没有总结）。
+     * 【定】三条成对：截断一次 → 抬高上限重试并最终完成；一直截断 → 具名撞墙、不是 SUCCESS；
+     * 正常的「说完了」→ 照旧当轮结算（A 段已经覆盖，这里只看前两条）。
+     * 走的是**真实适配器** ＋ 真 SSE，适配器那一跳（报出丢了几个）跨得过去。
+     */
+    section("I. 被截断的工具调用不得被当成「完成」（§8.4 丢掉之后要说出来）");
+    const truncOnceTrace = new CollectingTraceSink();
+    const truncOnce = compose({
+      workspaceRoot: workspace.root,
+      approvalDecider: async () => ({ approved: true }),
+      trace: truncOnceTrace,
+      profileOverride: profile,
+      modelPortOverride: model,
+      dbPath: ":memory:",
+    });
+    const bodiesBeforeOnce = provider.messageBodies.length;
+    provider.truncateNextMessages(1);
+    const onceRun = await drain(truncOnce, truncOnce.makeRunSpec("截断一次之后应当重试"));
+    truncOnce.db.close();
+    const onceBodies = provider.messageBodies.slice(bodiesBeforeOnce) as Array<{ max_tokens?: number }>;
+    const truncErrors = truncOnceTrace
+      .byType("RuntimeErrorOccurred")
+      .filter((e) => (e.payload as { error?: { code?: string } }).error?.code === "MODEL_TOOL_CALL_TRUNCATED");
+    fact("截断一次：请求次数 / max_tokens 序列", `${onceBodies.length} / ${onceBodies.map((b) => b.max_tokens).join(" → ")}`);
+    fact("截断一次：结算", `${onceRun.terminal} / ${onceRun.outcome}`);
+    verdict(
+      truncErrors.length === 1 &&
+        onceBodies.length === 2 &&
+        (onceBodies[1]?.max_tokens ?? 0) > (onceBodies[0]?.max_tokens ?? 0) &&
+        onceRun.terminal === "COMPLETED" &&
+        onceRun.outcome === "SUCCESS",
+      "工具调用被截断的那一轮**没有**当轮结算：报 MODEL_TOOL_CALL_TRUNCATED、抬高输出上限重试一次，下一轮正常完成",
+    );
+
+    const truncAlways = compose({
+      workspaceRoot: workspace.root,
+      approvalDecider: async () => ({ approved: true }),
+      trace: new CollectingTraceSink(),
+      profileOverride: profile,
+      modelPortOverride: model,
+      dbPath: ":memory:",
+    });
+    provider.truncateNextMessages(50);
+    const alwaysRun = await drain(truncAlways, truncAlways.makeRunSpec("一直被截断"));
+    truncAlways.db.close();
+    provider.truncateNextMessages(0);
+    fact("一直截断：结算", `${alwaysRun.terminal} / ${alwaysRun.outcome}`);
+    verdict(
+      alwaysRun.outcome !== "SUCCESS" && alwaysRun.terminal !== "COMPLETED",
+      "重试用完仍被截断 → 具名的撞墙出口，**不是** SUCCESS（截断的话不能被当成结论）",
+    );
+
   section("H. Reader 用严格状态机区分完整、合法前缀与语义损坏");
     // 判别力实测：临时跳过 shapeError 后，本段语义矩阵翻红，SIGKILL 合法前缀仍为绿色。
     const readerDir = join(workspace.root, "reader-fixtures");
@@ -633,6 +691,7 @@ async function startFakeProvider(): Promise<FakeProvider> {
   let streamErrorNext = false;
   let transportFailNext = false;
   let slowNext = false;
+  let truncateRemaining = 0;
   const server = createServer(async (req, res) => {
     const body = await readJson(req);
     if (req.url?.endsWith("/count_tokens")) {
@@ -681,7 +740,13 @@ async function startFakeProvider(): Promise<FakeProvider> {
     }
 
     const ordinal = messageBodies.length;
-    const events = ordinal === 1 ? toolUseEvents() : finalTextEvents(ordinal);
+    const truncateThis = truncateRemaining > 0;
+    if (truncateThis) truncateRemaining -= 1;
+    const events = truncateThis
+      ? truncatedToolUseEvents(ordinal)
+      : ordinal === 1
+        ? toolUseEvents()
+        : finalTextEvents(ordinal);
     eventsByMessage.push(events);
     const slowThisResponse = slowNext;
     slowNext = false;
@@ -724,7 +789,40 @@ async function startFakeProvider(): Promise<FakeProvider> {
     slowNextMessage: () => {
       slowNext = true;
     },
+    truncateNextMessages: (n: number) => {
+      truncateRemaining = n;
+    },
   };
+}
+
+/**
+ * 「工具调用写到一半撞上输出上限」：tool_use 块开始了、参数 JSON 只写了半截、
+ * 没有 content_block_stop，随后 stop_reason=tool_use（live 原样）。
+ * 真实形态来自 2026-10-16 live `run_9862d3f92cf9`（qwen3.8-flash，out=8192）。
+ */
+function truncatedToolUseEvents(ordinal: number): unknown[] {
+  return [
+    {
+      type: "message_start",
+      message: {
+        id: `msg_audit_trunc_${ordinal}`,
+        type: "message",
+        role: "assistant",
+        model: "audit-fixture-model",
+        content: [],
+        stop_reason: null,
+        stop_sequence: null,
+        usage: { input_tokens: 13, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+      },
+    },
+    { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: `toolu_trunc_${ordinal}`, name: "write_file", input: {} } },
+    { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: "{\"path\":\"report.md\",\"content\":\"很长很长" } },
+    // 【定】stop_reason 用 live 里的 "tool_use"，不用 "max_tokens"。后者 ＋ 没有正文会同时命中
+    // 既有的「推理吃光输出预算」那道守卫 —— 注入实测：摘掉新分支，「一直截断」那条判据照样绿，
+    // 判据落在了两道守卫的重叠区。qwen3.8-flash 截断时报的恰恰是 tool_use，旧守卫看不见它。
+    { type: "message_delta", delta: { stop_reason: "tool_use", stop_sequence: null }, usage: { output_tokens: 8192 } },
+    { type: "message_stop" },
+  ];
 }
 
 function streamErrorPrefixEvent(): unknown {

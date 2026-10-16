@@ -39,13 +39,15 @@ import { cancelledError, classifyFsError, resolveToolPath, writeBoundaryRefusal 
 
 export const writeFileDefinition: ToolDefinition = {
   id: asId("tool_write_file"),
-  version: "1.1.1",
+  version: "1.2.0",
   name: "write_file",
   // 1.1.0：`kindOf` 改为共享的 `artifactKindOf`，`.png` 这类扩展名从
   // `text` 变成 `binary` —— **跑的检查器变了**，是语义变化。
   // 工具入参或执行语义变化就必须升版。
   // 1.1.1：description 写明「不声明 = 不检查、不算交付」（2026-10-16 live 复跑里
   // 一半任务漏传 artifact_role）。行为不变，升版与 cloud_shell 1.0.1 同一先例。
+  // 1.2.0：没声明 role 的成功写入陈述 UNDECLARED_FILE_WRITE（ADR-0019 B1）——
+  // 它会让一个「零交付物」的 Run 结算成 COMPLETED_WITH_LIMITS，是结算语义的变化。
   description:
     "把一段文本写入文件，**覆盖**已有内容。path 相对于 workspace 根目录，" +
     "必须落在 workspace 内（写操作不允许越界）。父目录会自动创建。" +
@@ -186,7 +188,14 @@ export async function executeWriteFile(
               content: input.content,
             },
           }
-        : {}),
+        : {
+            /**
+             * ADR-0019 B1：写成功了、却没声明是产物 —— 如实陈述，结算时汇总。
+             * 不在这里替模型补登记：那是 ADR-0019 否决的 G（Runtime 认交付物）的变体，
+             * 用户事先放在那里的同名旧文件会被冒认成本 Run 的交付。
+             */
+            completionSignal: { kind: "UNDECLARED_FILE_WRITE" as const, detail: input.path },
+          }),
     };
   } catch (err) {
     return {

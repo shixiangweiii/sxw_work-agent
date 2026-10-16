@@ -78,7 +78,8 @@ function computeTruth(ctx: GraderContext): Truth {
 export const archiveInventoryGrader: Grader = {
   id: "archive-inventory",
   // 1.0.1：空目录判据看目录名的**每一处**出现，不只第一处（2026-10-16 live 5 次里 3 次误判）。
-  version: "1.0.1",
+  // 1.1.0：「合计字节数」降为软判据、补上「每个子目录的总大小」硬判据（见下面那段【定】）。
+  version: "1.1.0",
 
   run(ctx: GraderContext): Check[] {
     const checks: Check[] = [];
@@ -117,9 +118,31 @@ export const archiveInventoryGrader: Grader = {
     checks.push(
       check(`合计文件数 ${truth.totalFiles}`, containsNumber(md, truth.totalFiles), `期望出现 ${truth.totalFiles}`),
     );
+    /**
+     * 【定】全局合计字节数是**软**判据；任务原文要的是「**每个子目录的**文件数与总大小」。
+     *
+     * 2026-08-28 `probe:requirement-extraction` 已经下过结论（H2：grader 检了用户没要求的东西），
+     * 中性抽取 0/5 抽出「全局合计」、加一句显式要求后 5/5 —— 但这个文件当时没跟着改。
+     * 2026-10-16 它又出现了一次：`eval:suite --live 5` trial 3 只差这一条被判 FAIL，
+     * 恰好落进 ADR-0019 CG-4 新拆出来的「偏宽」—— 一个**假的**「结算说了假话」。
+     * 一个错的 grader 会让刚建起来的那个指标从第一天起就在误报。
+     */
     checks.push(
-      check(`合计字节数 ${truth.totalBytes}`, containsNumber(md, truth.totalBytes), `期望出现 ${truth.totalBytes}`),
+      check(
+        `合计字节数 ${truth.totalBytes}`,
+        containsNumber(md, truth.totalBytes),
+        `期望出现 ${truth.totalBytes}（任务原文没要求全局合计，软判据）`,
+        false,
+      ),
     );
+    /** 原文真正要求的：每个子目录的总大小。空目录的 0 不查（「0」到处都是，查它没有判别力）。 */
+    for (const [dir, files] of truth.byDir) {
+      const dirBytes = files.reduce((n, f) => n + f.bytes, 0);
+      if (dirBytes === 0) continue;
+      checks.push(
+        check(`子目录「${dir}」的总大小 ${dirBytes}`, containsNumber(md, dirBytes), `期望出现 ${dirBytes}`),
+      );
+    }
     for (const d of truth.emptyDirs) {
       /**
        * 【定】判据是「目录名之后的一个窗口内出现『空』」，不是「同一行」。

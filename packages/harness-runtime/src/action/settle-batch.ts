@@ -36,7 +36,7 @@ import { DEFAULT_SETTLEMENT } from "../types/tool.js";
 import type { ModelContent } from "../types/context.js";
 import type { ProducedResource, ResourceReference } from "../types/resource.js";
 import { MAX_RESOURCE_BYTES, renderToolResultForModel } from "../types/resource.js";
-import type { ArtifactCheckFact, ExecutionPrivilege, RecoveryItem } from "../types/run.js";
+import type { ArtifactCheckFact, CompletionSignalFact, ExecutionPrivilege, RecoveryItem } from "../types/run.js";
 import type { RunEvent } from "../types/event.js";
 import { makeError, type RuntimeErrorRecord } from "../types/error.js";
 import { asId, digest, type ActionBatchId, type ActionId, type AttemptId, type RunId } from "../types/ids.js";
@@ -126,6 +126,8 @@ export interface BatchOutcome {
   recoveryItems: RecoveryItem[];
   /** 第二层 Verification 的事实（§10.4）。与 verifications 分开，见类型注释。 */
   artifactChecks: ArtifactCheckFact[];
+  /** 工具陈述的完成信号（ADR-0019 B）。按调用顺序，结算时由 settle-outcome 汇总。 */
+  completionSignals: CompletionSignalFact[];
   /** 批被中断（cancel）。已结算的事实保留，未启动的合成 SKIPPED result。 */
   aborted: boolean;
 }
@@ -142,6 +144,7 @@ export async function* executeBatch(
   const attempts: ExecutionAttempt[] = [];
   const recoveryItems: RecoveryItem[] = [];
   const artifactChecks: ArtifactCheckFact[] = [];
+  const completionSignals: CompletionSignalFact[] = [];
 
   /**
    * 结算台账。key 是 toolCallId，一个 call 只允许写一次。
@@ -852,6 +855,20 @@ export async function* executeBatch(
        * logicalId 会把两个 Run 在 `/etc/foo` 上的写并进同一条 lineage。
        * 只在它**看起来是绝对路径**时才判 —— MCP 之类的工具可以用非路径 id。
        */
+      /**
+       * 完成信号（ADR-0019 B）。【定】在工具返回的那一刻记下，与 `causeByCall`
+       * 「在事情发生的那一刻写下来，不要事后从文案里猜」同一条纪律 ——
+       * 结算时再从 output 文本里反推，就是在读模型 / 工具的自然语言。
+       * 超时改写用的是展开（见上），所以这个字段不会在那里被丢掉。
+       */
+      if (outcome.completionSignal) {
+        completionSignals.push({
+          ...outcome.completionSignal,
+          actionId: String(actionId),
+          toolName: call.name,
+          at: deps.now(),
+        });
+      }
       if (outcome.artifact && deps.artifacts) {
         const a = outcome.artifact;
         const outsideClaim =
@@ -1109,6 +1126,7 @@ export async function* executeBatch(
     attempts,
     recoveryItems,
     artifactChecks,
+    completionSignals,
     aborted: deps.signal.aborted || aborted,
   };
 }

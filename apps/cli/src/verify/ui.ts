@@ -764,7 +764,13 @@ async function main(): Promise<void> {
           {
             text: "写一个文件",
             toolCalls: [
-              { toolCallId: "w1", name: "write_file", input: { path: "auto.txt", content: "hi" } },
+              // artifact_role：ADR-0019 B1 之后，没声明的写入结算为 COMPLETED_WITH_LIMITS ——
+              // 这段测的是「自动放行有没有让 Run 正常跑完」，夹具照当前的正确行为写。
+              {
+                toolCallId: "w1",
+                name: "write_file",
+                input: { path: "auto.txt", content: "hi", artifact_role: "DELIVERABLE" },
+              },
             ],
           },
           { text: "好了。", toolCalls: [] },

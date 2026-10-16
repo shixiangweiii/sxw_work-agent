@@ -200,6 +200,27 @@ export function analyzeCommand(command: string): CommandAnalysis {
  */
 function extractPrograms(command: string): string[] {
   /**
+   * ── 2026-10-16 验收批：五条 bash 语法规则，都是**精确**的，不是启发式 ─────
+   *
+   * 真实运行（Run `run_348754def81c`，B 站图片打包）的审计串是
+   * `programs:-H,-o,0f38…196213921,…,do,done,i+1,d[i+5:i+7],0xC4,import,PY,…` ——
+   * 十来项里真程序名不到一半。五个来源各对应 bash 的一条语法：
+   *
+   * | 噪声 | 来源 | 规则 |
+   * |---|---|---|
+   * | `-H` `-o` | 反斜杠续行被当成新的一行 | `\` ＋ 换行在 bash 里直接删掉 |
+   * | `import` `d[i+5:i+7]` `PY` | here-doc 正文 | 正文是喂给命令的数据，不是命令 |
+   * | `0f38…`（资源 ID） | 数组字面量 `ids=( … )` 跨行 | 括号里是元素，不是命令 |
+   * | `i+1` | 算术展开 `$(( … ))` | 括号里是表达式 |
+   * | `for` `do` `done` | 保留字 | 保留字后面的词才是命令（或者整段不是命令） |
+   *
+   * 【定】here-doc 必须在抹引号**之前**剥：`<<'PY'` 的结束标记带引号，
+   * 先抹引号就找不到它，正文会一直延续到命令末尾。
+   * 判据在 `verify:shell` A 段，五条规则各注入一次、各自翻红。
+   */
+  const joined = command.replace(/\\\r?\n/g, " ");
+  const noHeredoc = stripHeredocBodies(joined);
+  /**
    * 【定】先把**引号内容**抹掉，再切分。
    *
    * 噪声的绝大部分来自这里：`-H "User-Agent: Mozilla/5.0 (Windows NT 10.0;
@@ -212,16 +233,47 @@ function extractPrograms(command: string): string[] {
    * 代价：`"ls" -la` 这种把程序名括起来的写法会从审计串里消失。
    * 那是**显示面**的损失，判定不受影响（见 couldBeProgramName 的说明）。
    */
-  const unquoted = command.replace(/'[^']*'|"[^"]*"/g, " ");
-  const segments = unquoted.split(/\|\||&&|[|&;\n\r()]/);
+  const unquoted = noHeredoc.replace(/'[^']*'|"[^"]*"/g, " ");
+  const noArith = unquoted.replace(/\$?\(\([^()]*\)\)/g, " ");
+  const noArrays = noArith.replace(/[A-Za-z_]\w*\+?=\([^()]*\)/g, " ");
+  const segments = noArrays.split(/\|\||&&|[|&;\n\r()]/);
   const found = new Set<string>();
   for (const seg of segments) {
     const tokens = seg.trim().split(/\s+/).filter(Boolean);
-    // 跳过前置环境变量赋值，取第一个真正的词
-    const prog = tokens.find((t) => !t.includes("="));
-    if (prog !== undefined && couldBeProgramName(prog)) found.add(prog);
+    // 跳过前置环境变量赋值与「后面跟命令」的保留字，取第一个真正的词
+    const prog = tokens.find((t) => !t.includes("=") && !PREFIX_RESERVED_WORDS.has(t));
+    if (prog === undefined || NON_COMMAND_RESERVED_WORDS.has(prog)) continue;
+    if (couldBeProgramName(prog)) found.add(prog);
   }
   return [...found].sort();
+}
+
+/** 后面紧跟的词才是命令：`do curl …`、`if grep …`、`! test …`。 */
+const PREFIX_RESERVED_WORDS = new Set(["do", "then", "else", "elif", "if", "while", "until", "!", "time", "{"]);
+/** 整段都不是命令：`for x in …` 的词表、`case … in`、收尾的 `done` / `fi` / `esac`。 */
+const NON_COMMAND_RESERVED_WORDS = new Set(["for", "select", "case", "in", "done", "fi", "esac", "}", "function"]);
+
+/**
+ * 把 here-doc 的正文行替换成空行（保留行数，便于对照）。
+ *
+ * `<<<`（here-string）不是 here-doc，两侧的 `(?<!<)` / `(?!<)` 排除它。
+ * 结束标记按「去掉首尾空白后等于标记」认 —— 比 bash 宽（bash 只容 `<<-` 的前导 tab），
+ * 宽的方向是「提前结束」，后果只是把几行数据当成命令显示，不会吞掉真命令之外的东西。
+ */
+function stripHeredocBodies(src: string): string {
+  const out: string[] = [];
+  let terminator: string | undefined;
+  for (const line of src.split("\n")) {
+    if (terminator !== undefined) {
+      if (line.trim() === terminator) terminator = undefined;
+      out.push("");
+      continue;
+    }
+    out.push(line);
+    const m = /(?<!<)<<(?!<)-?\s*(['"]?)([A-Za-z_]\w*)\1/.exec(line);
+    if (m) terminator = m[2];
+  }
+  return out.join("\n");
 }
 
 /**

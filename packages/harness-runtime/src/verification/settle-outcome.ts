@@ -21,9 +21,21 @@
  * 结算时忽略它，等于花钱测出一个事实然后扔掉。
  *
  * 注意它不改变循环何时终止，只改变终止后打什么标签。
+ *
+ * ── ADR-0019 B：同一条底线用到另外两条事实上 ─────────────────────────
+ *
+ * 工具陈述过的完成信号（写了文件却一份交付物都没声明、请人做的那一步没人接）
+ * 同样是「已经记下的事实」，结算时同样不许扔。它们只降不升，不读自然语言，
+ * 不改终止条件 —— 见下面 `completionGaps`。
  */
 
-import type { ArtifactCheckFact, IncompleteItem, RecoveryItem, RunOutcome } from "../types/run.js";
+import type {
+  ArtifactCheckFact,
+  CompletionSignalFact,
+  IncompleteItem,
+  RecoveryItem,
+  RunOutcome,
+} from "../types/run.js";
 import type { VerificationResult } from "../types/tool.js";
 
 export interface SettleInput {
@@ -37,10 +49,13 @@ export interface SettleInput {
    * 这里也一样：不重新去看产物，只读已经记下的检查结果。
    */
   artifactChecks?: ArtifactCheckFact[];
+  /** 工具陈述的完成信号（ADR-0019 B）。同样只读已经记下的事实。 */
+  completionSignals?: CompletionSignalFact[];
 }
 
 export function settleOutcome(input: SettleInput): RunOutcome {
   const art = splitArtifactChecks(input.artifactChecks ?? []);
+  const gaps = completionGaps(input.completionSignals ?? [], input.artifactChecks ?? []);
   const base = {
     summary: input.summary,
     /**
@@ -87,13 +102,14 @@ export function settleOutcome(input: SettleInput): RunOutcome {
           }),
         ),
         ...art.failedOthers,
+        ...gaps,
       ],
     };
   }
 
   const unmet = unmetRequired(input.verifications);
 
-  if (unmet.length === 0 && art.failedOthers.length === 0) {
+  if (unmet.length === 0 && art.failedOthers.length === 0 && gaps.length === 0) {
     return { ...base, kind: "SUCCESS", incompleteItems: [] };
   }
 
@@ -104,7 +120,7 @@ export function settleOutcome(input: SettleInput): RunOutcome {
    * 一条「有中间产物没通过检查」的记录，事后既查不到是哪个，也修不了。
    */
   if (unmet.length === 0) {
-    return { ...base, kind: "COMPLETED_WITH_LIMITS", incompleteItems: art.failedOthers };
+    return { ...base, kind: "COMPLETED_WITH_LIMITS", incompleteItems: [...art.failedOthers, ...gaps] };
   }
 
   /**
@@ -118,20 +134,105 @@ export function settleOutcome(input: SettleInput): RunOutcome {
    * `COMPLETED_WITH_LIMITS` 才是诚实的：它不声称自己知道该怪谁。
    *
    * 【定】这个值域**不新增**成员。「模型声称做不了」不给独立 kind ——
-   * 那要判断模型的话语意图，会把结算从「只查事实表」拖回「读模型说了什么」，
-   * 直接违反不变量 12。它继续走 SUCCESS ＋ summary（R-7 的一半已于
-   * 2026-08-25 接上），代价写进 ADR。
+   * 那要判断模型的话语意图，会把结算从「只查事实表」拖回「读模型说了什么」。
+   *
+   * ADR-0019（2026-10-16）把不变量 12 的措辞改成：**结算依据来自事实表；模型的结构化声明
+   * 可以是事实，自然语言不是。** 于是：
+   *   · 总结里写「我没做到」—— 仍然不读，照旧只在 summary 里（ADR-0001 的代价没变）；
+   *   · 调 `declare_unmet` 结构化声明「用户明确要求的这一条没满足」—— 是一条在调用那一刻
+   *     记下的事实，经 completionGaps 降到 COMPLETED_WITH_LIMITS（只降不升，值域仍不新增）。
+   * 采纳依据是一次预注册的 live 实验：违约侧 4/5 声明、守约侧 0/5（ADR-0019「C 实验」）。
    */
   const causes = input.verifications
     .filter((v) => v.required && v.status !== "PASSED")
     .map((v) => v.unmetCause);
-  const allUserRejected = causes.length > 0 && causes.every((c) => c === "USER_REJECTED");
+  // 【定】有完成缺口时不判 USER_REJECTED：「没人接管」「没声明交付物」都不是用户拒绝的，
+  // 「全部是用户拒绝」这个前提因此不成立 —— 与上面「为什么是全部」同一条理由。
+  const allUserRejected =
+    causes.length > 0 && causes.every((c) => c === "USER_REJECTED") && gaps.length === 0;
 
   return {
     ...base,
     kind: allUserRejected ? "USER_REJECTED" : "COMPLETED_WITH_LIMITS",
-    incompleteItems: [...unmet, ...art.failedOthers],
+    incompleteItems: [...unmet, ...art.failedOthers, ...gaps],
   };
+}
+
+/**
+ * ADR-0019 B：两条「事实表里已经有、结算时却被丢掉」的事实。
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ * B1　写了文件、却**一份交付物都没声明** —— 第二层检查一项都没跑。
+ *     这时的 SUCCESS 碰巧可能为真，但**没有任何事实撑着它**
+ *     （live：`verify:scenarios` 6 个任务里 3 个、改引导面后 eval 5 个里 2 个）。
+ * B2　请人去做的那一步**没有发生**，之后也没有一次被应答的接管。
+ *     ADR-0008：没人接 ＝「那件事真的没做」（`run_73db9f5de54f`：总结里说了
+ *     「没能把那行文字输入进去」，结算 SUCCESS）。
+ *
+ * 【定】两条都只**降**到 COMPLETED_WITH_LIMITS，不发明新 kind（ADR-0001 的理由照旧）；
+ * 含义的扩展（「没达成」→「没达成或没核实」）靠 incompleteItem 的措辞区分，
+ * 措辞写死、点名，不写成一句「有东西没完成」。
+ *
+ * 【定】B1 的边界，每一条都有一个正确完成的真实 Run 撑着（离线回放 27 个 Run 量过）：
+ *   · 只要有**任何一个** DELIVERABLE 事实（含检查失败的）就不触发 —— 交付物声明过了，
+ *     顺手写的中间文件不该把它拉下来（`run_3415405644f9` 的 progress.md）；
+ *   · 声明为 INTERMEDIATE 的写入不算「未声明」（【议】CG-1 推荐的「算已声明」）——
+ *     模型明确说了「这不是交付物」，结算不替它改口；它根本不发 UNDECLARED_FILE_WRITE；
+ *   · 纯问答、纯 GUI、只用 edit_file 的修改任务：**没有** UNDECLARED_FILE_WRITE 信号，
+ *     不触发 —— 这正是被否决的 B0（「零交付物一律降级」）会误判的三类。
+ *
+ * 【定】不读任何自然语言：信号是工具在返回那一刻给的结构化陈述（见 ToolExecutionOutcome）。
+ * ══════════════════════════════════════════════════════════════════════
+ */
+function completionGaps(
+  signals: CompletionSignalFact[],
+  artifactFacts: ArtifactCheckFact[],
+): IncompleteItem[] {
+  const gaps: IncompleteItem[] = [];
+
+  const undeclared = [
+    ...new Set(signals.filter((s) => s.kind === "UNDECLARED_FILE_WRITE").map((s) => s.detail)),
+  ];
+  const anyDeliverable = artifactFacts.some((f) => f.role === "DELIVERABLE");
+  if (undeclared.length > 0 && !anyDeliverable) {
+    gaps.push({
+      what: `写了 ${undeclared.join("、")}，没有一份声明为交付物`,
+      why: "第二层 Artifact 检查没有运行 —— 交付了什么、交付物是否完整，事实表上都没有记录（ADR-0019 B1）",
+    });
+  }
+
+  /**
+   * B2 按发生顺序扫：一次被应答的接管抵消它**之前**所有没人接的请求 ——
+   * 模型请人做、没人来、后来又请一次、这次有人做了，那件事最终是做了的。
+   * 反过来（先应答、后没人接）则最后那一步仍然没做。
+   */
+  let pending: CompletionSignalFact[] = [];
+  for (const s of signals) {
+    if (s.kind === "HUMAN_STEP_NOT_DONE") pending.push(s);
+    else if (s.kind === "HUMAN_STEP_DONE") pending = [];
+  }
+  for (const s of pending) {
+    gaps.push({
+      what: `请人去做的一步没有发生：${s.detail}`,
+      why: `${s.toolName} 没有人接管 —— 没人接，那件事就真的没做（ADR-0008 ／ ADR-0019 B2）`,
+      actionId: s.actionId as IncompleteItem["actionId"],
+    });
+  }
+
+  /**
+   * ADR-0019 C（预注册实验过关后采纳）：模型**结构化地**声明「用户明确要求的这一条没满足」。
+   *
+   * 【定】只降不升；措辞写明来源是「模型自己声明的」—— 事实表记的是「模型声明了 X 未满足」，
+   * 这是关于这次 Run 的一句真话，不是 Atlas 核实过「X 未满足」。不读任何自然语言总结。
+   */
+  for (const s of signals.filter((x) => x.kind === "MODEL_DECLARED_UNMET")) {
+    gaps.push({
+      what: `模型声明用户的要求没有满足：${s.detail}`,
+      why: `${s.note ?? "（未写原因）"} —— 来源是模型自己的结构化声明（${s.toolName}，ADR-0019 C）`,
+      actionId: s.actionId as IncompleteItem["actionId"],
+    });
+  }
+  return gaps;
 }
 
 /**
@@ -269,6 +370,8 @@ export function settleWallOutcome(
     ...unmetRequired(input.verifications),
     ...art.failedDeliverables,
     ...art.failedOthers,
+    // 撞墙的 kind 不受它影响，但 handoff 要把「哪一步没人接、哪些写入没声明」说出来。
+    ...completionGaps(input.completionSignals ?? [], input.artifactChecks ?? []),
     ...input.recoveryItems.map((r) => ({
       what: r.what,
       why: `副作用状态 ${r.sideEffectState}`,

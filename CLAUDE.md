@@ -16,6 +16,40 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 当前状态
 
+### ADR-0019（2026-10-16）：S5-7 任务级完成契约 —— 结算看完它已经记下的事实，模型能结构化地说「这条没做到」
+
+依据 [ADR-0019](sxw_aicoding/ADR/0019-任务级完成契约-重开通用Completion-Gate.md)（**已实施、待用户复核**；
+证据摘录进仓：[附录](sxw_aicoding/验收报告/2026-10-16-附录-ADR-0019证据摘录.md)）。
+`verify:all` **19 条脚本 / 402 条判据**（393 → 402）。
+
+> ### 【定】新证据里没有一条是「模型以为做完了」，说假话的是结算层
+>
+> 当初「论据被探针推翻」推翻的是 pi 那条「模型有伪完成感知」；新证据讲的是另一件事：
+> 结算手里有事实没看（写了文件却一份交付物都没声明、请人接管却没人接），或者把模型如实说的话只当成给人看的文案。
+>
+> | 候选 | 做了什么 | 证据 |
+> |---|---|---|
+> | **B1** | 写了文件、一份交付物都没声明 → 最高 `COMPLETED_WITH_LIMITS` | 离线回放 27 个真实 Run，只在「清单写对了、没声明」上触发 |
+> | **B2** | 请人做的那一步没人接、之后也没人接上 → `COMPLETED_WITH_LIMITS` | live `run_52bcc91a28ef`；同形态以前是 E6 的 `SUCCESS` |
+> | **C** | 机制工具 `declare_unmet`：用户**明确要求**的没做到就结构化声明，只降不升 | **预注册实验**：违约侧 4/5、守约侧 0/5、DeepSeek 方向一致 → 采纳 |
+> | **CG-4** | eval 的「一致」拆成偏宽 / 偏严 | 拆完第一次 live 就抓到一个**假的**偏宽（下一条） |
+>
+> 【定】事实由**工具陈述**（`ToolExecutionOutcome.completionSignal`），Runtime 不认识工具名；
+> 信号进 RUN_META（`persistFacts` 整体重写那条坑再防一次）。**不变量 12 改措辞**：
+> 结算依据来自事实表；模型的结构化声明可以是事实，自然语言不是（ADR-0001 被部分取代）。
+
+> ### 【定】同批三处「判据或仪器说的」与「真实运行」对不上
+>
+> | | 形态 | 处置 |
+> |---|---|---|
+> | **被截断的工具调用被结算成完成** | `run_9862d3f92cf9`：工具调用写到一半撞上 8192 输出上限（端点报 `stop_reason=tool_use`）→ §8.4 丢掉 → 0 个 tool call → **SUCCESS**，没有交付物也没有总结 | 适配器报 `droppedToolCalls`；主循环与「推理吃光输出预算」同一条路（抬上限重试，用完 → `CONTEXT_EXHAUSTED`）。`verify:model-audit` I 段走真实适配器 ＋ 真 SSE |
+> | grader「合计字节数」 | 2026-08-28 探针早判了它是 grader 误判（H2），文件没改；CG-4 拆完第一次就把它报成「偏宽」 | `archive-inventory@1.1.0`：全局合计降软判据，补「每个子目录的总大小」硬判据 |
+> | `verify:resume` 等四处夹具 | 停在 R5 之前（写文件不声明交付物），B1 之后基线自己就降级 | 照当前正确行为写；**预期变更，不是回归** |
+>
+> ⚠️ **守卫重叠区，第八次**：截断判据的第一版夹具用了 `stop_reason=max_tokens` ＋ 无正文，
+> 恰好同时命中既有的「推理吃光输出预算」守卫 —— 摘掉新分支，「一直截断」那条照样绿。
+> 改成 live 原样的 `tool_use` 后两处注入各自翻红。B 的 I3 注入第一次也打错了位置（在结算侧改，而 INTERMEDIATE 根本不发信号）。
+
 ### 全量验收批（2026-10-16）：`verify:all` 第一次从头跑到尾 ＋ 真实运行抓出四处问题
 
 报告：[2026-10-16-Atlas集成fcsandbox全量验收报告.md](sxw_aicoding/验收报告/2026-10-16-Atlas集成fcsandbox全量验收报告.md)。
@@ -34,8 +68,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > 另修两条遗留：`verify:resource` F 段（判据假设索引一页装得下；实现侧索引改为按行写，每页都是完整条目）、
 > 池子补货目标不数 DESTROYING（fc-sandbox，见下方「fc-sandbox 侧」）。
 
-> ⚠️ **S5-7 的新证据**：信任声明关闭时，模型对 200 行数据**退回手工累加**，这次碰巧全对、也如实说了「pandas 没跑起来」，
-> 而 Run 照样 `SUCCESS` —— 用户显式要求的执行方式没做到，在结算上不可见。根治要重开 Completion Gate 的决定（要 ADR）。
+> ### 【定】第二轮：真实 Playwright MCP 跑通 B 站题，顺带抓到第五处
+>
+> `run_348754def81c`（`--approval auto`、`@playwright/mcp --headless --isolated`）：10 轮 SUCCESS，
+> `images.zip` 10 张 3024×4028 原图独立核对过，**全程没有一次 `rm -rf`** —— ADR-0012 那道门槛关了。
+> 它的审计串是 `programs:-H,-o,<资源 ID>,do,done,i+1,d[i+5:i+7],import,PY,…`：`extractPrograms` 不认识
+> 反斜杠续行、here-doc 正文、数组字面量、算术展开与保留字。五条都按 bash 语法精确剥掉
+> （here-doc 必须先于抹引号），`verify:shell` 的判据是「审计串**恰好等于**真程序名集合」，八处注入各自翻红。
+> `verify:all` 394 条。
+>
+> ⚠️ **computer use 真桌面那项被 auto 模式的安全检查拦下，而且拦得对**：R01 / R10 要「有人看审批卡」，
+> 写脚本经 HTTP 替人应答，事实表会记成 `HUMAN` —— 等于自己审批自己操作用户的桌面。这一项只能用户在场时做。
+
+> ~~⚠️ **S5-7 的新证据**：……Run 照样 `SUCCESS`……根治要重开 Completion Gate 的决定（要 ADR）。~~
+> —— 已由 ADR-0019 处置（见上）：同一道题现在 4/5 次由模型 `declare_unmet` 声明、结算 `COMPLETED_WITH_LIMITS`。
 
 ### ADR-0018（2026-10-16）：带上传的断网调用，经部署配置里的显式信任声明才放行 ＋ Web 入口补接线
 
@@ -1813,6 +1859,8 @@ npm run verify:artifact            # 批 2：外置与逐字取回 ＋ URL 护�
                                    #     14 个内置工具没有一个走得到这条分支）
                                    #   ＋ ★H 段：run_shell 产出的**二进制** zip 走完整条产物链（ADR-0010）
                                    #   ＋ ★H3 文件头魔数（404 页伪装成 .jpg）／H4 旧文件不得冒认／I 段 identity
+                                   #   ＋ ★K 段（ADR-0019）：未声明的写入 / 没人接的接管 / declare_unmet 各自成对，
+                                   #     ＋ 完成信号进 RUN_META（resume 不丢）
 npm run verify:progress            # 批 3：进展 ＋ 无进展 ＋ 真实慢工具取消 ＋ 人工接管三条状态闭合
                                    #   ＋ ★I 段：两条被自己抵消掉的兜底（makeError 的展开顺序、
                                    #     sleep 的 signal）。sleep 验**两个时序**，否则落进守卫重叠区
@@ -1858,6 +1906,7 @@ npm run verify:computer            # ★ADR-0013：边界 15 判别力 ＋ 图�
                                    #     复核途中取消不投递 · 拖拽终点比画面 · 审批全文 · vision 进指纹 · 助手重连
                                    #   全程**假驱动**：不截真屏、不动鼠标、不弹授权框
 npm run verify:model-audit         # 调用级实际请求、SDK 解码 Provider 事件/错误与 fail-open 独立审计
+                                   #   ＋ ★I 段（ADR-0019 同批）：被截断的工具调用不得结算成完成（真实适配器 ＋ 真 SSE）
 npm run verify:all                 # 19 条脚本，一条 && 链（任何一条崩了，排在后面的都不会跑）
 ```
 

@@ -10,6 +10,7 @@ import type { Terminal } from "../types/loop.js";
 import { executionPrivilegeOf } from "../types/run.js";
 import type {
   ArtifactCheckFact,
+  CompletionSignalFact,
   ExecutionPrivilege,
   RecoveryItem,
   ResumableRunFacts,
@@ -357,6 +358,8 @@ export class HarnessRuntime {
       const recoveryItems: RecoveryItem[] = [...(priorFacts?.recoveryItems ?? [])];
       // 阶段 3 S8：第二层事实同样要接着累计，否则上一段验过的产物在结算时蒸发。
       const artifactChecks: ArtifactCheckFact[] = [...(priorFacts?.artifactChecks ?? [])];
+      // ADR-0019 B：完成信号同理 —— 少了这一行，崩溃前那次没人接的接管会在恢复后蒸发。
+      const completionSignals: CompletionSignalFact[] = [...(priorFacts?.completionSignals ?? [])];
 
       /**
        * D-2：取号走 store 的分配器，与 runLoop 同一条序列。
@@ -474,6 +477,7 @@ export class HarnessRuntime {
             verifications,
             recoveryItems,
             artifactChecks,
+            completionSignals,
             // R-7：outcome 必须能读出发生了什么。这条路径上「发生了什么」
             // 不是模型说的话，而是用户的恢复决策本身 —— 如实写它。
             summary:
@@ -504,6 +508,7 @@ export class HarnessRuntime {
                 verifications,
                 recoveryItems,
                 artifactChecks,
+                completionSignals,
                 lastSequence,
                 resumeBranchCounts: priorFacts?.resumeBranchCounts ?? {},
               },
@@ -625,6 +630,7 @@ export class HarnessRuntime {
           verifications.push(...br.value.verifications);
           recoveryItems.push(...br.value.recoveryItems);
           artifactChecks.push(...br.value.artifactChecks);
+          completionSignals.push(...br.value.completionSignals);
           // executeBatch 保证 results 恰好一条，且 toolCallId 与请求一致（不变量 8）。
           await appendAndPush(br.value.results, turn);
           continue;
@@ -706,6 +712,7 @@ export class HarnessRuntime {
         verifications,
         recoveryItems,
         artifactChecks,
+        completionSignals,
         // 交给 runLoop 接着用的高水位。少了它，runLoop 里的 emit 会从
         // resumeFrom.lastSequence ?? 0 起算，恢复段的事件号又回到 1（D-2）。
         lastSequence,

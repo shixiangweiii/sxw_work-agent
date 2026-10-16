@@ -40,6 +40,7 @@ import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import {
   CollectingTraceSink,
+  readRunFacts,
   findOrphanResults,
   findUnpairedToolUses,
   type ContextMessage,
@@ -269,6 +270,156 @@ async function main(): Promise<void> {
   await sectionArtifactIdentity();
   await sectionTimeoutKeepsArtifact();
   sectionZipContainerKinds();
+  await sectionCompletionGaps();
+}
+
+/**
+ * K：ADR-0019 B —— 结算吸收两条事实表里已经有、却一直被扔掉的事实。
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ * B1　写了文件、一份交付物都没声明 → 最高 COMPLETED_WITH_LIMITS（第二层检查一项没跑）。
+ * B2　请人做的那一步没人接、之后也没有一次被应答的接管 → COMPLETED_WITH_LIMITS。
+ *
+ * 【定】每条规则都**成对**：会降级的那一侧 ＋ 不该降级的那几侧。少了后者，
+ * 「一律降级」的实现能让前者全绿 —— 而那正是被否决的 B0（零交付物一律降级），
+ * 它会把纯问答、纯 GUI、只用 edit_file 的正确 Run 全部拉下来。
+ * 不该降级的那几侧，每一条都对应离线回放里一个**正确完成**的真实 Run 的形态
+ * （progress.md 顺手写的中间文件、只声明 INTERMEDIATE、ask_user 没人答）。
+ *
+ * 另有一条落盘判据：信号必须进 RUN_META。`persistFacts()` 每轮整体重写，
+ * 漏写这个字段的后果是跨进程 resume 之后缺口被抹掉、结算回到那个没有事实撑着的 SUCCESS。
+ * ══════════════════════════════════════════════════════════════════════
+ */
+async function sectionCompletionGaps(): Promise<void> {
+  section("K. ADR-0019 B：未声明的写入、没人接的接管，结算时不许再扔掉");
+
+  const ws = tempWorkspace();
+  try {
+    const run = async (
+      turns: ToolCall[][],
+      handoff?: (n: number) => { note?: string } | undefined,
+    ): Promise<{ outcome?: RunOutcome; runId: string; composed: ReturnType<typeof compose> }> => {
+      let handoffCalls = 0;
+      const composed = compose({
+        dbPath: ":memory:",
+        workspaceRoot: ws.root,
+        approvalDecider: async () => ({ approved: true }),
+        trace: new CollectingTraceSink(),
+        modelPortOverride: new ScriptedModelPort([
+          ...turns.map((toolCalls) => ({ text: "继续", toolCalls })),
+          { text: "做完了。", toolCalls: [] },
+        ]),
+        ...(handoff ? { handoff: { await: async () => handoff(handoffCalls++) } } : {}),
+      });
+      const gen = composed.runtime.start(composed.makeRunSpec("verify:artifact K 夹具"));
+      let runId = "";
+      let r = await gen.next();
+      while (!r.done) {
+        if (!runId) runId = String(r.value.runId);
+        r = await gen.next();
+      }
+      return { ...(r.value.outcome ? { outcome: r.value.outcome } : {}), runId, composed };
+    };
+    const write = (id: string, path: string, role?: string): ToolCall => ({
+      toolCallId: id,
+      name: "write_file",
+      input: { path, content: "# 内容\n", ...(role ? { artifact_role: role } : {}) },
+    });
+    const handoffCall = (id: string, done: string): ToolCall => ({
+      toolCallId: id,
+      name: "request_handoff",
+      input: { instructions: "请在审批系统里查一下合同编号", expected_completion: done },
+    });
+    const kindOf = (o?: RunOutcome): string => o?.kind ?? "(无 outcome)";
+    const items = (o?: RunOutcome): string => (o?.incompleteItems ?? []).map((i) => i.what).join("｜");
+
+    // ── B1
+    const k1 = await run([[write("k1", "report.md")]]);
+    const k2 = await run([[write("k2", "report.md", "DELIVERABLE")]]);
+    const k3 = await run([[write("k3", "notes.md", "INTERMEDIATE")]]);
+    const k4 = await run([[write("k4a", "progress.md"), write("k4b", "owners.md", "DELIVERABLE")]]);
+    fact("K1 写了 report.md、没声明", `${kindOf(k1.outcome)}｜${items(k1.outcome)}`);
+    fact("K2 声明为 DELIVERABLE", kindOf(k2.outcome));
+    fact("K3 只声明 INTERMEDIATE（CG-1：算已声明）", kindOf(k3.outcome));
+    fact("K4 顺手写的 progress.md ＋ 声明过的 owners.md", kindOf(k4.outcome));
+    verdict(
+      k1.outcome?.kind === "COMPLETED_WITH_LIMITS" &&
+        items(k1.outcome).includes("report.md") &&
+        items(k1.outcome).includes("没有一份声明为交付物"),
+      "B1：写了文件却一份交付物都没声明 → COMPLETED_WITH_LIMITS，并点名写了哪个文件",
+    );
+    verdict(
+      k2.outcome?.kind === "SUCCESS" && k3.outcome?.kind === "SUCCESS" && k4.outcome?.kind === "SUCCESS",
+      "B1 的反向：声明了 DELIVERABLE、只声明 INTERMEDIATE、有交付物时顺手写的中间文件 —— 三种都仍是 SUCCESS",
+    );
+
+    // ── B2
+    const k5 = await run([[handoffCall("k5", "合同编号已填进 contract.txt")]], () => undefined);
+    const k6 = await run([[handoffCall("k6", "合同编号已填进 contract.txt")]], () => ({ note: "填好了" }));
+    const k7 = await run(
+      [[handoffCall("k7a", "第一次请求")], [handoffCall("k7b", "第二次请求")]],
+      (n) => (n === 0 ? undefined : { note: "这次来了" }),
+    );
+    const k7b = await run(
+      [[handoffCall("k7c", "第一次请求")], [handoffCall("k7d", "第二次没人接的请求")]],
+      (n) => (n === 0 ? { note: "来了" } : undefined),
+    );
+    const k8 = await run([
+      [{ toolCallId: "k8", name: "ask_user", input: { question: "用哪种格式？", options: "markdown\njson" } }],
+    ]);
+    fact("K5 接管没人接", `${kindOf(k5.outcome)}｜${items(k5.outcome)}`);
+    fact("K6 接管有人应答", kindOf(k6.outcome));
+    fact("K7 先没人接、再请一次有人接", kindOf(k7.outcome));
+    fact("K7b 先有人接、后一次没人接", `${kindOf(k7b.outcome)}｜${items(k7b.outcome)}`);
+    fact("K8 ask_user 没人答（ADR-0008：不是失败）", kindOf(k8.outcome));
+    verdict(
+      k5.outcome?.kind === "COMPLETED_WITH_LIMITS" &&
+        items(k5.outcome).includes("合同编号已填进 contract.txt") &&
+        k7b.outcome?.kind === "COMPLETED_WITH_LIMITS" &&
+        items(k7b.outcome).includes("第二次没人接的请求"),
+      "B2：请人做的那一步没人接（含「最后一次没人接」）→ COMPLETED_WITH_LIMITS，并引用它自己写的完成条件",
+    );
+    verdict(
+      k6.outcome?.kind === "SUCCESS" && k7.outcome?.kind === "SUCCESS" && k8.outcome?.kind === "SUCCESS",
+      "B2 的反向：有人应答、之后有人接上了、ask_user 没人答 —— 三种都仍是 SUCCESS",
+    );
+
+    // ── C（ADR-0019，预注册实验过关后采纳）：模型的结构化声明只降不升
+    const declare = (id: string, status: string): ToolCall => ({
+      toolCallId: id,
+      name: "declare_unmet",
+      input: { requirement: "请在云沙箱里用 pandas 汇总", status, why: "云沙箱调用没获批，改成了手工累加" },
+    });
+    const k9 = await run([[write("k9w", "report.md", "DELIVERABLE"), declare("k9", "DONE_DIFFERENTLY")]]);
+    const k10 = await run([[write("k10w", "report.md", "DELIVERABLE"), declare("k10", "MAYBE")]]);
+    const k11 = await run([
+      [
+        { toolCallId: "k11w", name: "write_file", input: { path: "bad.json", content: "{不是 json", artifact_role: "DELIVERABLE" } },
+        declare("k11", "NOT_DONE"),
+      ],
+    ]);
+    fact("K9 交付物好、模型声明换了做法", `${kindOf(k9.outcome)}｜${items(k9.outcome)}`);
+    fact("K10 status 写错（MAYBE）", kindOf(k10.outcome));
+    fact("K11 交付物坏、模型也声明了", kindOf(k11.outcome));
+    verdict(
+      k9.outcome?.kind === "COMPLETED_WITH_LIMITS" &&
+        items(k9.outcome).includes("模型声明用户的要求没有满足") &&
+        k10.outcome?.kind === "SUCCESS" &&
+        k11.outcome?.kind === "FAILED",
+      "C：模型声明了未满足的显式要求 → COMPLETED_WITH_LIMITS 且写明来源是模型声明；写错的声明被拒、不降级；只降不升（坏交付物仍是 FAILED）",
+    );
+
+    // ── 落盘
+    const facts = readRunFacts(await k1.composed.ports.transcript.readAll(k1.runId as RunId));
+    const persisted = (facts?.completionSignals ?? []).map((s) => `${s.kind}:${s.detail}`);
+    fact("K1 的 RUN_META 里记下的完成信号", persisted.join("｜") || "（没有）");
+    verdict(
+      persisted.includes("UNDECLARED_FILE_WRITE:report.md"),
+      "完成信号进了 RUN_META —— 跨进程 resume 之后结算仍看得见它（persistFacts 整体重写，漏一个字段就抹掉整个累计量）",
+    );
+  } finally {
+    ws.cleanup();
+  }
 }
 
 /**

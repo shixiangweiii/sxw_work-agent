@@ -63,19 +63,24 @@ import { ScriptedModelPort, banner, fact, runVerify, section, tempWorkspace, ver
  * 基线跑这一轮时是一次同内容覆盖写，幂等无害；恢复跑到它时才是真正的补做。
  * 两条路径因此产出逐字相同的 note.txt，「结果一致」这句话才有了对应物。
  */
+/**
+ * 【定】两次 write_file 都声明 DELIVERABLE（2026-10-16，ADR-0019 B1 之后）。
+ * 不声明的话基线自己就结算成 COMPLETED_WITH_LIMITS（写了文件、一份交付物都没声明），
+ * 「基线到达 COMPLETED」这个前提不成立 —— 夹具照当前的正确行为写，判据不动。
+ */
 const SCRIPT = () =>
   new ScriptedModelPort([
     {
       reasoning: "先看目录再写文件",
       toolCalls: [
         { toolCallId: "tc_1", name: "list_dir", input: { path: "." } },
-        { toolCallId: "tc_2", name: "write_file", input: { path: "note.txt", content: "hello" } },
+        { toolCallId: "tc_2", name: "write_file", input: { path: "note.txt", content: "hello", artifact_role: "DELIVERABLE" } },
       ],
     },
     {
       text: "确认一下 note.txt 写好了没有，没有就补上。",
       toolCalls: [
-        { toolCallId: "tc_3", name: "write_file", input: { path: "note.txt", content: "hello" } },
+        { toolCallId: "tc_3", name: "write_file", input: { path: "note.txt", content: "hello", artifact_role: "DELIVERABLE" } },
       ],
     },
     { text: "两件事都做完了。", toolCalls: [] },

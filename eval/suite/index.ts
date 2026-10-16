@@ -88,6 +88,16 @@ export interface SuiteReport {
   /** k 次合计的分支分布与失败成因分布 —— 阶段 2 研究问题的数据出口。 */
   resumeBranchTotals: Record<string, number>;
   unmetCauseTotals: Record<string, number>;
+  /**
+   * Runtime 自报与 grader 的对照，**分方向**（ADR-0019 CG-4）。
+   *
+   * 【定】不再只给一个「一致」数。ADR-0001 的重评触发条件 2 盯的是**偏宽**
+   * （grader 判 FAIL 而 Runtime 报 SUCCESS —— 结算说了假话）；ADR-0019 B
+   * 制造的是**偏严**（grader 判 PASS 而 Runtime 没报 SUCCESS —— 交付物对，
+   * 但 Atlas 没核实过它）。合成一个数的话，B 上线那天它看起来像回归，
+   * 而真正要盯的那个方向反而被淹没。
+   */
+  runtimeVsGrader: { agree: number; lenient: number; strict: number };
 }
 
 function git(args: string[]): string {
@@ -169,7 +179,14 @@ function scriptedTurns() {
     {
       text: "写清单",
       toolCalls: [
-        { toolCallId: "w1", name: "write_file", input: { path: "2026Q2归档/交接清单.md", content: body } },
+        // artifact_role：夹具照当前的正确行为写（R5 之后模型会声明交付物）。
+        // 不带的话 ADR-0019 B1 会把三个 trial 全部结算成 COMPLETED_WITH_LIMITS ——
+        // 那是对的，但脚本化模式验的是管路，不是这条规则（规则的判据在 verify:artifact K 段）。
+        {
+          toolCallId: "w1",
+          name: "write_file",
+          input: { path: "2026Q2归档/交接清单.md", content: body, artifact_role: "DELIVERABLE" },
+        },
       ],
     },
     {
@@ -386,6 +403,11 @@ async function main(): Promise<void> {
     k,
     resumeBranchTotals: mergeCounts(trials.map((t) => t.resumeBranchCounts)),
     unmetCauseTotals: mergeCounts(trials.map((t) => t.unmetCauseCounts)),
+    runtimeVsGrader: {
+      agree: trials.filter((t) => (t.runtimeOutcome === "SUCCESS") === t.grader.hardPassed).length,
+      lenient: trials.filter((t) => t.runtimeOutcome === "SUCCESS" && !t.grader.hardPassed).length,
+      strict: trials.filter((t) => t.runtimeOutcome !== "SUCCESS" && t.grader.hardPassed).length,
+    },
   };
   writeFileSync(join(outDir, "report.json"), JSON.stringify(report, null, 2), "utf8");
 
@@ -396,9 +418,11 @@ async function main(): Promise<void> {
     `  token 分布  ${dist(trials.map((t) => t.billedInputTokens + t.outputTokens))}`,
   );
   console.log(`  时延分布    ${dist(trials.map((t) => t.durationMs))} ms`);
+  const rvg = report.runtimeVsGrader;
+  console.log(`  Runtime 自报与 grader 一致  ${rvg.agree}/${k}`);
   console.log(
-    `  Runtime 自报与 grader 一致  ` +
-      `${trials.filter((t) => (t.runtimeOutcome === "SUCCESS") === t.grader.hardPassed).length}/${k}`,
+    `    偏宽 ${rvg.lenient}（grader FAIL、Runtime SUCCESS —— 结算说了假话，ADR-0001 触发条件 2 盯这个）` +
+      `｜偏严 ${rvg.strict}（grader PASS、Runtime 未报 SUCCESS —— 多为交付物没核实，ADR-0019 B）`,
   );
 
   /**

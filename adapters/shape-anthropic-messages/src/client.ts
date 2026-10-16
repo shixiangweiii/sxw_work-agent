@@ -211,6 +211,8 @@ function assemble(
 ): ModelInvocationResult {
   const content: ModelContent[] = [];
   const toolCalls: ModelInvocationResult["toolCalls"] = [];
+  // 丢弃的工具调用块要**报出来**，不能只是 continue 掉 —— 见 ModelInvocationResult.droppedToolCalls。
+  let droppedToolCalls = 0;
 
   const indices = [...blocks.keys()].sort((a, b) => a - b);
   for (const idx of indices) {
@@ -228,11 +230,15 @@ function assemble(
       if (b.text.length > 0) content.push({ type: "text", text: b.text });
     } else if (b.type === "tool_use") {
       // 【定】未闭合的 Tool Call 不得转为 ProposedAction（V05 §8.4）。
-      if (!closed) continue;
+      if (!closed) {
+        droppedToolCalls += 1;
+        continue;
+      }
       let input: unknown = {};
       try {
         input = b.partialJson.length > 0 ? JSON.parse(b.partialJson) : {};
       } catch {
+        droppedToolCalls += 1;
         continue; // 参数 JSON 不完整，同样不得转为 Action
       }
       const id = b.toolCallId ?? `toolu_missing_${idx}`;
@@ -242,7 +248,14 @@ function assemble(
     }
   }
 
-  return { content, toolCalls, stopReason, usage, interrupted };
+  return {
+    content,
+    toolCalls,
+    stopReason,
+    usage,
+    interrupted,
+    ...(droppedToolCalls > 0 ? { droppedToolCalls } : {}),
+  };
 }
 
 /**

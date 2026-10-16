@@ -30,7 +30,7 @@ import { executeBatch, type BatchOutcome } from "../action/settle-batch.js";
 import { settleOutcome, settleWallOutcome } from "../verification/settle-outcome.js";
 import { ToolRegistry } from "../tool-runtime/index.js";
 import type { ApprovalDecider, VerificationResult } from "../types/tool.js";
-import type { ArtifactCheckFact, RecoveryItem, ResumableRunFacts } from "../types/run.js";
+import type { ArtifactCheckFact, CompletionSignalFact, RecoveryItem, ResumableRunFacts } from "../types/run.js";
 import { makeActionFactEntry, makeRunFactsEntry } from "../transcript/index.js";
 import { checkBudgets, hardLimitIsTurns } from "../budget/index.js";
 import { DriftDetector, EndpointDriftError } from "../model/capability/drift-detector.js";
@@ -122,6 +122,8 @@ export async function* runLoop(
   // 阶段 3 S8：第二层 Verification 的事实。与 verifications 分开累计，
   // 理由见 ResumableRunFacts.artifactChecks 的注释（结算映射按 role 分流）。
   const artifactChecks: ArtifactCheckFact[] = [...(deps.resumeFrom?.artifactChecks ?? [])];
+  // ADR-0019 B：工具陈述的完成信号。同样从上一段接着累计 —— 它决定结算拿不拿得到 SUCCESS。
+  const completionSignals: CompletionSignalFact[] = [...(deps.resumeFrom?.completionSignals ?? [])];
 
   /**
    * 模型最后说的那段话，用来填 `RunOutcome.summary`。
@@ -256,6 +258,7 @@ export async function* runLoop(
       verifications,
       recoveryItems,
       artifactChecks,
+      completionSignals,
       // D-2：事件不落 transcript，高水位只能显式存。见 ResumableRunFacts 的说明。
       lastSequence,
       /**
@@ -316,7 +319,13 @@ export async function* runLoop(
    * 在可观测侧的落点，不是可选的装饰。
    */
   async function* finish(terminal: Terminal): AsyncGenerator<RunEvent, RunLoopResult> {
-    const settleInput = { verifications, recoveryItems, artifactChecks, summary: lastAssistantText };
+    const settleInput = {
+      verifications,
+      recoveryItems,
+      artifactChecks,
+      completionSignals,
+      summary: lastAssistantText,
+    };
     const outcome =
       terminal.reason === "COMPLETED" || terminal.reason === "COMPLETED_WITH_LIMITS"
         ? settleOutcome(settleInput)
@@ -930,19 +939,33 @@ export async function* runLoop(
       invocation.stopReason === "max_tokens" &&
       invocation.toolCalls.length === 0 &&
       invocation.content.every((c) => c.type !== "text" || c.text.trim() === "");
+    /**
+     * 【定】「0 个 tool call」有两种来源，只有一种是「模型说完了」。
+     *
+     * 另一种是模型**正在**发起工具调用、而那个块被截断（单次输出上限、参数 JSON 没写完），
+     * 适配器按 §8.4 把它丢了。照「不再请求工具即完成」结算，等于把一句被掐断的话当成结论 ——
+     * 2026-10-16 live `run_9862d3f92cf9` 就这样结算了一个没有交付物、没有总结的 SUCCESS。
+     * 处置与「推理吃光输出预算」同一条路：半截内容不进 Context，抬高上限重试；
+     * 重试用完仍然截断 → 具名的撞墙出口，**不是** SUCCESS。
+     */
+    const truncatedToolCall =
+      invocation.toolCalls.length === 0 && (invocation.droppedToolCalls ?? 0) > 0;
 
-    if (emptyOutput) {
+    if (emptyOutput || truncatedToolCall) {
       if (state.outputLimitRecoveries < spec.agentSpec.loopPolicy.maxOutputLimitRecoveries) {
         const attempt = state.outputLimitRecoveries + 1;
         yield await emit("RuntimeErrorOccurred", {
           invocationId: frame.invocationId,
           error: makeError({
-            code: "MODEL_OUTPUT_EATEN_BY_REASONING",
+            code: truncatedToolCall ? "MODEL_TOOL_CALL_TRUNCATED" : "MODEL_OUTPUT_EATEN_BY_REASONING",
             source: "MODEL_PROVIDER",
             category: "CAPACITY",
             retryability: "AFTER_ENVIRONMENT_CHANGE",
             sideEffectState: "NO_EFFECT",
-            safeMessage: `输出预算被推理吃光（stop_reason=max_tokens 且正文为空），第 ${attempt} 次抬高上限重试`,
+            safeMessage: truncatedToolCall
+              ? `模型发起的 ${invocation.droppedToolCalls} 个工具调用不完整（未闭合或参数 JSON 不完整，stop_reason=${invocation.stopReason}），` +
+                `没有执行，也不按「完成」结算；第 ${attempt} 次抬高输出上限重试`
+              : `输出预算被推理吃光（stop_reason=max_tokens 且正文为空），第 ${attempt} 次抬高上限重试`,
           }),
         });
         state = nextState(
@@ -986,7 +1009,7 @@ export async function* runLoop(
        * 「走的是哪条出口」。两者同时装进 `LoopTerminated`，谁多说一句
        * 都会变成第二个可以与另一个矛盾的事实。
        */
-      const kind = settleOutcome({ verifications, recoveryItems, artifactChecks }).kind;
+      const kind = settleOutcome({ verifications, recoveryItems, artifactChecks, completionSignals }).kind;
       // 走 finish() 而不是直接构造返回值 —— 否则这条最常见的出口
       // 会绕过事实落盘，resume 读到的预算永远停在上一轮。
       return yield* finish(
@@ -1087,6 +1110,7 @@ export async function* runLoop(
     verifications.push(...batchOutcome.verifications);
     recoveryItems.push(...batchOutcome.recoveryItems);
     artifactChecks.push(...batchOutcome.artifactChecks);
+    completionSignals.push(...batchOutcome.completionSignals);
 
     /**
      * U-3 的第二个问题：**在原地打转吗**。

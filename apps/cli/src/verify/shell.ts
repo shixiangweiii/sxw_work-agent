@@ -302,8 +302,11 @@ async function main(): Promise<void> {
    * 真实运行里那条（引号 URL 独占行）两道都挡得住，所以它**不适合做判据**。
    * ══════════════════════════════════════════════════════════════════════
    */
+  // 2026-10-16：原来是 `urls=(\n<URL>\n)` 的数组形态。数组字面量现在被语法规则整段剥掉，
+  // 那条用例于是落进「数组规则 ＋ `://` 过滤」的重叠区 —— 换成一行**处在命令位置上**的裸 URL，
+  // 让它仍然只被 `://` 过滤挡住。
   const bareUrlLeak =
-    "urls=(\nhttps://cdn.example.com/a-SECRET456.jpg\n)\ncurl -s -o out.jpg";
+    "curl -s -o out.jpg\nhttps://cdn.example.com/a-SECRET456.jpg";
   const quotedLeak = 'curl -s -H "User-Agent: Mozilla (X; SECRET123)" -o out.jpg';
   const scopeOf = (c: string): string =>
     resolver.resolve({ command: c, allow_network: true } as never, "/tmp/ws").scope.value;
@@ -324,6 +327,50 @@ async function main(): Promise<void> {
       : !noLeak
         ? `scope.value 抄进了命令内容：裸 URL 形态=${bareScope}｜引号形态=${quotedScope}`
         : `scope.value 把真程序名也一起丢了（${bareScope}｜${quotedScope}）—— 审批与审计那一行会变成空壳`,
+  );
+
+  /**
+   * ── 审计串里只该有程序名（2026-10-16 验收批，真实运行逼出来的）──────────
+   *
+   * Run `run_348754def81c` 的审计串是 `programs:-H,-o,0f38…,do,done,i+1,d[i+5:i+7],import,PY,…`。
+   * 下面这条命令照着那次的形态写，五个噪声来源各占一处：
+   *   反斜杠续行（-H / -o）· here-doc 正文（import / print）· 数组字面量（资源 ID）·
+   *   算术展开（i+1）· 保留字（for / do / done）。
+   * 判据是**集合恰好相等** —— 多一项说明某条规则没生效，少一项说明剥过了头
+   * （一个恒返回空集的实现也能通过「不含噪声」那一半）。
+   * 五条规则各注入一次，各自翻红（只摘那一条，别的四条都还在）。
+   */
+  const realisticCommand = [
+    "set -e",
+    "mkdir -p imgs && cd imgs",
+    "ids=(",
+    "0f38222ee13ac25866531d23d4e316aa196213921",
+    "2f90c1c8981290189979e17253a07773196213921",
+    ")",
+    "i=0",
+    'for id in "${ids[@]}"; do',
+    "  i=$((i+1))",
+    "  curl -sS -L \\",
+    '    -H "Referer: https://www.bilibili.com/" \\',
+    '    -o "img_$i.jpg" \\',
+    '    "https://i0.hdslb.com/bfs/new_dyn/${id}.jpg" || continue',
+    "done",
+    "python3 - <<'PY'",
+    "import sys",
+    "d = open(sys.argv[1], 'rb').read()",
+    "print(d[i+5:i+7])",
+    "PY",
+    "ls | wc -l",
+  ].join("\n");
+  const realisticPrograms = analyzeCommand(realisticCommand).programs.join(",");
+  const expectedPrograms = ["cd", "continue", "curl", "ls", "mkdir", "python3", "set", "wc"].join(",");
+  fact("真实形态的命令 → programs", realisticPrograms);
+  fact("应当恰好是", expectedPrograms);
+  verdict(
+    realisticPrograms === expectedPrograms,
+    realisticPrograms === expectedPrograms
+      ? "续行、here-doc、数组字面量、算术展开、保留字五处噪声都不进审计串，真程序名一个不少"
+      : `审计串与真程序名集合不符：${realisticPrograms}`,
   );
 
   // ══════════════════════════════════════════════════ B 段：沙箱是真的

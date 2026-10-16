@@ -214,6 +214,24 @@ export interface ResumableRunFacts {
    * 一个跟它无关的字段 —— 那正是「两层互相替代」的开始。
    */
   artifactChecks?: ArtifactCheckFact[];
+  /**
+   * 工具陈述过的完成信号（ADR-0019 B），按发生顺序。
+   *
+   * 【定】必须进 RUN_META —— `persistFacts()` 每轮**整体重写**，漏写这个字段的后果
+   * 不是「这条没有」，而是跨进程 resume 之后整个 Run 的完成缺口被抹掉、
+   * 结算回到那个没有事实撑着的 SUCCESS（`lastSequence` / `resumeBranchCounts` 都在这里栽过）。
+   */
+  completionSignals?: CompletionSignalFact[];
+}
+
+/** 一条落了盘的完成信号：工具说了什么、是哪次调用说的。 */
+export interface CompletionSignalFact {
+  kind: "UNDECLARED_FILE_WRITE" | "HUMAN_STEP_NOT_DONE" | "HUMAN_STEP_DONE" | "MODEL_DECLARED_UNMET";
+  detail: string;
+  note?: string;
+  actionId: string;
+  toolName: string;
+  at: Timestamp;
 }
 
 /**

@@ -58,6 +58,7 @@ import {
   type HandoffChannel,
 } from "./mech/request-handoff.js";
 import { askUserSnapshot, executeAskUser, type QuestionChannel } from "./mech/ask-user.js";
+import { declareUnmetSnapshot, executeDeclareUnmet } from "./mech/declare-unmet.js";
 import { resolveToolPath } from "./fs/fs-common.js";
 import type { ResourceStorePort } from "@workagent/harness-runtime";
 
@@ -106,6 +107,7 @@ export {
   askUserSnapshot,
   type QuestionChannel,
 } from "./mech/ask-user.js";
+export { declareUnmetDefinition, declareUnmetSnapshot } from "./mech/declare-unmet.js";
 export { htmlToMarkdown, type HtmlToMarkdownResult } from "./net/html-to-markdown.js";
 export { listDirDefinition, listDirSnapshot } from "./fs/list-dir.js";
 export { readFileDefinition, readFileSnapshot } from "./fs/read-file.js";
@@ -168,6 +170,11 @@ export const commonMechanismTools: ToolSnapshot[] = [
    * 后者是「你去做」，它是「你来定」，见 `ask-user.ts` 文件头那张对照表。
    */
   askUserSnapshot,
+  /**
+   * ADR-0019 C（预注册实验过关后采纳）：收尾时结构化声明「用户明确要求的这一条没满足」。
+   * 它与上面两个都和「人」有关，但**不等任何人**；三者的 description 成对写。
+   */
+  declareUnmetSnapshot,
 ];
 
 export const commonTools: ToolSnapshot[] = [...commonSceneTools, ...commonMechanismTools];
@@ -337,6 +344,15 @@ export class CommonToolHandler implements ToolHandlerPort {
           },
           ctx,
           this.deps.question,
+        );
+      case "declare_unmet":
+        return executeDeclareUnmet(
+          {
+            requirement: String(input["requirement"] ?? ""),
+            status: String(input["status"] ?? ""),
+            why: String(input["why"] ?? ""),
+          },
+          ctx,
         );
       case "read_resource":
         return executeReadResource(
