@@ -2899,6 +2899,22 @@ function approvalCard(p) {
    * 那个点上的应用、窗口与控件。它也是独立的一支 —— GUI 动作无论 `--sandbox`
    * 是哪一档都不在沙箱内，并进 `a.command` 那支就会给出一句方向相反的保证。
    */
+  if (a.cloud !== undefined) {
+    // 云沙箱（ADR-0016）。【定】uploads 要显著画出来 —— 它是这次操作里
+    // 唯一不可撤销的部分（文件已经到了云上），而它在 scope.value 里只是个数字。
+    card.appendChild(el("div", { class: "kv", text: "即将在云沙箱里执行：" + a.cloud.summary }));
+    card.appendChild(el("pre", { text: a.cloud.command }));
+    if (a.cloud.uploads.length > 0) {
+      card.appendChild(
+        el("div", { class: "kv warn", text: "⚠️ 这些文件会离开本机：" + a.cloud.uploads.join("、") }),
+      );
+    }
+    if (a.cloud.downloads.length > 0) {
+      card.appendChild(el("div", { class: "kv", text: "取回到 workspace：" + a.cloud.downloads.join("、") }));
+    }
+    card.appendChild(el("div", { class: "kv", text: "出网：" + a.cloud.network }));
+    for (const b of a.cloud.boundaries) card.appendChild(el("div", { class: "muted", text: b }));
+  }
   if (a.gui !== undefined) {
     card.appendChild(el("div", { class: "kv", text: "即将操作屏幕：" + a.gui.summary }));
     if (a.gui.details.length > 0) card.appendChild(el("pre", { text: a.gui.details.join("\n") }));

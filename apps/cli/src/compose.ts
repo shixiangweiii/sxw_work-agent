@@ -66,6 +66,13 @@ import {
   type ComputerRuntime,
   type ComputerUseConfig,
 } from "@workagent/tools-computer";
+import {
+  CONFIG_FILENAME as CLOUD_SANDBOX_CONFIG_FILE,
+  createCloudSandbox,
+  isProvablyContained,
+  type CloudSandboxConfig,
+  type CloudSandboxRuntime,
+} from "@workagent/tools-cloud-sandbox";
 import { CompositeToolHandler, CompositeVerifier } from "./composite.js";
 import {
   RandomIdGenerator,
@@ -108,6 +115,16 @@ export const MCP_CONFIG_FILE = "mcp.json";
 /** `.workagent-state/mcp.json` 的绝对路径。`--mcp-config` 可覆盖。 */
 export function defaultMcpConfigPath(): string {
   return resolve(REPO_ROOT, DEFAULT_STATE_DIR, MCP_CONFIG_FILE);
+}
+
+/**
+ * `cloud-sandbox.json` 的默认位置（ADR-0016）。
+ *
+ * 【定】与 `mcp.json` 同一个目录，但理由不同 —— 它是**部署配置**
+ * （这台机器怎么接那个池子），与「正在做哪个项目」无关。见 config.ts。
+ */
+export function defaultCloudSandboxConfigPath(): string {
+  return resolve(REPO_ROOT, DEFAULT_STATE_DIR, CLOUD_SANDBOX_CONFIG_FILE);
 }
 
 /**
@@ -579,6 +596,33 @@ export function fullAccessWarning(
  */
 export function autoGrantVerdict(a: PreparedAction, workspaceRoot: string): AutoGrantVerdict {
   const e = a.resolvedEffect;
+  /**
+   * ── ADR-0017：可证明无外部副作用的云沙箱执行，自动放行 ────────────────
+   *
+   * 下面那条「EXECUTE 一律不放行」写于阶段 3.5，理由是**本机** shell 的副作用范围
+   * 说不清：能碰 workspace、能碰 $HOME、能联网、崩在中途「做没做」无从判断。
+   *
+   * `cloud_shell` 在断网 ＋ 没有上传时，这四条**一条都不成立**：沙箱是全新的、
+   * 用完即销毁、断网经平台回显核对过、durable effect 恰好是取回来的 outputs。
+   * 也就是说它对用户拥有的东西的影响，等价于一次 workspace 内的写 ——
+   * 而那本来就在放行范围里。
+   *
+   * 【定】三条是**合取**，各自都要有能单独触发它的判据（verify:cloud I 段）。
+   * 少了任何一个反向，「cloud_shell 一律放行」的实现都能让其余判据全绿 ——
+   * 本仓栽过四次的「判据落在守卫重叠区」。
+   *
+   * 【定】判定从**已经解析好的 effect** 上读，不在这里重新 parse 一遍入参。
+   * 第二份解析分叉时，「审批面说断网、实际开着网」不会有任何征兆。
+   */
+  if (e.effectType === "EXECUTE" && e.scope.kind === "REMOTE_SANDBOX") {
+    if (isProvablyContained(e)) return { ok: true };
+    return {
+      ok: false,
+      why: e.riskFacts.includes("DATA_LEAVES_HOST")
+        ? "云沙箱这次要联网或上传本地文件（数据会离开本机），不在自动放行范围内"
+        : "云沙箱这次的副作用范围证明不了，不在自动放行范围内",
+    };
+  }
   if (e.effectType === "EXECUTE") return { ok: false, why: "EXECUTE 类操作不在自动放行范围内" };
   if (e.reversibility === "IRREVERSIBLE") {
     return { ok: false, why: "IRREVERSIBLE（追加 / 删除这类找不回来的操作需要逐次确认）" };
@@ -833,6 +877,14 @@ export interface ComposeOptions {
    * 【定】开启时端点声明**必须**有 `vision`，否则启动即失败：没有 vision 的端点
    * 看不见截图，装上 GUI 工具等于让模型闭着眼睛点屏幕。
    */
+  /**
+   * 云沙箱执行（ADR-0016）。不传 = 不装 `cloud_shell`。
+   *
+   * 【定】配了但连不上要**启动失败**，不降级成「少一个工具」——
+   * 那种失败形态特别难查（同一句任务昨天能跑云沙箱今天不能，而 Run 照常跑完）。
+   * 连通性在入口校验（`main.ts` / service），这里只负责装配。
+   */
+  cloudSandbox?: { config: CloudSandboxConfig; fetchImpl?: typeof fetch };
   computer?: {
     config: ComputerUseConfig;
     driver: ComputerDriver;
@@ -894,6 +946,8 @@ export interface Composed {
    * 驱动不归它关 —— 入口给的驱动由入口关（service 跨 workspace 切换复用同一个）。
    */
   computer?: ComputerRuntime;
+  /** 云沙箱运行时（ADR-0016）。审批面用它描述「哪些文件上云、跑什么、有没有网」。 */
+  cloudSandbox?: CloudSandboxRuntime;
 }
 
 /**
@@ -1036,10 +1090,22 @@ export function compose(opts: ComposeOptions): Composed {
     });
     notices.push(...computer.notices);
   }
+  /**
+   * 云沙箱（ADR-0016）。追加在 computer use 之后，理由同上：不让入口自己拼工具表。
+   */
+  let cloudSandbox: CloudSandboxRuntime | undefined;
+  if (opts.cloudSandbox) {
+    cloudSandbox = createCloudSandbox({
+      config: opts.cloudSandbox.config,
+      ...(opts.cloudSandbox.fetchImpl ? { fetchImpl: opts.cloudSandbox.fetchImpl } : {}),
+    });
+    notices.push(...cloudSandbox.notices);
+  }
   const tools = [
     ...(opts.tools ?? DEFAULT_TOOLS),
     ...(opts.mcp?.snapshots ?? []),
     ...(computer?.snapshots ?? []),
+    ...(cloudSandbox?.snapshots ?? []),
   ];
   // 【定】保守档是默认值，且**只在这里**取一次 —— 下面三个消费者
   // （RunSpec 冻结、ShellEffectResolver、启动横幅）读的必须是同一个变量。
@@ -1109,6 +1175,8 @@ export function compose(opts: ComposeOptions): Composed {
         ...(opts.mcp ? [opts.mcp.handler] : []),
         // computer use（ADR-0013）。`screenshot` / `computer` 两个名字不与任何包重名。
         ...(computer ? [computer.handler] : []),
+        // 云沙箱（ADR-0016）。`cloud_shell` 不与任何包重名。
+        ...(cloudSandbox ? [cloudSandbox.handler] : []),
       ]),
     redaction: opts.portOverrides?.redaction ?? new SimpleRedaction(),
     /**
@@ -1139,6 +1207,8 @@ export function compose(opts: ComposeOptions): Composed {
           ...(opts.mcp?.resolvers ?? new Map()),
           // computer use 的两个受信任 Resolver（住在 tools/computer，边界 15）。
           ...(computer?.resolvers ?? new Map()),
+          // 云沙箱的受信任 Resolver（住在 tools/cloud-sandbox，边界 16）。
+          ...(cloudSandbox?.resolvers ?? new Map()),
         ]),
       ),
     verification:
@@ -1148,6 +1218,9 @@ export function compose(opts: ComposeOptions): Composed {
         new MicroCaseVerifier({ recoveryObservationEnabled: !opts.disableRecoveryObservation }),
         // 如实 SKIPPED，不冒充核实过（见 ComputerVerifier）。
         ...(computer ? [computer.verifier] : []),
+        // 云沙箱：verify 一律 SKIPPED，但 observePre 按**本次调用开没开网**
+        // 决定能不能观察（决 6：分支判据是 Action 级事实）。见 CloudSandboxVerifier。
+        ...(cloudSandbox ? [cloudSandbox.verifier] : []),
       ]),
     clock,
     ids,
@@ -1277,6 +1350,7 @@ export function compose(opts: ComposeOptions): Composed {
     makeRunSpec,
     notices,
     ...(computer ? { computer } : {}),
+    ...(cloudSandbox ? { cloudSandbox } : {}),
   };
 }
 

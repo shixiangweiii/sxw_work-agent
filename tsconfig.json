@@ -16,7 +16,9 @@
       "@workagent/tools-mcp": ["tools/mcp/src/index.ts"],
       "@workagent/tools-mcp/*": ["tools/mcp/src/*"],
       "@workagent/tools-computer": ["tools/computer/src/index.ts"],
-      "@workagent/tools-computer/*": ["tools/computer/src/*"]
+      "@workagent/tools-computer/*": ["tools/computer/src/*"],
+      "@workagent/tools-cloud-sandbox": ["tools/cloud-sandbox/src/index.ts"],
+      "@workagent/tools-cloud-sandbox/*": ["tools/cloud-sandbox/src/*"]
     }
   },
   "include": [

@@ -33,6 +33,7 @@ import type {
 } from "@workagent/harness-runtime";
 import type { HandoffChannel, QuestionChannel } from "@workagent/tools-common";
 import type { ComputerApprovalView } from "@workagent/tools-computer";
+import { describeCloudShellForApproval } from "@workagent/tools-cloud-sandbox";
 import { stripUnsafeDisplayChars } from "../../cli/src/compose.js";
 import type { ApprovalMode } from "../../cli/src/compose.js";
 import type { UiPending } from "./api-types.js";
@@ -298,6 +299,34 @@ export class PendingHub {
                   details: (gui?.details ?? []).map((l) => stripUnsafeDisplayChars(l)),
                 },
               }
+            : {}),
+          /**
+           * 云沙箱里的一次执行（ADR-0016）。**与 CLI 的 REMOTE_SANDBOX 分支是
+           * 同一份内容的两处**（`describeCloudShellForApproval` 唯一给出），必须一起改。
+           *
+           * 【定】不复用 `PROCESS` 那一支 —— 它会说「只能写 workspace 与 $TMPDIR」，
+           * 对一台云上的 microVM 是方向相反的保证。
+           *
+           * 【定】人在这一刻最需要看见的是 `uploads`：那是这次操作里**唯一不可撤销**
+           * 的部分（文件已经到了云上），而它在 scope.value 里只是一个数字。
+           */
+          ...(e.scope.kind === "REMOTE_SANDBOX"
+            ? (() => {
+                const v = describeCloudShellForApproval(action);
+                return v
+                  ? {
+                      cloud: {
+                        summary: stripUnsafeDisplayChars(v.summary),
+                        // 命令**全文**，不截断 —— 批准的就是这一条
+                        command: stripUnsafeDisplayChars(v.command),
+                        uploads: v.uploads.map((x) => stripUnsafeDisplayChars(x)),
+                        downloads: v.downloads.map((x) => stripUnsafeDisplayChars(x)),
+                        network: stripUnsafeDisplayChars(v.network),
+                        boundaries: v.boundaries.map((x) => stripUnsafeDisplayChars(x)),
+                      },
+                    }
+                  : {};
+              })()
             : {}),
         },
       };

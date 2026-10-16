@@ -322,6 +322,29 @@ export const BOUNDARIES: Boundary[] = [
     paths: ["packages", "adapters"],
     allowed: [],
   },
+  {
+    /**
+     * ★ADR-0016：**云沙箱的借用客户端不得进 Runtime 与适配器。**
+     *
+     * 与边界 12（MCP）同构，诱惑形态一字不差：**它不需要 import 任何工具包**。
+     * 把 `PoolClient` 搬进 `packages/harness-runtime/src/ports/` 叫一个
+     * 「SandboxPort」看着天经地义 —— 那里本来就叫 Port，而 Runtime 里确实
+     * 已经有十几个 Port。搬进去之后 Runtime 就认识了「借用」「归还」「出网策略」，
+     * 而边界 4 / 6 / 7 / 12 **一条都不会响**。
+     *
+     * 【定】Runtime 侧允许存在的只有 `TrustedEffectResolver` 这个类型
+     * （`CloudShellEffectResolver` 实现它，住在 `tools/cloud-sandbox/`）——
+     * 与 `ShellEffectResolver`、`McpEffectResolver` 的处置完全一致。
+     *
+     * 射程如实写明：它抓的是本仓云沙箱域的**名字**。换个名字重写一遍它不会命中
+     * —— 与第 13 / 15 条一样，把盲区写下来，不扩成噪音模式。
+     */
+    id: "16",
+    desc: "★ADR-0016：云沙箱借用客户端不得进 Runtime / 适配器",
+    pattern: "PoolClient|cloud_shell|v1/leases|lease_id|CloudShellHandler|tools-cloud-sandbox",
+    paths: ["packages", "adapters"],
+    allowed: [],
+  },
 ];
 
 /**

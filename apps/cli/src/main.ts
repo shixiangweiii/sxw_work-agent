@@ -45,11 +45,17 @@ import {
   type ComputerUseConfig,
 } from "@workagent/tools-computer";
 import {
+  describeCloudShellForApproval,
+  loadCloudSandboxConfig,
+  renderCloudShellApproval,
+} from "@workagent/tools-cloud-sandbox";
+import {
   autoGrantVerdict,
   BUDGET_VALUE_FLAGS,
   budgetFlagHelp,
   compose,
   DEFAULT_STATE_DIR,
+  defaultCloudSandboxConfigPath,
   defaultMcpConfigPath,
   describeModes,
   fullAccessWarning,
@@ -124,6 +130,14 @@ interface Args {
    */
   mcpConfig: string;
   /**
+   * `cloud-sandbox.json` 的路径（ADR-0016）。默认 `.workagent-state/cloud-sandbox.json`。
+   *
+   * 【定】文件不存在不是错误（那表示这台机器没接池子，`cloud_shell` 就不装）；
+   * 文件存在但内容不对**是**错误 —— 一个被静默忽略的配置与一个生效的配置，
+   * 在用户那里完全不可区分。
+   */
+  cloudSandboxConfig: string;
+  /**
    * 预算限额覆盖，按 axis id（`{ turns: "40" }`）。
    *
    * 起因是实测 Run `run_6c3fec671ceb`：八条轴里**只有 `turns` 撞了墙**
@@ -158,7 +172,7 @@ interface Args {
  */
 const VALUE_FLAGS = [
   "task", "workspace", "trace", "db", "resume", "recovery-decision", "recovery-note",
-  "endpoint", "mcp-config", "approval", "sandbox", "computer", "computer-apps",
+  "endpoint", "mcp-config", "cloud-sandbox-config", "approval", "sandbox", "computer", "computer-apps",
   /**
    * 八条预算轴（`--max-turns` …）。
    *
@@ -220,14 +234,14 @@ function assertModeArgs(argv: string[], mode: Mode): void {
     list: [...common, "list-runs"],
     start: [
       ...common,
-      "task", "trace", "no-trace", "endpoint", "mcp-config", "approval", "sandbox",
+      "task", "trace", "no-trace", "endpoint", "mcp-config", "cloud-sandbox-config", "approval", "sandbox",
       "computer", "computer-apps", "computer-allow-browsers",
       ...BUDGET_VALUE_FLAGS,
     ],
     resume: [
       ...common,
       "resume", "trace", "no-trace", "recovery-decision", "recovery-note",
-      "endpoint", "mcp-config", "approval", "sandbox", "computer", "computer-apps", "computer-allow-browsers",
+      "endpoint", "mcp-config", "cloud-sandbox-config", "approval", "sandbox", "computer", "computer-apps", "computer-allow-browsers",
     ],
   };
   const ignored = [...supplied].filter((name) => !allowed[mode].includes(name));
@@ -293,6 +307,7 @@ function parseArgs(argv: string[]): Args {
     recoveryNote: get("recovery-note"),
     endpoint,
     mcpConfig: get("mcp-config") ?? defaultMcpConfigPath(),
+    cloudSandboxConfig: get("cloud-sandbox-config") ?? defaultCloudSandboxConfigPath(),
     budgets: parseBudgetFlags(argv),
     computer: parseComputerFlags(get("computer"), get("computer-apps"), argv.includes("--computer-allow-browsers")),
   };
@@ -508,6 +523,32 @@ function interactiveApproval(
         `  \x1b[31mGUI 动作直接作用在这台机器上，不在沙箱内\x1b[0m —— ` +
           `执行前还会复核目标窗口与画面，变了就不点。`,
       );
+    }
+
+    /**
+     * ── REMOTE_SANDBOX：云沙箱（ADR-0016）─────────────────────────────────
+     *
+     * 【定】必须有自己的一支，不能并进 `PROCESS`。那一支是 `run_shell` 专属的，
+     * 会打印「沙箱：只能写 workspace 与本次调用的 $TMPDIR」—— 对一台云上的
+     * microVM 来说那是一句**方向相反**的保证（它没有 workspace，也没有那个 $TMPDIR）。
+     * MCP 那批（EXTERNAL_TOOL）踩过同一个坑。
+     *
+     * 【定】人在这一刻最需要知道的是**哪些本地文件会离开本机** ——
+     * 那是这次操作里唯一不可撤销的部分，而它在 `scope.value` 里只是一个数字。
+     * 与 Web 审批卡是同一份内容的两处（`describeCloudShellForApproval` 唯一给出），
+     * 必须一起改。
+     */
+    if (e.scope.kind === "REMOTE_SANDBOX") {
+      const view = describeCloudShellForApproval(a);
+      if (view) {
+        console.log(`\n  \x1b[33m即将在云沙箱里执行\x1b[0m：${forTerminal(view.summary)}`);
+        console.log(forTerminal(renderCloudShellApproval(view)));
+        if (view.uploads.length > 0) {
+          console.log(
+            `  \x1b[31m这些文件会离开本机\x1b[0m（即使命令断网，文件本身也已经到了云上）。`,
+          );
+        }
+      }
     }
 
     /**
@@ -774,6 +815,15 @@ async function main(): Promise<void> {
     workspaceRoot: args.workspace,
   });
   /**
+   * 云沙箱（ADR-0016）。文件不存在 = 这台机器没接池子，`cloud_shell` 就不装；
+   * 文件存在但内容不对 = 启动失败（`loadCloudSandboxConfig` 抛）。
+   *
+   * ⚠️ 这里**只读配置、不探连通性**。连不上要等到第一次调用才会报
+   * `TOOL_CLOUD_POOL_ERROR` —— 代价如实记：它比「启动就失败」晚，
+   * 但探一次活要么拖慢每条命令的启动，要么在池子刚好重启时误判。
+   */
+  const cloudSandboxConfig = loadCloudSandboxConfig(args.cloudSandboxConfig);
+  /**
    * ⚠️ CLI 入口：MCP 进程随这条命令一起结束。浏览器关掉、登录态没了，
    * 下一个 Run 要重新登录。要跨 Run 保留请用 `npm run ui`。
    */
@@ -816,6 +866,7 @@ async function main(): Promise<void> {
         async (a) => guiDescribe?.(a),
       ),
       ...(computerDriver ? { computer: { config: args.computer, driver: computerDriver } } : {}),
+      ...(cloudSandboxConfig ? { cloudSandbox: { config: cloudSandboxConfig } } : {}),
       // ADR-0012：第二条轴。冻结进 RunSpec 的就是这个值。
       executionPrivilege: args.sandbox,
       trace,

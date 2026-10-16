@@ -41,7 +41,17 @@ export interface EffectScope {
    * 目标窗口要核对），也不能并进 `PROCESS`（那一支承诺沙箱，而 GUI 动作在别的
    * 进程里生效，沙箱对它不成立）。审批面要展示的是「点哪个应用的哪个控件」。
    */
-  kind: "FILE" | "DIRECTORY" | "URL" | "PROCESS" | "EXTERNAL_TOOL" | "GUI" | "NONE";
+  /**
+   * `REMOTE_SANDBOX` 是 ADR-0016 加的（cloud_shell）。
+   *
+   * 【定】不复用 `PROCESS`：那一支是 `run_shell` 专属的，审批面在那里打印
+   * 「沙箱：只能写 workspace 与本次调用的 $TMPDIR」—— 对一台云上的 microVM
+   * 来说那是一句**方向相反**的保证（它没有 workspace，也没有那个 $TMPDIR）。
+   * 也不复用 `EXTERNAL_TOOL`：那一支的前提是「Atlas 不解析参数」，
+   * 而这里要解析 —— inputs 要过读黑名单、outputs 要判边界。
+   * 审批面要展示的是「哪些东西上云、跑什么、哪些东西回来、有没有网」。
+   */
+  kind: "FILE" | "DIRECTORY" | "URL" | "PROCESS" | "EXTERNAL_TOOL" | "GUI" | "REMOTE_SANDBOX" | "NONE";
   /** 规范化语义对象，不以自由文本作为授权边界。 */
   value: string;
 }

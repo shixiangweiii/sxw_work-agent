@@ -362,6 +362,21 @@ export interface UiPending {
      * 卡片上必须说出来，不能并进带着沙箱保证的 `command` 那一支。
      */
     gui?: { summary: string; details: string[] };
+    /**
+     * REMOTE_SANDBOX scope（云沙箱执行，ADR-0016）。
+     *
+     * 【定】`uploads` 是这张卡上**唯一不可撤销**的那部分（文件已经到了云上），
+     * 它必须单独成一项，不能混进 boundaries 的散文里 —— 界面要能把它显著地画出来。
+     */
+    cloud?: {
+      summary: string;
+      /** 命令**全文**，不截断。批准的就是这一条。 */
+      command: string;
+      uploads: string[];
+      downloads: string[];
+      network: string;
+      boundaries: string[];
+    };
     /** 自动放行档位下为什么没放行。 */
     why?: string;
   };
