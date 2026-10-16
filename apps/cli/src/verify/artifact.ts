@@ -55,7 +55,7 @@ import {
   type ToolExecutionOutcome,
   type ToolHandlerPort,
 } from "@workagent/harness-runtime";
-import { CommonToolHandler, isSandboxAvailable } from "@workagent/tools-common";
+import { CommonToolHandler, artifactKindOf, isSandboxAvailable } from "@workagent/tools-common";
 import { compose } from "../compose.js";
 import {
   ScriptedModelPort,
@@ -268,6 +268,48 @@ async function main(): Promise<void> {
   await sectionBinaryArtifacts();
   await sectionArtifactIdentity();
   await sectionTimeoutKeepsArtifact();
+  sectionZipContainerKinds();
+}
+
+/**
+ * H5：OOXML / ODF 这类「本体就是 zip」的扩展名必须判成 `zip`。
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ * 真实任务跑出来的（2026-10-16）：模型在云沙箱里用 openpyxl 产出了一个
+ * 完全合法的 `sales.xlsx`（9 个 OOXML 条目、沙箱内回读校验通过、本地
+ * 解压结构完整），而 `artifactKindOf` 把 `.xlsx` 判成 `text` →
+ * 编码检查报「文本里含 NUL 字节」→ 产物判坏 → **整个 Run 结算 FAILED**。
+ * **一次正确的交付被判成失败。**
+ *
+ * 【定】判据要**三向**，因为这张表有三个方向都能出错：
+ *   ① zip 容器判成 text   → 合法文件必然翻红（这一次）；
+ *   ② zip 容器判成 binary → 退回 R1 修掉的那个：坏文件只剩 hash、静默通过；
+ *   ③ 认不出的扩展名判成 binary → 同样是 R1 那个方向。
+ * 少了②③，一个「把所有不认识的都判成 binary」的实现能让①绿。
+ * ══════════════════════════════════════════════════════════════════════
+ */
+function sectionZipContainerKinds(): void {
+  section("H5. OOXML / ODF 是 zip 容器，不是 text、也不是 binary");
+  const kinds = Object.fromEntries(
+    ["sales.xlsx", "a.docx", "a.pptx", "a.odt", "a.whl", "out.zip", "a.json", "a.png", "notes.md", "x.weirdext"].map(
+      (p) => [p, artifactKindOf(p)],
+    ),
+  );
+  for (const [k, v] of Object.entries(kinds)) fact(k, v);
+  verdict(
+    kinds["sales.xlsx"] === "zip" && kinds["a.docx"] === "zip" && kinds["a.pptx"] === "zip" && kinds["a.odt"] === "zip",
+    "OOXML / ODF 判成 zip —— 它们本体就是 zip，这样跑的是 PK 魔数 ＋ EOCD 的结构检查。" +
+      "判成 text 的后果是实测过的：一个完全合法的 xlsx 让整个 Run 结算 FAILED",
+  );
+  verdict(
+    kinds["a.png"] === "binary" && kinds["out.zip"] === "zip" && kinds["a.json"] === "json",
+    "既有的三类一个没动（png→binary、zip→zip、json→json）—— 这条配对挡住「顺手把表改乱」",
+  );
+  verdict(
+    kinds["notes.md"] === "text" && kinds["x.weirdext"] === "text",
+    "认不出的扩展名仍然落 text（在编码检查上**翻红**，看得见），" +
+      "**不退回** binary（只剩 hash、静默通过）—— 那正是 ADR-0010 的 R1 修掉的方向",
+  );
 }
 
 /**

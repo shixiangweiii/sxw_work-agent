@@ -157,11 +157,39 @@ const BINARY_MAGIC: Record<string, MagicRule[]> = {
   ],
 };
 
+/**
+ * 「本体就是一个 zip」的扩展名。【定】它们归 `zip`，**不归 text、也不归 binary**。
+ *
+ * ── 这条是真实任务跑出来的（2026-10-16）─────────────────────────────────
+ *
+ * 模型在云沙箱里用 openpyxl 产出了一个完全合法的 `sales.xlsx`（9 个 OOXML 条目、
+ * 回读校验通过），而 `artifactKindOf` 把 `.xlsx` 判成 `text` → 编码检查报
+ * 「文本里含 NUL 字节」→ 产物判坏 → **整个 Run 结算 FAILED**。
+ * 一次正确的交付被判成失败。
+ *
+ * 【定】它与 ADR-0010 的 R1 是**同一个表的两个方向**，都不能退回去：
+ *   落 binary → 只剩 hash，坏文件静默通过（R1 修掉的那个）；
+ *   落 text   → 合法的二进制容器必然翻红（这一次）；
+ *   落 zip    → 真的查 PK 魔数与 EOCD，**这才是它们本来的样子**。
+ *
+ * 判据在 `verify:artifact`。加扩展名前先确认它真的是 zip 容器 ——
+ * 猜错的方向是「把一个非 zip 判成 zip」，那会让结构检查永远报坏。
+ */
+const ZIP_CONTAINERS = new Set([
+  "zip",
+  // OOXML：Office 2007 之后的 xlsx / docx / pptx 都是 zip 包
+  "xlsx", "xlsm", "docx", "docm", "pptx", "pptm",
+  // ODF：LibreOffice / OpenOffice
+  "odt", "ods", "odp",
+  // 其余常见的 zip 容器
+  "jar", "war", "epub", "whl", "apk",
+]);
+
 export function artifactKindOf(path: string): string {
   const lower = path.toLowerCase();
   const ext = lower.includes(".") ? lower.slice(lower.lastIndexOf(".") + 1) : "";
   if (ext === "json") return "json";
-  if (ext === "zip") return "zip";
+  if (ZIP_CONTAINERS.has(ext)) return "zip";
   // 【定】有魔数才算 binary。见上面那段 —— 这两件事绑死是这次回归的处置本身。
   if (Object.prototype.hasOwnProperty.call(BINARY_MAGIC, ext)) return "binary";
   return "text";

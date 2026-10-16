@@ -78,8 +78,36 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > 处置是运行参数：`POOL_PAUSE_ENABLED=false`（归还即销毁，暂停本来就没收益）。
 > 实测关掉之后借用稳定在 0.4～2.6 秒。
 
-> ⚠️ **还没有的**：带 inputs 的断网调用要不要放行（要单独的 ADR 与它自己的证据）；
-> 11 个预装包够不够（实测里 scipy / jinja2 **基础镜像本来就有**，比预想的宽，但仍然没有系统证据）。
+> ### 【定】「包够不够用」量出来了，而且答案不是「11 个」
+>
+> 全量枚举：**基础镜像自带 105 个**（scipy、scikit-learn、seaborn、plotly、opencv、numba、
+> librosa、nltk、spacy、requests、httpx、pillow、PyYAML、dateutil、Jinja2、rich、typer…），
+> 加上模板新增的 6 个（openpyxl / bs4 / lxml / pypdf / tabulate / python-docx）＝ **111 个**。
+> 我原来说的「11 个预装包」里有 5 个镜像本来就有 —— **预装一个已有的包是白费**。
+>
+> 确定性：`probe_template_determinism.py` 跑 6 次，**6/6 一致**，六个新增包每台都在。
+> 四类真实任务（CSV 统计、scipy 回归、jinja2 渲染、CSV→xlsx）**没有一个缺包**。
+>
+> ⚠️ **一次我自己的仪器错误，记下来因为它的形态是本仓反复记的那一种**：
+> 我一度以为「同一个模板产出的环境不一致」，真因是每个 shell 调用都是新进程，
+> `set -a; . ./.env` 把 `POOL_TEMPLATE` 设回了**基线模板**，而起池子时那句 export 不跨调用。
+> 于是扫描打在基线模板上、业务跑在预装模板上，两边都对，只是我以为它们是同一个。
+> **判据测的不是它声称在测的东西** —— 这次的变体是「测的不是它声称在测的那个对象」。
+
+> ### 【定】真实任务抓到的第三个缺陷：`.xlsx` / `.docx` 被判成 `text`，一次正确的交付被判失败
+>
+> 模型在云沙箱里用 openpyxl 产出了完全合法的 `sales.xlsx`（9 个 OOXML 条目、回读校验通过），
+> 而 `artifactKindOf(".xlsx")` 返回 **`text`** → 编码检查报「文本里含 NUL 字节」→
+> 产物判坏 → **整个 Run 结算 FAILED**、`deliveredArtifactIds` 为空。
+>
+> OOXML / ODF **本体就是 zip**。它与 ADR-0010 的 R1 是**同一张表的两个方向**：
+> 落 `binary` 只剩 hash、坏文件静默通过（R1 修掉的）；落 `text` 则合法文件必然翻红（这一次）；
+> 落 `zip` 才真的查 PK 魔数与 EOCD。新增 `ZIP_CONTAINERS`（xlsx/docx/pptx/odt/whl/jar/epub…）。
+> **这是既有缺陷，影响 `run_shell` 与 `write_file`，不只云沙箱。**
+> 判据在 `verify:artifact` H5 段，**三向**注入全红（退回 text、判成 binary、未知扩展名判 binary）。
+> 复跑同一道题：`kind=zip` → `zip-opens` 通过 → `outcome.kind = SUCCESS`。
+
+> ⚠️ **还没有的**：带 inputs 的断网调用要不要放行（要单独的 ADR 与它自己的证据）。
 
 ### ADR-0016（2026-10-16）：云沙箱执行 —— 一次借用一台、用完即销毁，依赖烤进模板
 
