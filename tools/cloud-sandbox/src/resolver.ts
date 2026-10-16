@@ -108,7 +108,10 @@ export class CloudShellEffectResolver implements TrustedEffectResolver {
  * 不查相同 —— 一个永远不可能单独触发的守卫是装饰，而本仓的纪律是
  * 「每道闸门都要有能单独触发它的判据」。边界归 handler，这里只回答「要不要人看」。
  */
-export function isProvablyContained(effect: ResolvedEffect): boolean {
+export function isProvablyContained(
+  effect: ResolvedEffect,
+  opts: { uploadsTrusted?: boolean } = {},
+): boolean {
   /**
    * ⚠️ 下面四道里有**两对是互相遮蔽**的，注入实测确认过（各自单独摘掉判据不红）：
    *
@@ -131,6 +134,17 @@ export function isProvablyContained(effect: ResolvedEffect): boolean {
   if (!effect.scope.value.startsWith(CLOUD_SCOPE_PREFIX)) return false;
   // 断网这一档在 resolver 里就是 `net=none`；认不出来的档位一律按「不是断网」处理
   if (!/(^|;)net=none(;|$)/.test(effect.scope.value.slice(CLOUD_SCOPE_PREFIX.length))) return false;
+  /**
+   * ADR-0018：部署者显式声明信任自己的池子时，断网调用的上传不再逐次询问。
+   *
+   * 【定】走到这里时 `net=none` 已经成立，所以「数据离开本机」只可能来自上传 ——
+   * 信任声明放开的**只有这一条**。开了网的调用在上面那道就已经返回 false 了，
+   * 信任声明管不到它（信任的对象是「我的池子」，而开了网的命令能把数据送到池子之外）。
+   *
+   * 顺带：这个模式下 `net=none` 成了唯一的闸门，ADR-0017 里它与
+   * `DATA_LEAVES_HOST` 互相遮蔽的那一对，在这里**变得可以单独触发**。
+   */
+  if (opts.uploadsTrusted === true) return true;
   // 上传即数据外发（resolver 里 uploads 与开网共用这个事实，断网也照记）
   return !effect.riskFacts.includes("DATA_LEAVES_HOST");
 }

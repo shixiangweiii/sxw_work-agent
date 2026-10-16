@@ -93,6 +93,57 @@ async function run(raw: Record<string, unknown>, root: string, opts: FakePoolOpt
   return { pool, outcome };
 }
 
+
+/**
+ * 真的起一次 Web 服务（`apps/workagent-service/src/main.ts`），收集它的启动横幅。
+ *
+ * 【定】必须起 **main.ts**，不能调 `startService()`：这条判据要抓的缺口就在
+ * main.ts 的配置加载里 —— 第一版只在 CLI 加载了 cloud-sandbox.json，
+ * `npm run ui` 根本没有 cloud_shell。调 startService 会跳过出事的那一跳
+ * （与 `read_blob.line_offset` 那次一字不差）。
+ *
+ * 【定】注册表 `.workagent-state/workspaces.json` 的位置写死、没有覆盖参数，
+ * 而服务启动会把 workspace 登记进去。仪器不得在被测系统之外留痕 ——
+ * 所以先备份、finally 里原样恢复。
+ */
+async function serviceBanner(args: string[]): Promise<string> {
+  const { spawn } = await import("node:child_process");
+  const { existsSync, readFileSync: rf, writeFileSync: wf, rmSync } = await import("node:fs");
+  const { resolve } = await import("node:path");
+  const registry = resolve(process.cwd(), ".workagent-state", "workspaces.json");
+  const backup = existsSync(registry) ? rf(registry) : undefined;
+  const child = spawn("npx", ["tsx", "apps/workagent-service/src/main.ts", ...args], {
+    cwd: process.cwd(),
+    stdio: ["ignore", "pipe", "pipe"],
+    env: process.env,
+  });
+  let out = "";
+  try {
+    await new Promise<void>((done) => {
+      const timer = setTimeout(done, 60_000);
+      const onData = (b: Buffer) => {
+        out += b.toString();
+        if (out.includes("Ctrl+C 停止") || out.includes("Error")) {
+          clearTimeout(timer);
+          done();
+        }
+      };
+      child.stdout.on("data", onData);
+      child.stderr.on("data", onData);
+      child.on("exit", () => {
+        clearTimeout(timer);
+        done();
+      });
+    });
+  } finally {
+    child.kill("SIGTERM");
+    await new Promise((r) => setTimeout(r, 800));
+    if (backup !== undefined) wf(registry, backup);
+    else if (existsSync(registry)) rmSync(registry);
+  }
+  return out;
+}
+
 async function main(): Promise<void> {
   banner(
     "verify:cloud —— 云沙箱执行（ADR-0016）",
@@ -453,6 +504,79 @@ async function main(): Promise<void> {
     isProvablyContained(offEffect) && !isProvablyContained(netEffect) && !isProvablyContained(upEffect),
     "判定收敛在 `isProvablyContained` 一份里（与产出这些事实的 resolver 在一起），" +
       "compose 只是调用它 —— 第二份解析分叉时，「审批面说断网、实际开着网」不会有任何征兆",
+  );
+
+  // ════════════════════════════════ J. 两个入口装的是同一份工具
+  section("J. CLI 与 Web 是同一套装配 —— 配了池子，两个入口都得有 cloud_shell");
+  const cfgFile = join(root, "cloud-sandbox.json");
+  writeFileSync(cfgFile, JSON.stringify({ baseUrl: "http://127.0.0.1:1" }));
+  const port = 18000 + Math.floor(Math.random() * 2000);
+  const common = ["--workspace", join(root, "svc-ws"), "--port", String(port), "--mcp-config", join(root, "no-mcp.json")];
+  const withCfg = await serviceBanner([...common, "--cloud-sandbox-config", cfgFile]);
+  const withoutCfg = await serviceBanner([
+    "--workspace", join(root, "svc-ws"), "--port", String(port + 1),
+    "--mcp-config", join(root, "no-mcp.json"), "--cloud-sandbox-config", join(root, "absent.json"),
+  ]);
+  const toolsLine = (txt: string) => (txt.match(/工具\s*:\s*(\d+)\s*个/) ?? [])[1];
+  fact("配了池子：工具数", toolsLine(withCfg) ?? "(没打出来)");
+  fact("没配：工具数", toolsLine(withoutCfg) ?? "(没打出来)");
+  fact("配了池子：横幅里有云沙箱提示", withCfg.includes("云沙箱已接入"));
+  verdict(
+    withCfg.includes("云沙箱已接入") &&
+      !withoutCfg.includes("云沙箱已接入") &&
+      Number(toolsLine(withCfg)) === Number(toolsLine(withoutCfg)) + 1,
+    "⚠️ 这一条是事后补上的缺口：第一版只在 CLI 加载了 cloud-sandbox.json，" +
+      "`npm run ui` 根本没有 cloud_shell —— 而 Web 审批卡已经写好了，画的是一个这个入口装不上的工具。" +
+      "判据**真的起 main.ts**（调 startService 会跳过出事的那一跳），并且成对：没配时不得出现",
+  );
+
+  // ════════════════════════════════ K. 显式信任声明（ADR-0018）
+  section("K. 带上传的断网调用：只有部署者显式声明信任才放行（ADR-0018）");
+  const upRaw = { command: "wc -l data.csv", inputs: "data.csv", outputs: "r.json" };
+  const netRaw = { command: "curl x", inputs: "data.csv", network: "pypi.org" };
+  const kUntrusted = autoGrantVerdict(actionFor(upRaw), root);
+  const kTrusted = autoGrantVerdict(actionFor(upRaw), root, { cloudUploadsTrusted: true });
+  const kTrustedNet = autoGrantVerdict(actionFor(netRaw), root, { cloudUploadsTrusted: true });
+  fact("未声明：断网 ＋ 上传", `${kUntrusted.ok} ${why(kUntrusted)}`);
+  fact("已声明：断网 ＋ 上传", `${kTrusted.ok}`);
+  fact("已声明：开了网", `${kTrustedNet.ok} ${why(kTrustedNet)}`);
+  verdict(
+    !kUntrusted.ok && kTrusted.ok && !kTrustedNet.ok,
+    "三向：未声明时 ADR-0017 的行为不变（不放行）；声明之后放行；**声明了也不放开出网** —— " +
+      "信任的对象是「我的池子」，开了网的命令能把数据送到池子之外。" +
+      "少了第三条，一个「信任即全放行」的实现能让前两条绿",
+  );
+  verdict(
+    why(kUntrusted).includes("trustUploadsToPool"),
+    "未放行时的理由里点名出路（trustUploadsToPool），而不是只说一句「不在范围内」",
+  );
+
+  const upEffect2 = new CloudShellEffectResolver().resolve(upRaw as never, root);
+  verdict(
+    upEffect2.riskFacts.includes("DATA_LEAVES_HOST") && upEffect2.dataMovement !== undefined,
+    "【定】事实表一个字不改：放行只动审批这一道，`DATA_LEAVES_HOST` 与 `dataMovement` 照记。" +
+      "放行了不等于没发生 —— 把它抹掉，等于让一次授权替事实作证",
+  );
+
+  const parseTrust = (v: unknown) => {
+    try {
+      return String(parseCloudSandboxConfig({ baseUrl: "http://x", trustUploadsToPool: v }, "t").trustUploadsToPool);
+    } catch (e) {
+      return `拒绝：${(e as Error).message.slice(0, 40)}`;
+    }
+  };
+  const tAbsent = String(parseCloudSandboxConfig({ baseUrl: "http://x" }, "t").trustUploadsToPool);
+  const tTrue = parseTrust(true);
+  const tStr = parseTrust("true");
+  const tOne = parseTrust(1);
+  fact("不写", tAbsent);
+  fact("true", tTrue);
+  fact('"true"（字符串）', tStr);
+  fact("1", tOne);
+  verdict(
+    tAbsent === "false" && tTrue === "true" && tStr.startsWith("拒绝") && tOne.startsWith("拒绝"),
+    "默认关；只接受真正的布尔。宽松解析的失败方向是「以为关着，其实开着」，而这个开关一开，" +
+      "workspace 里的文件就会在无人过问下上传到云上",
   );
 
   let configRejected = "";

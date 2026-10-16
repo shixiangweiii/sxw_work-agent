@@ -27,6 +27,13 @@ export interface CloudSandboxConfig {
   waitTimeoutMs: number;
   /** 普通 HTTP 请求超时（毫秒）。执行类请求另按命令超时放宽。 */
   requestTimeoutMs: number;
+  /**
+   * 部署者显式声明「我信任我自己的池子」（ADR-0018）。默认 false。
+   *
+   * 为 true 时，**断网**的 cloud_shell 即使带 inputs 也自动放行；开了网的照旧不放行。
+   * 事实表不变：DATA_LEAVES_HOST 与 dataMovement 照记 —— 放行了不等于没发生。
+   */
+  trustUploadsToPool: boolean;
 }
 
 export const DEFAULT_WAIT_TIMEOUT_MS = 120_000;
@@ -64,7 +71,7 @@ export function parseCloudSandboxConfig(obj: unknown, source: string): CloudSand
     throw new CloudSandboxConfigError(`云沙箱配置 ${source} 必须是一个对象`);
   }
   const o = obj as Record<string, unknown>;
-  const known = new Set(["baseUrl", "apiKey", "waitTimeoutMs", "requestTimeoutMs"]);
+  const known = new Set(["baseUrl", "apiKey", "waitTimeoutMs", "requestTimeoutMs", "trustUploadsToPool"]);
   const unknownKeys = Object.keys(o).filter((k) => !known.has(k));
   if (unknownKeys.length > 0) {
     // 【定】未知键报错而不是忽略：拼错的键看起来生效了、实际什么都没变
@@ -85,7 +92,25 @@ export function parseCloudSandboxConfig(obj: unknown, source: string): CloudSand
     ...(typeof o.apiKey === "string" && o.apiKey ? { apiKey: o.apiKey } : {}),
     waitTimeoutMs: positive(o.waitTimeoutMs, DEFAULT_WAIT_TIMEOUT_MS, "waitTimeoutMs", source),
     requestTimeoutMs: positive(o.requestTimeoutMs, DEFAULT_REQUEST_TIMEOUT_MS, "requestTimeoutMs", source),
+    trustUploadsToPool: strictBool(o.trustUploadsToPool, "trustUploadsToPool", source),
   };
+}
+
+/**
+ * 【定】只接受真正的布尔，不做宽松解析（`"true"` / `1` 一律拒）。
+ *
+ * 宽松解析的失败方向是「以为关着，其实开着」—— 而这个字段打开之后，
+ * workspace 里的文件会在无人过问下上传到云上。这一侧必须严。
+ */
+function strictBool(v: unknown, name: string, source: string): boolean {
+  if (v === undefined) return false;
+  if (typeof v !== "boolean") {
+    throw new CloudSandboxConfigError(
+      `云沙箱配置 ${source} 的 ${name} 必须是布尔 true / false（收到 ${JSON.stringify(v)}）。` +
+        `不做宽松解析：把 "true" 当真的失败方向是「以为关着，其实开着」。`,
+    );
+  }
+  return v;
 }
 
 function positive(v: unknown, dflt: number, name: string, source: string): number {

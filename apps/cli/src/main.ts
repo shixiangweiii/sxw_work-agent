@@ -51,6 +51,7 @@ import {
 } from "@workagent/tools-cloud-sandbox";
 import {
   autoGrantVerdict,
+  type AutoGrantOptions,
   BUDGET_VALUE_FLAGS,
   budgetFlagHelp,
   compose,
@@ -356,6 +357,8 @@ function interactiveApproval(
    * 晚绑定（decider 先于 compose 建出来），没开 computer use 时恒返回 undefined。
    */
   describeGui: (a: PreparedAction) => Promise<ComputerApprovalView | undefined>,
+  /** 部署配置里与审批相关的那几项（ADR-0018 的 trustUploadsToPool）。 */
+  autoGrantOpts: AutoGrantOptions = {},
 ): ApprovalDecider {
   /**
    * ── E-3：默认档位不再是「批准一切」────────────────────────────────────
@@ -402,7 +405,7 @@ function interactiveApproval(
    * 两个入口的闸门档位迟早不一致，而那种不一致在绿灯下看不出来：两边都会问，
    * 只是问的东西不一样。理由与判定内容都搬到了 `autoGrantVerdict` 的注释里。
    */
-  const autoGrant = (a: PreparedAction): AutoGrantVerdict => autoGrantVerdict(a, workspaceRoot);
+  const autoGrant = (a: PreparedAction): AutoGrantVerdict => autoGrantVerdict(a, workspaceRoot, autoGrantOpts);
 
   /**
    * 停下来问一句。
@@ -864,6 +867,8 @@ async function main(): Promise<void> {
         sigint.signal,
         stdin,
         async (a) => guiDescribe?.(a),
+        // ADR-0018：与 Web 入口读同一个字段（run-host.ts），两个入口的放行档位才一致
+        { cloudUploadsTrusted: cloudSandboxConfig?.trustUploadsToPool === true },
       ),
       ...(computerDriver ? { computer: { config: args.computer, driver: computerDriver } } : {}),
       ...(cloudSandboxConfig ? { cloudSandbox: { config: cloudSandboxConfig } } : {}),

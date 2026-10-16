@@ -126,6 +126,19 @@ export function createCloudSandbox(opts: CreateCloudSandboxOptions): CloudSandbo
     },
   ];
 
+  /**
+   * 【定】开了信任声明就**常驻**说出来（ADR-0018）。它让 workspace 里的文件
+   * 在无人过问下上传到云上 —— 一次对用户可见的边界让渡而不打印，等于没通知。
+   */
+  if (opts.config.trustUploadsToPool) {
+    notices.push({
+      text:
+        `⚠️ 已声明信任这个池子（trustUploadsToPool）：断网的 cloud_shell 即使上传 workspace 文件` +
+        `也**不再逐次询问**。读黑名单仍会挡住凭证类文件，但业务数据它不认识。` +
+        `开了网的调用照旧要问。`,
+    });
+  }
+
   return {
     snapshots: [cloudShellSnapshot],
     handler,

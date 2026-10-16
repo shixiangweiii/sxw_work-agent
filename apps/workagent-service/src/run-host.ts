@@ -107,6 +107,7 @@ export interface RunHostOptions {
     | "mcp"
     | "budgetOverrides"
     | "computer"
+    | "cloudSandbox"
   >;
 }
 
@@ -229,7 +230,11 @@ export class RunHost {
       executionPrivilege: opts.executionPrivilege ?? "SANDBOXED",
       // 【定】三条通道全部走浏览器，用的是与 CLI 同一批注入点（决 4）。
       approvalDecider: this.pendingHub.approvalDecider(
-        (a) => autoGrantVerdict(a, opts.workspaceRoot),
+        // ADR-0018：与 CLI 入口读同一个字段（main.ts），两个入口的放行档位才一致
+        (a) =>
+          autoGrantVerdict(a, opts.workspaceRoot, {
+            cloudUploadsTrusted: opts.composeOverrides?.cloudSandbox?.config.trustUploadsToPool === true,
+          }),
         () => this.approvalMode,
         (runId) => this.elevatedRuns.has(runId),
         (runId) => this.aborterFor(runId).signal,

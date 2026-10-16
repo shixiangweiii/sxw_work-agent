@@ -16,6 +16,38 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 当前状态
 
+### ADR-0018（2026-10-16）：带上传的断网调用，经部署配置里的显式信任声明才放行 ＋ Web 入口补接线
+
+依据 [ADR-0018](sxw_aicoding/ADR/历史归档/0018-带上传的断网云沙箱调用经显式信任声明放行.md)。
+`verify:cloud` **27 → 32 条**，19 条注入全部翻红。
+
+> ### 【定】证明不了的事不由 Atlas 判定，交给能回答它的人
+>
+> ADR-0017 留下的待定：带 inputs 的断网调用要不要放行。剩下的风险落在「池子与云账号没被攻破」——
+> **Atlas 证明不了**，但部署者完全可知（池子是他搭的、账号是他的）。
+> 所以 `cloud-sandbox.json` 新增 `trustUploadsToPool`（**默认 false**），与 ADR-0012 对
+> `UNRESTRICTED` 的论证一字不差：一次显式的、有名字的、写在配置里的范围授权，不是单次审批。
+>
+> 三条边界各有判据与注入：**只放开上传、不放开出网**（信任的对象是「我的池子」）；
+> **事实表一字不改**（`DATA_LEAVES_HOST` 与 `dataMovement` 照记，放行了不等于没发生）；
+> **只认真布尔**（`"true"` 被拒 —— 宽松解析的失败方向是「以为关着，其实开着」）。
+> 审批侧配置，不进 RunSpec、不进工具版本。开了就常驻打一条提示。
+
+> ### 【定】live 实测冒出来的一条：不开信任时，模型会**悄悄降级成心算**
+>
+> 同一道带 inputs 的题（`--approval default`、非 TTY）：未声明时 `cloud_shell` 被拒三次，
+> 模型随后**退回 read_file ＋ 心算 ＋ write_file**，结果碰巧对，但不是真实代码算的 ——
+> 而那恰恰是要云沙箱的理由。规模一大就会给出错数，且 Run 照样 `SUCCESS`（S5-7 那条老账）。
+> 这说明默认关的真实代价不是「多问一次」，而是「没人应答时模型换一条不那么可信的路」。如实登记，不在这里修。
+
+> ### 【定】又一次「两个入口工具集不一致」，而且是我自己在同一批里造的
+>
+> ADR-0016 第一版只在 CLI 加载了 `cloud-sandbox.json` —— `npm run ui` **根本没有 `cloud_shell`**，
+> 而 Web 审批卡（REMOTE_SANDBOX 分支）已经写好了，画的是一个这个入口装不上的工具。
+> 处置：service 走同一条 `composeOverrides` 路径加载；`verify:cloud` J 段**真的起 `main.ts`**
+> （调 `startService()` 会跳过出事的那一跳），配了池子工具数 16、没配 15，注入实测翻红。
+> 注册表位置写死、无覆盖参数，判据先备份、finally 里恢复 —— 仪器不在被测系统之外留痕。
+
 ### ADR-0017（2026-10-16）：可证明无外部副作用的云沙箱执行，自动放行 ＋ 真实端点实跑的三条发现
 
 依据 [ADR-0017](sxw_aicoding/ADR/历史归档/0017-可证明无外部副作用的云沙箱执行自动放行.md)。
@@ -107,7 +139,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > 判据在 `verify:artifact` H5 段，**三向**注入全红（退回 text、判成 binary、未知扩展名判 binary）。
 > 复跑同一道题：`kind=zip` → `zip-opens` 通过 → `outcome.kind = SUCCESS`。
 
-> ⚠️ **还没有的**：带 inputs 的断网调用要不要放行（要单独的 ADR 与它自己的证据）。
+> ✅ 带 inputs 的断网调用要不要放行 —— 已由 ADR-0018 回答（显式信任声明，默认关）。
 
 ### ADR-0016（2026-10-16）：云沙箱执行 —— 一次借用一台、用完即销毁，依赖烤进模板
 

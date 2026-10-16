@@ -20,9 +20,11 @@ import {
   parseSandboxArg,
   REPO_ROOT,
   DEFAULT_STATE_DIR,
+  defaultCloudSandboxConfigPath,
   defaultMcpConfigPath,
 } from "../../cli/src/compose.js";
 import { connectMcpServers } from "@workagent/tools-mcp";
+import { loadCloudSandboxConfig } from "@workagent/tools-cloud-sandbox";
 import {
   HelperDriver,
   describeAllowlist,
@@ -56,7 +58,7 @@ function arg(argv: string[], name: string): string | undefined {
  * ══════════════════════════════════════════════════════════════════════
  */
 const VALUE_FLAGS = [
-  "workspace", "port", "endpoint", "mcp-config", "approval", "sandbox",
+  "workspace", "port", "endpoint", "mcp-config", "cloud-sandbox-config", "approval", "sandbox",
   "computer", "computer-apps",
   // 【定】名字表只从 compose 来 —— 这个文件与 `apps/cli/src/main.ts` 各有一份
   // VALUE_FLAGS（既有的重复）。手打的后果是一个入口认得、另一个报"不认识的参数"。
@@ -157,6 +159,27 @@ async function main(): Promise<void> {
   });
 
   /**
+   * ── 云沙箱（ADR-0016）：与 CLI **同一份配置、同一条规则** ─────────────────
+   *
+   * 【定】这一段是后补的，而缺它的后果正是本仓反复警告的那一种：
+   * 第一版只在 CLI 加载了 `cloud-sandbox.json`，于是 `npm run dev` 有 `cloud_shell`、
+   * `npm run ui` 没有 —— 两个入口的工具集不一致，而两边都是绿的。
+   * 更糟的是 Web 审批卡（human-channels 的 REMOTE_SANDBOX 分支）已经写好了，
+   * 画的是一个**这个入口根本装不上**的工具。
+   *
+   * 文件不存在 = 没接池子，工具不装；内容不对 = 启动失败（与 CLI 一致）。
+   */
+  let cloudSandboxConfig;
+  try {
+    cloudSandboxConfig = loadCloudSandboxConfig(
+      arg(argv, "cloud-sandbox-config") ?? defaultCloudSandboxConfigPath(),
+    );
+  } catch (err) {
+    await mcp.close();
+    throw err;
+  }
+
+  /**
    * ── computer use（ADR-0013）：助手与 MCP 同一条生命周期 ─────────────────
    *
    * 【定】驱动建一次、跨 workspace 切换复用。切目录会重新 `compose()`，
@@ -193,6 +216,7 @@ async function main(): Promise<void> {
         mcp,
         budgetOverrides: parseBudgetFlags(argv),
         ...(computerDriver ? { computer: { config: computerConfig, driver: computerDriver } } : {}),
+        ...(cloudSandboxConfig ? { cloudSandbox: { config: cloudSandboxConfig } } : {}),
       },
       /**
        * 【定】注册表放在 `.workagent-state/` 而不是某个 workspace 里面。

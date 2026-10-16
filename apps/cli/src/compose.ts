@@ -594,7 +594,19 @@ export function fullAccessWarning(
  * 而全程没有任何人拒绝过任何东西。
  * ══════════════════════════════════════════════════════════════════════
  */
-export function autoGrantVerdict(a: PreparedAction, workspaceRoot: string): AutoGrantVerdict {
+export interface AutoGrantOptions {
+  /**
+   * 部署配置里的 `trustUploadsToPool`（ADR-0018）。审批侧的配置，与 `--approval`
+   * 同一条轴 —— 不进 RunSpec、不进工具版本（工具行为没变，变的只是要不要问人）。
+   */
+  cloudUploadsTrusted?: boolean;
+}
+
+export function autoGrantVerdict(
+  a: PreparedAction,
+  workspaceRoot: string,
+  opts: AutoGrantOptions = {},
+): AutoGrantVerdict {
   const e = a.resolvedEffect;
   /**
    * ── ADR-0017：可证明无外部副作用的云沙箱执行，自动放行 ────────────────
@@ -615,12 +627,15 @@ export function autoGrantVerdict(a: PreparedAction, workspaceRoot: string): Auto
    * 第二份解析分叉时，「审批面说断网、实际开着网」不会有任何征兆。
    */
   if (e.effectType === "EXECUTE" && e.scope.kind === "REMOTE_SANDBOX") {
-    if (isProvablyContained(e)) return { ok: true };
+    if (isProvablyContained(e, { uploadsTrusted: opts.cloudUploadsTrusted === true })) return { ok: true };
     return {
       ok: false,
-      why: e.riskFacts.includes("DATA_LEAVES_HOST")
-        ? "云沙箱这次要联网或上传本地文件（数据会离开本机），不在自动放行范围内"
-        : "云沙箱这次的副作用范围证明不了，不在自动放行范围内",
+      why: !e.riskFacts.includes("DATA_LEAVES_HOST")
+        ? "云沙箱这次的副作用范围证明不了，不在自动放行范围内"
+        : opts.cloudUploadsTrusted
+          ? "云沙箱这次开了网（信任声明只放开上传、不放开出网），不在自动放行范围内"
+          : "云沙箱这次要联网或上传本地文件（数据会离开本机），不在自动放行范围内；" +
+            "若信任自己的池子，可在 cloud-sandbox.json 里设 trustUploadsToPool: true（ADR-0018）",
     };
   }
   if (e.effectType === "EXECUTE") return { ok: false, why: "EXECUTE 类操作不在自动放行范围内" };
